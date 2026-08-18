@@ -1,0 +1,28 @@
+[workspace]
+members = [
+    "crates/edgemouse-agent",
+    "crates/edgemouse-core",
+    "crates/edgemouse-platform-macos",
+    "crates/edgemouse-platform-windows",
+    "crates/edgemouse-protocol",
+    "crates/edgemouse-transport",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+authors = ["EdgeMouse contributors"]
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

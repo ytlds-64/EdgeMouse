@@ -1,0 +1,247 @@
+mod config;
+mod network;
+mod platform;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod runtime;
+
+use edgemouse_core::{
+    Edge, Effect, NodeId, PhysicalMouseEvent, Point, Rect, Screen, ScreenId, Session,
+    SessionConfig, Topology, Vector,
+};
+use edgemouse_protocol::{WireMessage, encode_frame};
+use std::error::Error;
+use std::fs;
+use std::path::Path;
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("edgemouse: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<(), Box<dyn Error>> {
+    let mut arguments = std::env::args().skip(1);
+    match arguments.next().as_deref() {
+        Some("doctor") => doctor(),
+        Some("demo") => demo(),
+        Some("identity") => {
+            let directory = arguments
+                .next()
+                .ok_or("identity requires an output directory")?;
+            ensure_no_extra_arguments(arguments)?;
+            generate_identity(Path::new(&directory))
+        }
+        Some("check-config") => {
+            let config = arguments
+                .next()
+                .ok_or("check-config requires a TOML config path")?;
+            ensure_no_extra_arguments(arguments)?;
+            check_config(Path::new(&config))
+        }
+        Some("run") => {
+            let config = arguments.next().ok_or("run requires a TOML config path")?;
+            ensure_no_extra_arguments(arguments)?;
+            run_agent(Path::new(&config))
+        }
+        Some("version" | "--version" | "-V") => {
+            println!("edgemouse {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        Some("help" | "--help" | "-h") | None => {
+            usage();
+            Ok(())
+        }
+        Some(command) => Err(format!("unknown command `{command}`; run `edgemouse help`").into()),
+    }
+}
+
+fn usage() {
+    println!(
+        "EdgeMouse MVP\n\nUSAGE:\n    edgemouse <COMMAND>\n\nCOMMANDS:\n    doctor                  Check platform APIs and permissions\n    identity <DIRECTORY>    Generate this node's certificate and private key\n    check-config <CONFIG>   Validate configuration and certificate pairing\n    run <CONFIG>            Connect to the trusted peer and enable edge switching\n    demo                    Simulate a Windows-to-macOS edge transition\n    version                 Print the build version\n    help                    Show this help"
+    );
+}
+
+fn check_config(path: &Path) -> Result<(), Box<dyn Error>> {
+    let config = config::LoadedConfig::load(path)?;
+    println!("Configuration is valid");
+    println!(
+        "Local node : {}",
+        edgemouse_transport::format_node_id(config.local_node)
+    );
+    println!(
+        "Peer node  : {}",
+        edgemouse_transport::format_node_id(config.peer_node)
+    );
+    println!("Listen     : {}", config.transport.bind_address);
+    println!("Peer       : {}", config.transport.peer_address);
+    println!("Local screen: {}", config.local_screen.0);
+    Ok(())
+}
+
+fn generate_identity(directory: &Path) -> Result<(), Box<dyn Error>> {
+    let generated = edgemouse_transport::Identity::generate()?;
+    fs::create_dir_all(directory).map_err(|error| {
+        format!(
+            "failed to create identity directory {}: {error}",
+            directory.display()
+        )
+    })?;
+    let certificate = directory.join("certificate.der");
+    let private_key = directory.join("private-key.der");
+    refuse_overwrite(&certificate)?;
+    refuse_overwrite(&private_key)?;
+    fs::write(&certificate, generated.certificate)?;
+    if let Err(error) = write_private_key(&private_key, &generated.private_key) {
+        drop(fs::remove_file(&certificate));
+        return Err(error);
+    }
+    println!(
+        "Node ID    : {}",
+        edgemouse_transport::format_node_id(generated.node_id)
+    );
+    println!("Certificate: {}", certificate.display());
+    println!("Private key: {}", private_key.display());
+    println!("Share only certificate.der with the other machine.");
+    Ok(())
+}
+
+fn write_private_key(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
+    fs::write(path, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+fn refuse_overwrite(path: &Path) -> Result<(), Box<dyn Error>> {
+    if path.exists() {
+        Err(format!(
+            "refusing to overwrite existing identity file {}",
+            path.display()
+        )
+        .into())
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_no_extra_arguments(
+    arguments: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn Error>> {
+    let extra: Vec<_> = arguments.collect();
+    if extra.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("unexpected arguments: {}", extra.join(" ")).into())
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn run_agent(path: &Path) -> Result<(), Box<dyn Error>> {
+    runtime::run(path)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn run_agent(_path: &Path) -> Result<(), Box<dyn Error>> {
+    Err("live input control is supported only on Windows and macOS".into())
+}
+
+fn doctor() -> Result<(), Box<dyn Error>> {
+    let status = platform::current_status();
+    println!("Operating system : {}", status.operating_system);
+    println!("Capture API      : {}", status.capture_api);
+    println!("Injection API    : {}", status.injection_api);
+    match status.permission_granted {
+        Some(true) => println!("Input permission : granted"),
+        Some(false) => {
+            println!("Input permission : not granted");
+            println!(
+                "Action required  : enable EdgeMouse under Privacy & Security > Accessibility"
+            );
+        }
+        None => println!("Input permission : checked when the native adapter starts"),
+    }
+    Ok(())
+}
+
+fn demo() -> Result<(), Box<dyn Error>> {
+    const WINDOWS: NodeId = NodeId(1);
+    const MACOS: NodeId = NodeId(2);
+    const WINDOWS_SCREEN: ScreenId = ScreenId(1);
+    const MACOS_SCREEN: ScreenId = ScreenId(2);
+
+    let mut topology = Topology::default();
+    topology.add_screen(Screen::new(
+        WINDOWS_SCREEN,
+        WINDOWS,
+        "Windows display",
+        Rect::new(Point::new(0.0, 0.0), 1920.0, 1080.0)?,
+        1.0,
+    )?)?;
+    topology.add_screen(Screen::new(
+        MACOS_SCREEN,
+        MACOS,
+        "Mac display",
+        Rect::new(Point::new(0.0, 0.0), 1512.0, 982.0)?,
+        2.0,
+    )?)?;
+    topology.connect_bidirectional(WINDOWS_SCREEN, Edge::Right, MACOS_SCREEN)?;
+
+    let mut session = Session::new(
+        WINDOWS,
+        topology,
+        WINDOWS_SCREEN,
+        Point::new(1918.0, 540.0),
+        SessionConfig::default(),
+    )?;
+    println!(
+        "Initial state: {:?} at {:?}",
+        session.state(),
+        session.pointer()
+    );
+
+    for (now_ms, movement) in [
+        (100, Vector::new(8.0, 0.0)),
+        (110, Vector::new(20.0, 4.0)),
+        (120, Vector::new(-40.0, 0.0)),
+    ] {
+        let result = session.handle_input(PhysicalMouseEvent::Move { movement }, now_ms)?;
+        println!(
+            "move {movement:?} => {:?}, state={:?}, pointer={:?}",
+            result.disposition,
+            session.state(),
+            session.pointer()
+        );
+        for effect in result.effects {
+            print_effect(effect)?;
+        }
+    }
+    Ok(())
+}
+
+fn print_effect(effect: Effect) -> Result<(), Box<dyn Error>> {
+    match effect {
+        Effect::Send { peer, event } => {
+            let frame = encode_frame(&WireMessage::Mouse {
+                session_id: 1,
+                event,
+            })?;
+            println!(
+                "  network => peer={}, sequence={}, encoded={} bytes, event={:?}",
+                peer.0,
+                event.sequence,
+                frame.len(),
+                event.event
+            );
+        }
+        other => println!("  platform => {other:?}"),
+    }
+    Ok(())
+}

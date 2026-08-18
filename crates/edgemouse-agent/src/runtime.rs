@@ -1,0 +1,379 @@
+use crate::config::LoadedConfig;
+use crate::network::{Network, NetworkEvent};
+use crate::platform;
+use edgemouse_core::{
+    CaptureMode, ControlState, Effect, MouseCaptureBackend, MouseInjectionBackend,
+    RemoteMouseEvent, RoutedEvent, ScreenId, Session,
+};
+use edgemouse_protocol::WireMessage;
+use std::error::Error;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
+    let config = LoadedConfig::load(config_path)?;
+    let initial_pointer = platform::current_pointer()?;
+    if !config.local_bounds.contains(initial_pointer) {
+        return Err(format!(
+            "current pointer ({:.1}, {:.1}) is outside configured local screen bounds; check origin_x, origin_y, width, and height",
+            initial_pointer.x, initial_pointer.y
+        )
+        .into());
+    }
+
+    println!(
+        "Local node : {}",
+        edgemouse_transport::format_node_id(config.local_node)
+    );
+    println!(
+        "Peer node  : {}",
+        edgemouse_transport::format_node_id(config.peer_node)
+    );
+    println!("Connecting to the trusted peer…");
+    let session_id = new_session_id(config.local_node.0);
+    let network = Network::connect(config.transport, session_id)?;
+    if network.peer_node != config.peer_node {
+        return Err("connected peer identity does not match configuration".into());
+    }
+    println!("Connected to {} with mutual TLS", network.peer_name);
+
+    let mut capture = platform::start_capture()?;
+    let mut injector = platform::injector(initial_pointer);
+    let mut session = Session::new(
+        config.local_node,
+        config.topology,
+        config.local_screen,
+        initial_pointer,
+        config.session,
+    )?;
+    let mut remote = RemoteReceiver::new(config.local_screen, config.session.peer_timeout_ms);
+    let stopping = install_shutdown_handler()?;
+    let clock = Instant::now();
+
+    println!("Edge switching active; press Ctrl+C to stop");
+    let result = run_loop(
+        &network,
+        &mut capture,
+        &mut injector,
+        &mut session,
+        &mut remote,
+        session_id,
+        &stopping,
+        clock,
+    );
+
+    let effects = session.disconnect_peer(config.peer_node);
+    drop(apply_effects(
+        effects,
+        &network,
+        &mut capture,
+        &mut session,
+        session_id,
+    ));
+    if matches!(session.state(), ControlState::Recovering { .. }) {
+        drop(session.complete_recovery());
+    }
+    drop(capture.set_mode(CaptureMode::Local { restore: None }));
+    drop(injector.release_all());
+    remote.reset(&mut injector);
+
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_loop(
+    network: &Network,
+    capture: &mut platform::NativeMouseCapture,
+    injector: &mut platform::NativeMouseInjector,
+    session: &mut Session,
+    remote: &mut RemoteReceiver,
+    session_id: u64,
+    stopping: &AtomicBool,
+    clock: Instant,
+) -> Result<(), Box<dyn Error>> {
+    while !stopping.load(Ordering::Acquire) {
+        let now_ms = elapsed_ms(clock);
+        while let Some(event) = network.try_receive()? {
+            match event {
+                NetworkEvent::Message(WireMessage::Heartbeat {
+                    session_id: remote_session,
+                    ..
+                }) => {
+                    session.note_peer_activity(network.peer_node, now_ms);
+                    remote.note_heartbeat(remote_session, now_ms);
+                }
+                NetworkEvent::Message(WireMessage::Mouse {
+                    session_id: remote_session,
+                    event,
+                }) => remote.handle(remote_session, event, injector, now_ms)?,
+                NetworkEvent::Message(WireMessage::Hello { .. }) => {
+                    return Err("peer sent a duplicate Hello message".into());
+                }
+                NetworkEvent::Message(WireMessage::Goodbye { .. }) => {
+                    return Err("peer shut down".into());
+                }
+                NetworkEvent::Disconnected(reason) => {
+                    remote.reset(injector);
+                    let effects = session.disconnect_peer(network.peer_node);
+                    apply_effects(effects, network, capture, session, session_id)?;
+                    return Err(format!("peer disconnected: {reason}").into());
+                }
+            }
+        }
+
+        if remote.poll_timeout(injector, now_ms)? {
+            eprintln!("remote input session timed out; released synthetic buttons");
+        }
+
+        let timeout_effects = session.poll_timeout(now_ms);
+        apply_effects(timeout_effects, network, capture, session, session_id)?;
+
+        let mut handled_input = false;
+        while let Some(event) = capture.try_next_event()? {
+            handled_input = true;
+            let result = session.handle_input(event, now_ms)?;
+            apply_effects(result.effects, network, capture, session, session_id)?;
+        }
+        if !handled_input {
+            std::thread::sleep(IDLE_POLL_INTERVAL);
+        }
+    }
+    Ok(())
+}
+
+fn apply_effects(
+    effects: Vec<Effect>,
+    network: &Network,
+    capture: &mut platform::NativeMouseCapture,
+    session: &mut Session,
+    session_id: u64,
+) -> Result<(), Box<dyn Error>> {
+    for effect in effects {
+        match effect {
+            Effect::CapturePointer { anchor } => {
+                capture.set_mode(CaptureMode::Remote { anchor })?;
+            }
+            Effect::ReleasePointer {
+                restore_position, ..
+            } => {
+                capture.set_mode(CaptureMode::Local {
+                    restore: Some(restore_position),
+                })?;
+                if matches!(session.state(), ControlState::Recovering { .. }) {
+                    session.complete_recovery()?;
+                }
+            }
+            Effect::Send { peer, event } => {
+                if peer != network.peer_node {
+                    return Err("routing requested an unknown peer".into());
+                }
+                network.send(WireMessage::Mouse { session_id, event })?;
+            }
+            Effect::PeerTimedOut { peer } => {
+                eprintln!(
+                    "peer {} timed out; restored local pointer",
+                    edgemouse_transport::format_node_id(peer)
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+struct RemoteReceiver {
+    local_screen: ScreenId,
+    timeout_ms: u64,
+    active_session: Option<u64>,
+    last_sequence: u64,
+    last_activity_ms: Option<u64>,
+}
+
+impl RemoteReceiver {
+    const fn new(local_screen: ScreenId, timeout_ms: u64) -> Self {
+        Self {
+            local_screen,
+            timeout_ms,
+            active_session: None,
+            last_sequence: 0,
+            last_activity_ms: None,
+        }
+    }
+
+    fn handle(
+        &mut self,
+        session_id: u64,
+        routed: RoutedEvent,
+        injector: &mut impl MouseInjectionBackend,
+        now_ms: u64,
+    ) -> Result<(), Box<dyn Error>> {
+        if session_id == 0 || routed.sequence == 0 {
+            return Err("peer sent a zero session or sequence number".into());
+        }
+        if matches!(routed.event, RemoteMouseEvent::Enter { .. }) {
+            if self.active_session != Some(session_id) {
+                injector.release_all()?;
+                self.active_session = Some(session_id);
+                self.last_sequence = 0;
+            }
+        } else if self.active_session != Some(session_id) {
+            return Err("peer sent mouse input before entering the local screen".into());
+        }
+        if routed.sequence <= self.last_sequence {
+            return Ok(());
+        }
+        validate_target_screen(routed.event, self.local_screen)?;
+        injector.inject(routed.event)?;
+        self.last_sequence = routed.sequence;
+        self.last_activity_ms = Some(now_ms);
+        if matches!(routed.event, RemoteMouseEvent::Leave) {
+            self.active_session = None;
+            self.last_activity_ms = None;
+        }
+        Ok(())
+    }
+
+    fn note_heartbeat(&mut self, session_id: u64, now_ms: u64) {
+        if self.active_session == Some(session_id) {
+            self.last_activity_ms = Some(now_ms);
+        }
+    }
+
+    fn poll_timeout(
+        &mut self,
+        injector: &mut impl MouseInjectionBackend,
+        now_ms: u64,
+    ) -> Result<bool, Box<dyn Error>> {
+        let Some(last_activity) = self.last_activity_ms else {
+            return Ok(false);
+        };
+        if now_ms.saturating_sub(last_activity) < self.timeout_ms {
+            return Ok(false);
+        }
+        injector.release_all()?;
+        self.active_session = None;
+        self.last_activity_ms = None;
+        Ok(true)
+    }
+
+    fn reset(&mut self, injector: &mut impl MouseInjectionBackend) {
+        drop(injector.release_all());
+        self.active_session = None;
+        self.last_activity_ms = None;
+        self.last_sequence = 0;
+    }
+}
+
+fn validate_target_screen(event: RemoteMouseEvent, local: ScreenId) -> Result<(), Box<dyn Error>> {
+    match event {
+        RemoteMouseEvent::Enter { screen, .. } | RemoteMouseEvent::MoveAbsolute { screen, .. }
+            if screen != local =>
+        {
+            Err(format!(
+                "peer targeted screen {}, but this node owns screen {}",
+                screen.0, local.0
+            )
+            .into())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn install_shutdown_handler() -> Result<Arc<AtomicBool>, Box<dyn Error>> {
+    let stopping = Arc::new(AtomicBool::new(false));
+    let handler_state = Arc::clone(&stopping);
+    ctrlc::set_handler(move || handler_state.store(true, Ordering::Release))?;
+    Ok(stopping)
+}
+
+fn elapsed_ms(clock: Instant) -> u64 {
+    u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn new_session_id(node: u128) -> u64 {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let mixed = timestamp ^ node ^ (node >> 64);
+    u64::try_from(mixed & u128::from(u64::MAX))
+        .unwrap_or(1)
+        .max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use edgemouse_core::{ButtonState, MouseButton, PermissionState, PlatformError, Point};
+
+    #[derive(Default)]
+    struct FakeInjector {
+        events: Vec<RemoteMouseEvent>,
+        releases: usize,
+    }
+
+    impl MouseInjectionBackend for FakeInjector {
+        fn permission_state(&self) -> PermissionState {
+            PermissionState::NotRequired
+        }
+
+        fn inject(&mut self, event: RemoteMouseEvent) -> Result<(), PlatformError> {
+            self.events.push(event);
+            Ok(())
+        }
+
+        fn release_all(&mut self) -> Result<(), PlatformError> {
+            self.releases += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn remote_receiver_requires_enter_and_deduplicates_sequences() {
+        let mut receiver = RemoteReceiver::new(ScreenId(7), 1_500);
+        let mut injector = FakeInjector::default();
+        let button = RoutedEvent {
+            sequence: 2,
+            event: RemoteMouseEvent::Button {
+                button: MouseButton::Primary,
+                state: ButtonState::Pressed,
+            },
+        };
+        assert!(receiver.handle(9, button, &mut injector, 10).is_err());
+
+        let enter = RoutedEvent {
+            sequence: 1,
+            event: RemoteMouseEvent::Enter {
+                screen: ScreenId(7),
+                position: Point::new(5.0, 5.0),
+            },
+        };
+        receiver.handle(9, enter, &mut injector, 20).unwrap();
+        receiver.handle(9, enter, &mut injector, 21).unwrap();
+        assert_eq!(injector.events.len(), 1);
+    }
+
+    #[test]
+    fn remote_timeout_releases_buttons() {
+        let mut receiver = RemoteReceiver::new(ScreenId(7), 100);
+        let mut injector = FakeInjector::default();
+        receiver
+            .handle(
+                9,
+                RoutedEvent {
+                    sequence: 1,
+                    event: RemoteMouseEvent::Enter {
+                        screen: ScreenId(7),
+                        position: Point::new(5.0, 5.0),
+                    },
+                },
+                &mut injector,
+                10,
+            )
+            .unwrap();
+        assert!(receiver.poll_timeout(&mut injector, 111).unwrap());
+        assert!(injector.releases >= 2);
+    }
+}

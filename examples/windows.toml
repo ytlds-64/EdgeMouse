@@ -1,0 +1,37 @@
+# Paths are relative to this TOML file. Generate windows-identity locally and
+# copy only the Mac's certificate.der to mac-certificate.der.
+[local]
+name = "windows-pc"
+listen = "0.0.0.0:43891"
+certificate = "windows-identity/certificate.der"
+private_key = "windows-identity/private-key.der"
+
+[local.screen]
+id = 1
+name = "Windows display"
+origin_x = 0
+origin_y = 0
+width = 1920
+height = 1080
+scale = 1.0
+
+[peer]
+address = "192.168.1.20:43891"
+certificate = "mac-certificate.der"
+
+[peer.screen]
+id = 2
+name = "Mac display"
+origin_x = 0
+origin_y = 0
+width = 1512
+height = 982
+scale = 2.0
+
+[layout]
+peer_on = "right"
+
+[session]
+hysteresis = 8
+timeout_ms = 1500
+connect_timeout_seconds = 30

@@ -1,0 +1,11 @@
+[package]
+name = "edgemouse-core"
+description = "Platform-neutral routing and safety state machine for EdgeMouse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true

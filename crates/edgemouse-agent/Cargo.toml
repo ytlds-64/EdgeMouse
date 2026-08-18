@@ -1,0 +1,30 @@
+[package]
+name = "edgemouse-agent"
+description = "Background agent and diagnostics CLI for EdgeMouse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "edgemouse"
+path = "src/main.rs"
+
+[dependencies]
+edgemouse-core = { path = "../edgemouse-core" }
+edgemouse-protocol = { path = "../edgemouse-protocol" }
+edgemouse-transport = { path = "../edgemouse-transport" }
+ctrlc = "3.4.7"
+serde = { version = "1.0.229", features = ["derive"] }
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+toml = "1.1.4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+edgemouse-platform-macos = { path = "../edgemouse-platform-macos" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+edgemouse-platform-windows = { path = "../edgemouse-platform-windows" }
+
+[lints]
+workspace = true

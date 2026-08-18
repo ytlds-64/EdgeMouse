@@ -1,0 +1,19 @@
+[package]
+name = "edgemouse-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+edgemouse-core = { path = "../edgemouse-core" }
+edgemouse-protocol = { path = "../edgemouse-protocol" }
+quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rcgen = { version = "0.14.7", default-features = false, features = ["crypto", "ring"] }
+ring = "0.17.14"
+rustls = { version = "0.23.35", default-features = false, features = ["ring", "std"] }
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

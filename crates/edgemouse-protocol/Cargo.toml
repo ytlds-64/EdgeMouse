@@ -1,0 +1,14 @@
+[package]
+name = "edgemouse-protocol"
+description = "Versioned wire protocol for EdgeMouse peers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+edgemouse-core = { path = "../edgemouse-core" }
+
+[lints]
+workspace = true
