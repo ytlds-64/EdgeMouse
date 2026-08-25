@@ -1,0 +1,60 @@
+name: Build and test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-14
+            binary: target/release/edgemouse
+            example: examples/macos.toml
+          - name: Windows
+            os: windows-2022
+            binary: target/release/edgemouse.exe
+            example: examples/windows.toml
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Prepare stable Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup component add rustfmt clippy
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run static analysis
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Build release executable
+        run: cargo build --release -p edgemouse-agent
+
+      - name: Upload runnable package
+        uses: actions/upload-artifact@v4
+        with:
+          name: edgemouse-${{ runner.os }}-${{ runner.arch }}
+          if-no-files-found: error
+          path: |
+            ${{ matrix.binary }}
+            ${{ matrix.example }}
+            docs/EdgeMouse-Test-Guide.docx
+            README.md
