@@ -39,6 +39,39 @@ cargo build --release -p edgemouse-agent
 The executable is `target/release/edgemouse` on macOS and
 `target\release\edgemouse.exe` on Windows.
 
+## One-command preparation
+
+The preparation scripts check the Rust installation, run formatting and static
+analysis, execute all tests, create a release build, run platform diagnostics,
+generate a local identity if needed, and copy the correct configuration template
+to `edgemouse.toml`. Existing identity and configuration files are never
+overwritten.
+
+On macOS:
+
+```sh
+./scripts/bootstrap-macos.sh
+```
+
+On Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-windows.ps1
+```
+
+Use `--verify-only` on macOS or `-VerifyOnly` on Windows to run the full source
+verification without creating an identity or configuration. Generated private
+keys, certificates, and `edgemouse.toml` are ignored by Git.
+
+GitHub Actions repeats the formatting, static-analysis, test, and release-build
+steps on both macOS and Windows after every push to `main`. A successful run also
+publishes downloadable platform packages under the run's **Artifacts** section.
+
+The scripts deliberately leave these machine-specific decisions to the user:
+exchange only the public certificates, enter the peer LAN address and real screen
+geometry, allow UDP port `43891` through Windows Firewall, and grant macOS
+Accessibility permission.
+
 ## Pair the two machines
 
 1. Generate a different identity on each machine:

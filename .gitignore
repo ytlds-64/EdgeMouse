@@ -1,6 +1,10 @@
 /target/
 /work/
 /outputs/
+/mac-identity/
+/windows-identity/
+/edgemouse.toml
+*.der
 *.log
 .env
 .env.*
