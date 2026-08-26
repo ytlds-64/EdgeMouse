@@ -132,7 +132,13 @@ fn discover_on(
             Err(error)
                 if matches!(
                     error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        // Windows reports an ICMP "port unreachable" response to a
+                        // previously sent UDP probe as WSAECONNRESET on recv_from.
+                        // The peer may simply not have bound its discovery socket yet.
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::ConnectionRefused
                 ) => {}
             Err(error) => {
                 return Err(DiscoveryError::io(
