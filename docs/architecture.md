@@ -21,14 +21,16 @@ The process has three execution contexts:
    enqueues events. It never performs network or UI work.
 2. The main coordinator polls captured and network events, advances the pure
    `edgemouse-core` state machine, and applies capture/injection effects.
-3. A Tokio worker owns the QUIC endpoint, the reliable bidirectional stream, and
-   heartbeat scheduling.
+3. A Tokio worker owns the QUIC endpoint, the reliable bidirectional stream,
+   unreliable movement datagrams, and heartbeat scheduling.
 
 The native queues and the network command queue are bounded by failure behavior.
-Absolute movement uses a latest-value slot flushed every 4 ms, preventing a
+Absolute movement uses latest-value slots on both sender and receiver and is
+flushed every 4–12 ms according to the smoothed RTT. Old movement datagrams may
+be discarded instead of retransmitted, preventing Wi-Fi jitter or a
 high-polling-rate mouse from building a stale network backlog. Before a button,
 wheel, enter, leave, or release event is queued, any pending movement is flushed
-first so control ordering remains exact. If the 1,024-message control queue
+reliably first so control ordering remains exact. If the 1,024-message control queue
 fills, the coordinator treats transport as unavailable and restores local input
 rather than silently losing button events.
 
@@ -65,9 +67,14 @@ bypass.
 
 Both agents bind a QUIC UDP endpoint. The lower node ID initiates and retries;
 the higher node ID accepts, eliminating duplicate-connection races. TLS uses
-ALPN `edgemouse/1`. After TLS, both sides exchange and validate a protocol
-`Hello`, then use one reliable bidirectional stream for ordered mouse and control
-frames. A heartbeat is sent every 500 ms.
+ALPN `edgemouse/2`. After TLS, both sides exchange and validate a protocol
+`Hello`. Enter/leave, buttons, wheels, final positions, releases, and heartbeats
+use one reliable bidirectional stream. Ordinary absolute movement uses QUIC
+Datagram frames, which are encrypted and authenticated but intentionally
+unreliable and unordered. Each movement carries a reliable-event watermark, so
+the receiver cannot apply movement after a click until that click has been
+processed. Sequence numbers reject late datagrams, and latest-value receive
+coalescing prevents application-level backlog. A heartbeat is sent every 500 ms.
 
 The locked dependency graph resolves `quinn-proto` to 0.11.17, beyond the
 0.11.14 fix for the malformed transport-parameter denial-of-service advisory.
@@ -100,8 +107,9 @@ restored during transitions and teardown.
 ## Deliberate next steps
 
 1. Test on physical Windows and macOS machines, including 125–1000 Hz mice,
-   Retina scaling, horizontal scroll, sleep/wake, and Wi-Fi loss.
-2. Add Windows Raw Input and movement coalescing based on latency measurements.
+   long mixed Ethernet/Wi-Fi sessions, horizontal scroll, sleep/wake, and Wi-Fi
+   loss.
+2. Add Windows Raw Input based on latency measurements.
 3. Add automatic LAN discovery plus a short-code/fingerprint pairing UX.
 4. Add a tray/settings UI, signed installers, launch-at-login, and diagnostics.
 5. Only then consider keyboard and clipboard channels.

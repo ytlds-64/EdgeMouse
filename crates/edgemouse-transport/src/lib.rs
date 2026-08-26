@@ -5,7 +5,9 @@
 use edgemouse_core::NodeId;
 use edgemouse_protocol::{HEADER_LEN, WireMessage, decode_frame, encode_frame, expected_frame_len};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig};
+use quinn::{
+    ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig, TransportConfig,
+};
 use ring::digest::{SHA256, digest};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::WebPkiClientVerifier;
@@ -17,8 +19,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const TLS_SERVER_NAME: &str = "edgemouse.local";
-const ALPN: &[u8] = b"edgemouse/1";
+const ALPN: &[u8] = b"edgemouse/2";
 const RETRY_INTERVAL: Duration = Duration::from_millis(500);
+const DATAGRAM_RECEIVE_BUFFER_BYTES: usize = 4 * 1024;
+const DATAGRAM_SEND_BUFFER_BYTES: usize = 1024;
+const CAPABILITY_MOUSE: u32 = 1 << 0;
+const CAPABILITY_MOUSE_DATAGRAM: u32 = 1 << 1;
+const REQUIRED_CAPABILITIES: u32 = CAPABILITY_MOUSE | CAPABILITY_MOUSE_DATAGRAM;
 
 #[derive(Clone)]
 pub struct Identity {
@@ -177,6 +184,11 @@ impl PeerLink {
             peer_node,
             peer_name: String::new(),
         };
+        if link.guard.connection.max_datagram_size().is_none() {
+            return Err(TransportError::new(
+                "trusted peer did not negotiate QUIC Datagram support",
+            ));
+        }
         link.exchange_hello(local_node, &config.local_name).await?;
         Ok(link)
     }
@@ -216,17 +228,19 @@ impl PeerLink {
     }
 
     #[must_use]
-    pub fn split(self) -> (PeerSender, PeerReceiver) {
+    pub fn split(self) -> (PeerSender, PeerReceiver, PeerDatagrams) {
+        let guard = self.guard;
         (
             PeerSender {
-                guard: Arc::clone(&self.guard),
+                guard: Arc::clone(&guard),
                 sender: self.sender,
             },
             PeerReceiver {
-                guard: self.guard,
+                guard: Arc::clone(&guard),
                 receiver: self.receiver,
                 read_state: self.read_state,
             },
+            PeerDatagrams { guard },
         )
     }
 
@@ -238,14 +252,25 @@ impl PeerLink {
         self.send(&WireMessage::Hello {
             node: local_node,
             name: local_name.to_owned(),
-            capabilities: 1,
+            capabilities: REQUIRED_CAPABILITIES,
         })
         .await?;
         match self.receive().await? {
-            WireMessage::Hello { node, name, .. } if node == self.peer_node => {
+            WireMessage::Hello {
+                node,
+                name,
+                capabilities,
+            } if node == self.peer_node
+                && capabilities & REQUIRED_CAPABILITIES == REQUIRED_CAPABILITIES =>
+            {
                 self.peer_name = name;
                 Ok(())
             }
+            WireMessage::Hello {
+                node, capabilities, ..
+            } if node == self.peer_node => Err(TransportError::new(format!(
+                "peer is missing required capabilities (announced {capabilities:#010x})"
+            ))),
             WireMessage::Hello { node, .. } => Err(TransportError::new(format!(
                 "peer certificate identifies {}, but Hello announced {}",
                 format_node_id(self.peer_node),
@@ -300,6 +325,32 @@ pub struct PeerReceiver {
     read_state: FrameReadState,
 }
 
+pub struct PeerDatagrams {
+    guard: Arc<LinkGuard>,
+}
+
+impl PeerDatagrams {
+    pub fn send(&self, message: &WireMessage) -> Result<(), TransportError> {
+        let frame = encode_frame(message)
+            .map_err(|error| TransportError::with_source("failed to encode datagram", error))?;
+        self.guard
+            .connection
+            .send_datagram(frame.into())
+            .map_err(|error| TransportError::with_source("failed to send QUIC datagram", error))
+    }
+
+    pub async fn receive(&self) -> Result<WireMessage, TransportError> {
+        let frame = self
+            .guard
+            .connection
+            .read_datagram()
+            .await
+            .map_err(|error| TransportError::with_source("failed to read QUIC datagram", error))?;
+        decode_frame(&frame)
+            .map_err(|error| TransportError::with_source("invalid datagram from peer", error))
+    }
+}
+
 impl PeerReceiver {
     pub async fn receive(&mut self) -> Result<WireMessage, TransportError> {
         self.read_state.receive(&mut self.receiver).await
@@ -352,7 +403,9 @@ fn make_client_config(
     crypto.alpn_protocols = vec![ALPN.to_vec()];
     let crypto = QuicClientConfig::try_from(crypto)
         .map_err(|error| TransportError::with_source("invalid QUIC client TLS config", error))?;
-    Ok(ClientConfig::new(Arc::new(crypto)))
+    let mut config = ClientConfig::new(Arc::new(crypto));
+    config.transport_config(mouse_transport_config());
+    Ok(config)
 }
 
 fn make_server_config(
@@ -373,11 +426,17 @@ fn make_server_config(
     let crypto = QuicServerConfig::try_from(crypto)
         .map_err(|error| TransportError::with_source("invalid QUIC server TLS config", error))?;
     let mut config = ServerConfig::with_crypto(Arc::new(crypto));
-    let transport = Arc::get_mut(&mut config.transport)
-        .ok_or_else(|| TransportError::new("failed to configure QUIC transport"))?;
+    config.transport_config(mouse_transport_config());
+    Ok(config)
+}
+
+fn mouse_transport_config() -> Arc<TransportConfig> {
+    let mut transport = TransportConfig::default();
     transport.max_concurrent_uni_streams(0_u8.into());
     transport.max_concurrent_bidi_streams(1_u8.into());
-    Ok(config)
+    transport.datagram_receive_buffer_size(Some(DATAGRAM_RECEIVE_BUFFER_BYTES));
+    transport.datagram_send_buffer_size(DATAGRAM_SEND_BUFFER_BYTES);
+    Arc::new(transport)
 }
 
 fn roots_for(peer: &TrustedPeer) -> Result<RootCertStore, TransportError> {
@@ -566,8 +625,21 @@ mod tests {
         };
         first_link.send(&heartbeat).await.unwrap();
         assert_eq!(second_link.receive().await.unwrap(), heartbeat);
-        first_link.close(b"test complete");
-        second_link.close(b"test complete");
+
+        let (first_sender, _, first_datagrams) = first_link.split();
+        let (second_sender, _, second_datagrams) = second_link.split();
+        let movement = WireMessage::MouseDatagram {
+            session_id: 42,
+            after_sequence: 7,
+            sequence: 8,
+            screen: edgemouse_core::ScreenId(3),
+            position: edgemouse_core::Point::new(10.5, 20.25),
+        };
+        first_datagrams.send(&movement).unwrap();
+        assert_eq!(second_datagrams.receive().await.unwrap(), movement);
+
+        first_sender.close(b"test complete");
+        second_sender.close(b"test complete");
     }
 
     #[tokio::test]

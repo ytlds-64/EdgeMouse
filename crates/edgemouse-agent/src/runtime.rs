@@ -112,6 +112,22 @@ fn run_loop(
                 }) => {
                     let transition = remote.handle(remote_session, event, injector, now_ms)?;
                     apply_remote_transition(transition, remote.local_screen, capture, session)?;
+                    let transition = remote.take_ready_datagram(injector, now_ms)?;
+                    apply_remote_transition(transition, remote.local_screen, capture, session)?;
+                }
+                NetworkEvent::Datagram {
+                    session_id: remote_session,
+                    after_sequence,
+                    event,
+                } => {
+                    let transition = remote.handle_datagram(
+                        remote_session,
+                        after_sequence,
+                        event,
+                        injector,
+                        now_ms,
+                    )?;
+                    apply_remote_transition(transition, remote.local_screen, capture, session)?;
                 }
                 NetworkEvent::Message(WireMessage::Hello { .. }) => {
                     return Err("peer sent a duplicate Hello message".into());
@@ -119,13 +135,17 @@ fn run_loop(
                 NetworkEvent::Message(WireMessage::Goodbye { .. }) => {
                     return Err("peer shut down".into());
                 }
+                NetworkEvent::Message(WireMessage::MouseDatagram { .. }) => {
+                    return Err("peer sent a movement datagram on the reliable stream".into());
+                }
                 NetworkEvent::Metrics {
                     rtt_ms,
+                    send_interval_ms,
                     sent_moves,
                     coalesced_moves,
                 } => {
                     println!(
-                        "Mouse link: RTT {rtt_ms:.1} ms; sent {sent_moves} updates; merged {coalesced_moves}"
+                        "Mouse link: RTT {rtt_ms:.1} ms; interval {send_interval_ms} ms; sent {sent_moves} updates; merged {coalesced_moves}"
                     );
                 }
                 NetworkEvent::Disconnected(reason) => {
@@ -253,9 +273,18 @@ struct RemoteReceiver {
     timeout_ms: u64,
     active_session: Option<u64>,
     last_sequence: u64,
+    last_reliable_sequence: u64,
     last_activity_ms: Option<u64>,
     last_position: Option<Point>,
     motion_reported: bool,
+    pending_datagram: Option<PendingDatagram>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingDatagram {
+    session_id: u64,
+    after_sequence: u64,
+    event: RoutedEvent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -273,9 +302,11 @@ impl RemoteReceiver {
             timeout_ms,
             active_session: None,
             last_sequence: 0,
+            last_reliable_sequence: 0,
             last_activity_ms: None,
             last_position: None,
             motion_reported: false,
+            pending_datagram: None,
         }
     }
 
@@ -299,8 +330,10 @@ impl RemoteReceiver {
                 injector.release_all()?;
                 self.active_session = Some(session_id);
                 self.last_sequence = 0;
+                self.last_reliable_sequence = 0;
                 self.last_position = None;
                 self.motion_reported = false;
+                self.pending_datagram = None;
                 true
             } else {
                 false
@@ -315,6 +348,7 @@ impl RemoteReceiver {
         }
         injector.inject(routed.event)?;
         self.last_sequence = routed.sequence;
+        self.last_reliable_sequence = routed.sequence;
         self.last_activity_ms = Some(now_ms);
         match routed.event {
             RemoteMouseEvent::Enter { position, .. } => {
@@ -342,9 +376,88 @@ impl RemoteReceiver {
                 self.active_session = None;
                 self.last_activity_ms = None;
                 self.motion_reported = false;
+                self.pending_datagram = None;
                 Ok(RemoteTransition::Ended { position })
             }
             _ => Ok(RemoteTransition::None),
+        }
+    }
+
+    fn handle_datagram(
+        &mut self,
+        session_id: u64,
+        after_sequence: u64,
+        routed: RoutedEvent,
+        injector: &mut impl MouseInjectionBackend,
+        now_ms: u64,
+    ) -> Result<RemoteTransition, Box<dyn Error>> {
+        if session_id == 0 || routed.sequence == 0 {
+            return Err("peer sent a zero session or sequence number".into());
+        }
+        if after_sequence >= routed.sequence {
+            return Err("peer sent an invalid movement ordering watermark".into());
+        }
+        if !matches!(routed.event, RemoteMouseEvent::MoveAbsolute { .. }) {
+            return Err("peer sent a non-movement event as a datagram".into());
+        }
+        validate_target_screen(routed.event, self.local_screen)?;
+        if self.active_session != Some(session_id) || routed.sequence <= self.last_sequence {
+            return Ok(RemoteTransition::None);
+        }
+        if after_sequence > self.last_reliable_sequence {
+            if self
+                .pending_datagram
+                .is_none_or(|pending| routed.sequence > pending.event.sequence)
+            {
+                self.pending_datagram = Some(PendingDatagram {
+                    session_id,
+                    after_sequence,
+                    event: routed,
+                });
+            }
+            return Ok(RemoteTransition::None);
+        }
+        self.inject_datagram(routed, injector, now_ms)
+    }
+
+    fn take_ready_datagram(
+        &mut self,
+        injector: &mut impl MouseInjectionBackend,
+        now_ms: u64,
+    ) -> Result<RemoteTransition, Box<dyn Error>> {
+        let Some(pending) = self.pending_datagram.take() else {
+            return Ok(RemoteTransition::None);
+        };
+        if self.active_session != Some(pending.session_id)
+            || pending.event.sequence <= self.last_sequence
+        {
+            return Ok(RemoteTransition::None);
+        }
+        if pending.after_sequence > self.last_reliable_sequence {
+            self.pending_datagram = Some(pending);
+            return Ok(RemoteTransition::None);
+        }
+        self.inject_datagram(pending.event, injector, now_ms)
+    }
+
+    fn inject_datagram(
+        &mut self,
+        routed: RoutedEvent,
+        injector: &mut impl MouseInjectionBackend,
+        now_ms: u64,
+    ) -> Result<RemoteTransition, Box<dyn Error>> {
+        let RemoteMouseEvent::MoveAbsolute { position, .. } = routed.event else {
+            return Err("pending datagram did not contain absolute movement".into());
+        };
+        injector.inject(routed.event)?;
+        self.last_sequence = routed.sequence;
+        self.last_activity_ms = Some(now_ms);
+        self.last_position = Some(position);
+        if self.motion_reported {
+            Ok(RemoteTransition::None)
+        } else {
+            self.motion_reported = true;
+            Ok(RemoteTransition::FirstMotion)
         }
     }
 
@@ -369,6 +482,7 @@ impl RemoteReceiver {
         self.active_session = None;
         self.last_activity_ms = None;
         self.motion_reported = false;
+        self.pending_datagram = None;
         Ok(self.last_position.take())
     }
 
@@ -377,7 +491,9 @@ impl RemoteReceiver {
         self.active_session = None;
         self.last_activity_ms = None;
         self.last_sequence = 0;
+        self.last_reliable_sequence = 0;
         self.motion_reported = false;
+        self.pending_datagram = None;
         self.last_position.take()
     }
 }
@@ -498,6 +614,80 @@ mod tests {
             Some(Point::new(5.0, 5.0))
         );
         assert!(injector.releases >= 2);
+    }
+
+    #[test]
+    fn datagram_waits_for_its_reliable_control_watermark() {
+        let mut receiver = RemoteReceiver::new(ScreenId(7), 1_500);
+        let mut injector = FakeInjector::default();
+        let movement = RoutedEvent {
+            sequence: 4,
+            event: RemoteMouseEvent::MoveAbsolute {
+                screen: ScreenId(7),
+                position: Point::new(30.0, 40.0),
+            },
+        };
+
+        assert_eq!(
+            receiver
+                .handle_datagram(9, 3, movement, &mut injector, 5)
+                .unwrap(),
+            RemoteTransition::None
+        );
+        assert!(injector.events.is_empty());
+
+        receiver
+            .handle(
+                9,
+                RoutedEvent {
+                    sequence: 1,
+                    event: RemoteMouseEvent::Enter {
+                        screen: ScreenId(7),
+                        position: Point::new(5.0, 5.0),
+                    },
+                },
+                &mut injector,
+                10,
+            )
+            .unwrap();
+        receiver
+            .handle_datagram(9, 3, movement, &mut injector, 15)
+            .unwrap();
+        assert_eq!(injector.events.len(), 1);
+
+        receiver
+            .handle(
+                9,
+                RoutedEvent {
+                    sequence: 3,
+                    event: RemoteMouseEvent::Button {
+                        button: MouseButton::Primary,
+                        state: ButtonState::Pressed,
+                    },
+                },
+                &mut injector,
+                20,
+            )
+            .unwrap();
+        assert_eq!(injector.events.len(), 2);
+        assert_eq!(
+            receiver.take_ready_datagram(&mut injector, 21).unwrap(),
+            RemoteTransition::FirstMotion
+        );
+        assert_eq!(
+            injector.events,
+            vec![
+                RemoteMouseEvent::Enter {
+                    screen: ScreenId(7),
+                    position: Point::new(5.0, 5.0),
+                },
+                RemoteMouseEvent::Button {
+                    button: MouseButton::Primary,
+                    state: ButtonState::Pressed,
+                },
+                movement.event,
+            ]
+        );
     }
 
     #[test]

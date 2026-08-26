@@ -1,4 +1,4 @@
-use edgemouse_core::{NodeId, RemoteMouseEvent};
+use edgemouse_core::{NodeId, RemoteMouseEvent, RoutedEvent};
 use edgemouse_protocol::WireMessage;
 use edgemouse_transport::{PeerConfig, PeerLink};
 use std::sync::mpsc as std_mpsc;
@@ -9,13 +9,19 @@ use tokio::sync::mpsc;
 
 const COMMAND_CAPACITY: usize = 1_024;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
-const MOUSE_FLUSH_INTERVAL: Duration = Duration::from_millis(4);
+const MOUSE_FLUSH_INTERVAL_FAST: Duration = Duration::from_millis(4);
 const METRICS_INTERVAL: Duration = Duration::from_secs(5);
 
 pub enum NetworkEvent {
     Message(WireMessage),
+    Datagram {
+        session_id: u64,
+        after_sequence: u64,
+        event: RoutedEvent,
+    },
     Metrics {
         rtt_ms: f64,
+        send_interval_ms: u64,
         sent_moves: u64,
         coalesced_moves: u64,
     },
@@ -31,6 +37,7 @@ pub struct Network {
     commands: mpsc::Sender<NetworkCommand>,
     events: std_mpsc::Receiver<NetworkEvent>,
     pending_move: Arc<Mutex<MoveCoalescer>>,
+    incoming_move: Arc<Mutex<Option<WireMessage>>>,
     thread: Option<JoinHandle<()>>,
     pub peer_node: NodeId,
     pub peer_name: String,
@@ -67,6 +74,8 @@ impl Network {
         let (startup_sender, startup_receiver) = std_mpsc::sync_channel(1);
         let pending_move = Arc::new(Mutex::new(MoveCoalescer::default()));
         let network_pending_move = Arc::clone(&pending_move);
+        let incoming_move = Arc::new(Mutex::new(None));
+        let network_incoming_move = Arc::clone(&incoming_move);
         let thread = std::thread::Builder::new()
             .name("edgemouse-network".to_owned())
             .spawn(move || {
@@ -102,6 +111,7 @@ impl Network {
                         commands_receiver,
                         event_sender,
                         network_pending_move,
+                        network_incoming_move,
                         session_id,
                     )
                     .await;
@@ -114,6 +124,7 @@ impl Network {
                 commands: commands_sender,
                 events: event_receiver,
                 pending_move,
+                incoming_move,
                 thread: Some(thread),
                 peer_node,
                 peer_name,
@@ -158,7 +169,33 @@ impl Network {
     pub fn try_receive(&self) -> Result<Option<NetworkEvent>, String> {
         match self.events.try_recv() {
             Ok(event) => Ok(Some(event)),
-            Err(std_mpsc::TryRecvError::Empty) => Ok(None),
+            Err(std_mpsc::TryRecvError::Empty) => {
+                let message = self
+                    .incoming_move
+                    .lock()
+                    .map_err(|_| "incoming mouse buffer lock was poisoned".to_owned())?
+                    .take();
+                match message {
+                    Some(WireMessage::MouseDatagram {
+                        session_id,
+                        after_sequence,
+                        sequence,
+                        screen,
+                        position,
+                    }) => Ok(Some(NetworkEvent::Datagram {
+                        session_id,
+                        after_sequence,
+                        event: RoutedEvent {
+                            sequence,
+                            event: RemoteMouseEvent::MoveAbsolute { screen, position },
+                        },
+                    })),
+                    Some(_) => {
+                        Err("incoming mouse buffer contained a non-datagram message".to_owned())
+                    }
+                    None => Ok(None),
+                }
+            }
             Err(std_mpsc::TryRecvError::Disconnected) => {
                 Err("network event channel disconnected".to_owned())
             }
@@ -180,17 +217,19 @@ async fn run_network(
     mut commands: mpsc::Receiver<NetworkCommand>,
     events: std_mpsc::Sender<NetworkEvent>,
     pending_move: Arc<Mutex<MoveCoalescer>>,
+    incoming_move: Arc<Mutex<Option<WireMessage>>>,
     session_id: u64,
 ) {
-    let (mut sender, mut receiver) = link.split();
+    let (mut sender, mut receiver, datagrams) = link.split();
     let started = tokio::time::Instant::now();
     let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut mouse_flush = tokio::time::interval(MOUSE_FLUSH_INTERVAL);
-    mouse_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mouse_flush = tokio::time::sleep(MOUSE_FLUSH_INTERVAL_FAST);
+    tokio::pin!(mouse_flush);
     let mut metrics = tokio::time::interval(METRICS_INTERVAL);
     metrics.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut sent_moves = 0_u64;
+    let mut last_reliable_sequence = 0_u64;
 
     loop {
         tokio::select! {
@@ -212,6 +251,9 @@ async fn run_network(
                         drop(events.send(NetworkEvent::Disconnected(error.to_string())));
                         break;
                     }
+                    if let Some(sequence) = reliable_mouse_sequence(&message) {
+                        last_reliable_sequence = sequence;
+                    }
                     if is_move {
                         sent_moves = sent_moves.saturating_add(1);
                     }
@@ -222,7 +264,7 @@ async fn run_network(
                     break;
                 }
             },
-            _ = mouse_flush.tick() => {
+            _ = &mut mouse_flush => {
                 let message = match pending_move.lock() {
                     Ok(mut pending) => pending.take(),
                     Err(_) => {
@@ -233,12 +275,23 @@ async fn run_network(
                     }
                 };
                 if let Some(message) = message {
-                    if let Err(error) = sender.send(&message).await {
+                    let message = match into_mouse_datagram(message, last_reliable_sequence) {
+                        Ok(message) => message,
+                        Err(error) => {
+                            drop(events.send(NetworkEvent::Disconnected(error)));
+                            break;
+                        }
+                    };
+                    if let Err(error) = datagrams.send(&message) {
                         drop(events.send(NetworkEvent::Disconnected(error.to_string())));
                         break;
                     }
                     sent_moves = sent_moves.saturating_add(1);
                 }
+                mouse_flush.as_mut().reset(
+                    tokio::time::Instant::now()
+                        + adaptive_mouse_interval(sender.smoothed_rtt()),
+                );
             },
             _ = metrics.tick() => {
                 let coalesced_moves = match pending_move.lock() {
@@ -252,8 +305,12 @@ async fn run_network(
                 };
                 if sent_moves > 0 || coalesced_moves > 0 {
                     let rtt_ms = sender.smoothed_rtt().as_secs_f64() * 1_000.0;
+                    let send_interval_ms = u64::try_from(
+                        adaptive_mouse_interval(sender.smoothed_rtt()).as_millis(),
+                    ).unwrap_or(u64::MAX);
                     if events.send(NetworkEvent::Metrics {
                         rtt_ms,
+                        send_interval_ms,
                         sent_moves,
                         coalesced_moves,
                     }).is_err() {
@@ -267,6 +324,12 @@ async fn run_network(
                     drop(events.send(NetworkEvent::Disconnected("peer shut down".to_owned())));
                     break;
                 }
+                Ok(WireMessage::MouseDatagram { .. }) => {
+                    drop(events.send(NetworkEvent::Disconnected(
+                        "peer sent a movement datagram on the reliable stream".to_owned(),
+                    )));
+                    break;
+                }
                 Ok(message) => {
                     if events.send(NetworkEvent::Message(message)).is_err() {
                         break;
@@ -276,8 +339,70 @@ async fn run_network(
                     drop(events.send(NetworkEvent::Disconnected(error.to_string())));
                     break;
                 }
+            },
+            message = datagrams.receive() => match message {
+                Ok(message @ WireMessage::MouseDatagram { .. }) => {
+                    match incoming_move.lock() {
+                        Ok(mut pending) => *pending = Some(message),
+                        Err(_) => {
+                            drop(events.send(NetworkEvent::Disconnected(
+                                "incoming mouse buffer lock was poisoned".to_owned(),
+                            )));
+                            break;
+                        }
+                    }
+                }
+                Ok(_) => {
+                    drop(events.send(NetworkEvent::Disconnected(
+                        "peer sent a non-movement QUIC datagram".to_owned(),
+                    )));
+                    break;
+                }
+                Err(error) => {
+                    drop(events.send(NetworkEvent::Disconnected(error.to_string())));
+                    break;
+                }
             }
         }
+    }
+}
+
+fn into_mouse_datagram(message: WireMessage, after_sequence: u64) -> Result<WireMessage, String> {
+    match message {
+        WireMessage::Mouse {
+            session_id,
+            event:
+                RoutedEvent {
+                    sequence,
+                    event: RemoteMouseEvent::MoveAbsolute { screen, position },
+                },
+        } => Ok(WireMessage::MouseDatagram {
+            session_id,
+            after_sequence,
+            sequence,
+            screen,
+            position,
+        }),
+        _ => Err("mouse datagram buffer contained a non-movement message".to_owned()),
+    }
+}
+
+fn reliable_mouse_sequence(message: &WireMessage) -> Option<u64> {
+    match message {
+        WireMessage::Mouse { event, .. } => Some(event.sequence),
+        _ => None,
+    }
+}
+
+fn adaptive_mouse_interval(rtt: Duration) -> Duration {
+    if rtt <= Duration::from_millis(25) {
+        Duration::from_millis(4)
+    } else if rtt <= Duration::from_millis(75) {
+        Duration::from_millis(6)
+    } else if rtt <= Duration::from_millis(150) {
+        Duration::from_millis(8)
+    } else {
+        Duration::from_millis(12)
     }
 }
 
@@ -330,5 +455,39 @@ mod tests {
             session_id: 7,
             monotonic_ms: 10,
         }));
+    }
+
+    #[test]
+    fn movement_datagram_carries_the_reliable_ordering_watermark() {
+        assert_eq!(
+            into_mouse_datagram(movement(9, 12.5), 7).unwrap(),
+            WireMessage::MouseDatagram {
+                session_id: 7,
+                after_sequence: 7,
+                sequence: 9,
+                screen: ScreenId(3),
+                position: Point::new(12.5, 20.0),
+            }
+        );
+    }
+
+    #[test]
+    fn mouse_send_interval_adapts_to_rtt() {
+        assert_eq!(
+            adaptive_mouse_interval(Duration::from_millis(10)),
+            Duration::from_millis(4)
+        );
+        assert_eq!(
+            adaptive_mouse_interval(Duration::from_millis(50)),
+            Duration::from_millis(6)
+        );
+        assert_eq!(
+            adaptive_mouse_interval(Duration::from_millis(100)),
+            Duration::from_millis(8)
+        );
+        assert_eq!(
+            adaptive_mouse_interval(Duration::from_millis(200)),
+            Duration::from_millis(12)
+        );
     }
 }

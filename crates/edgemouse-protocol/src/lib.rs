@@ -12,7 +12,7 @@ use edgemouse_core::{
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const HEADER_LEN: usize = 12;
 pub const MAX_FRAME_LEN: usize = 64 * 1024;
 const MAGIC: [u8; 4] = *b"EMOU";
@@ -27,6 +27,15 @@ pub enum WireMessage {
     Mouse {
         session_id: u64,
         event: RoutedEvent,
+    },
+    /// An unreliable absolute movement update. `after_sequence` identifies the
+    /// newest reliable mouse event that must be applied before this position.
+    MouseDatagram {
+        session_id: u64,
+        after_sequence: u64,
+        sequence: u64,
+        screen: ScreenId,
+        position: Point,
     },
     Heartbeat {
         session_id: u64,
@@ -114,6 +123,22 @@ pub fn encode_frame(message: &WireMessage) -> Result<Vec<u8>, EncodeError> {
             put_u64(&mut payload, event.sequence);
             encode_mouse_payload(&mut payload, event.event)?;
         }
+        WireMessage::MouseDatagram {
+            session_id,
+            after_sequence,
+            sequence,
+            screen,
+            position,
+        } => {
+            put_u64(&mut payload, *session_id);
+            put_u64(&mut payload, *after_sequence);
+            put_u64(&mut payload, *sequence);
+            put_u64(&mut payload, screen.0);
+            require_finite(position.x)?;
+            require_finite(position.y)?;
+            put_f64(&mut payload, position.x);
+            put_f64(&mut payload, position.y);
+        }
         WireMessage::Heartbeat {
             session_id,
             monotonic_ms,
@@ -179,6 +204,7 @@ pub fn decode_frame(frame: &[u8]) -> Result<WireMessage, DecodeError> {
         9 => WireMessage::Goodbye {
             session_id: payload.u64()?,
         },
+        10 => decode_mouse_datagram(&mut payload)?,
         other => return Err(DecodeError::InvalidTag(other)),
     };
     if !payload.is_empty() {
@@ -217,6 +243,7 @@ fn tag_for(message: &WireMessage) -> u8 {
             RemoteMouseEvent::Leave => 6,
             RemoteMouseEvent::ReleaseAll => 7,
         },
+        WireMessage::MouseDatagram { .. } => 10,
         WireMessage::Heartbeat { .. } => 8,
         WireMessage::Goodbye { .. } => 9,
     }
@@ -298,6 +325,21 @@ fn decode_mouse(tag: u8, payload: &mut Reader<'_>) -> Result<WireMessage, Decode
     Ok(WireMessage::Mouse {
         session_id,
         event: RoutedEvent { sequence, event },
+    })
+}
+
+fn decode_mouse_datagram(payload: &mut Reader<'_>) -> Result<WireMessage, DecodeError> {
+    let session_id = payload.u64()?;
+    let after_sequence = payload.u64()?;
+    let sequence = payload.u64()?;
+    let screen = ScreenId(payload.u64()?);
+    let position = payload.point()?;
+    Ok(WireMessage::MouseDatagram {
+        session_id,
+        after_sequence,
+        sequence,
+        screen,
+        position,
     })
 }
 
@@ -462,6 +504,13 @@ mod tests {
                 },
             });
         }
+        round_trip(WireMessage::MouseDatagram {
+            session_id: 99,
+            after_sequence: 120,
+            sequence: 123,
+            screen: ScreenId(7),
+            position: Point::new(100.25, 200.75),
+        });
         round_trip(WireMessage::Heartbeat {
             session_id: 99,
             monotonic_ms: 1_000,

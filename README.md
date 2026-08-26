@@ -18,6 +18,8 @@ tray UI, installers, and elevated Windows desktops.
 - Native macOS `CGEventTap` capture and marked `CGEventPost` injection.
 - Native Windows `WH_MOUSE_LL` capture and marked `SendInput` injection.
 - Mutually authenticated QUIC/TLS with one explicitly trusted peer certificate.
+- Latest-position QUIC datagrams for movement, with reliable ordered delivery
+  retained for clicks, scrolling, edge transitions, and final positions.
 - Versioned, bounded binary frames with strict untrusted-input validation.
 - 500 ms heartbeats, 1.5 s default timeout, local-pointer recovery, and forced
   synthetic-button release on disconnect.
@@ -111,10 +113,15 @@ Mac use the logical resolution shown by macOS, not the doubled backing-pixel
 resolution. Set each screen's `scale` to its OS display scale: for example,
 Windows 200% scaling is `2.0`, while Windows 100% scaling is `1.0`.
 
-Remote absolute movement is emitted at most every 4 ms, always using the newest
-position. Buttons, wheels, enter, and leave remain strictly ordered and are
-never coalesced. While movement is active, the agent prints a five-second link
-summary containing QUIC RTT, sent movement updates, and merged updates.
+Remote absolute movement is emitted every 4–12 ms according to current RTT,
+always using the newest position. Stale movement is discarded during network
+jitter instead of being replayed later. Buttons, wheels, enter, leave, and the
+last position before each control event remain reliable and strictly ordered.
+While movement is active, the agent prints a five-second link summary containing
+QUIC RTT, the current movement interval, sent updates, and merged updates.
+
+Both computers must run the same EdgeMouse version. Version 0.1.5 uses protocol
+v2 and will intentionally refuse a connection to a 0.1.4 executable.
 
 ## Verify the source tree
 
