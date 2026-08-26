@@ -181,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "edgemouse-agent"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ctrlc",
  "edgemouse-core",
@@ -196,32 +196,32 @@ dependencies = [
 
 [[package]]
 name = "edgemouse-core"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "edgemouse-platform-macos"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "edgemouse-core",
 ]
 
 [[package]]
 name = "edgemouse-platform-windows"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "edgemouse-core",
 ]
 
 [[package]]
 name = "edgemouse-protocol"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "edgemouse-core",
 ]
 
 [[package]]
 name = "edgemouse-transport"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "edgemouse-core",
  "edgemouse-protocol",

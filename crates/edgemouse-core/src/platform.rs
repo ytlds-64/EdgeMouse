@@ -14,6 +14,7 @@ pub enum PermissionState {
 pub enum CaptureMode {
     Local { restore: Option<Point> },
     Remote { anchor: Point },
+    ReceivingRemote { position: Point },
 }
 
 /// OS input capture. Implementations must keep callbacks non-blocking.

@@ -101,6 +101,35 @@ impl Session {
         self.pointer
     }
 
+    /// Aligns the local routing state with a pointer position last controlled by
+    /// the peer. This is used when an incoming remote-control session ends.
+    pub fn synchronize_local_pointer(
+        &mut self,
+        screen: ScreenId,
+        pointer: Point,
+    ) -> Result<(), SessionError> {
+        if self.state != ControlState::Local {
+            return Err(SessionError::CannotSynchronizeWhileRemote);
+        }
+        let target = self
+            .topology
+            .screen(screen)
+            .ok_or(SessionError::Topology(TopologyError::MissingScreen(screen)))?;
+        if target.node != self.local_node {
+            return Err(SessionError::SynchronizedScreenNotLocal(screen));
+        }
+        if !target.bounds.contains(pointer) {
+            return Err(SessionError::SynchronizedPointerOutside(screen));
+        }
+        self.current_screen = screen;
+        self.pointer = pointer;
+        self.entry_guard = None;
+        self.pressed_buttons.clear();
+        self.last_peer_activity_ms = None;
+        self.local_restore = None;
+        Ok(())
+    }
+
     pub fn handle_input(
         &mut self,
         event: PhysicalMouseEvent,
@@ -395,6 +424,9 @@ pub enum SessionError {
     NonFiniteWheel,
     NotRecovering,
     MissingRestorePoint,
+    CannotSynchronizeWhileRemote,
+    SynchronizedScreenNotLocal(ScreenId),
+    SynchronizedPointerOutside(ScreenId),
 }
 
 impl Display for SessionError {
@@ -414,6 +446,19 @@ impl Display for SessionError {
             Self::NonFiniteWheel => formatter.write_str("wheel deltas must be finite"),
             Self::NotRecovering => formatter.write_str("session is not recovering"),
             Self::MissingRestorePoint => formatter.write_str("session has no local restore point"),
+            Self::CannotSynchronizeWhileRemote => {
+                formatter.write_str("cannot synchronize the local pointer while routing remotely")
+            }
+            Self::SynchronizedScreenNotLocal(screen) => {
+                write!(formatter, "synchronized screen {} is not local", screen.0)
+            }
+            Self::SynchronizedPointerOutside(screen) => {
+                write!(
+                    formatter,
+                    "synchronized pointer is outside screen {}",
+                    screen.0
+                )
+            }
         }
     }
 }
@@ -620,5 +665,37 @@ mod tests {
         session.complete_recovery().unwrap();
         assert_eq!(session.state(), ControlState::Local);
         assert_eq!(session.current_screen(), LOCAL_SCREEN);
+    }
+
+    #[test]
+    fn synchronizes_pointer_after_incoming_remote_control() {
+        let mut session = session();
+        let position = Point::new(25.0, 75.0);
+
+        session
+            .synchronize_local_pointer(LOCAL_SCREEN, position)
+            .unwrap();
+
+        assert_eq!(session.state(), ControlState::Local);
+        assert_eq!(session.current_screen(), LOCAL_SCREEN);
+        assert_eq!(session.pointer(), position);
+    }
+
+    #[test]
+    fn refuses_to_synchronize_an_outgoing_remote_session() {
+        let mut session = session();
+        session
+            .handle_input(
+                PhysicalMouseEvent::Move {
+                    movement: Vector::new(5.0, 0.0),
+                },
+                100,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            session.synchronize_local_pointer(LOCAL_SCREEN, Point::new(25.0, 75.0)),
+            Err(SessionError::CannotSynchronizeWhileRemote)
+        ));
     }
 }

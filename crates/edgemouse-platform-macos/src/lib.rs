@@ -274,6 +274,12 @@ impl MouseCaptureBackend for MacMouseCapture {
                 self.suppress.store(true, Ordering::Release);
                 Ok(())
             }
+            CaptureMode::ReceivingRemote { position } => {
+                Self::warp(position)?;
+                self.show_cursor()?;
+                self.suppress.store(true, Ordering::Release);
+                Ok(())
+            }
         }
     }
 

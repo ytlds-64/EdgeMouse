@@ -284,6 +284,13 @@ impl MouseCaptureBackend for WindowsMouseCapture {
                 self.suppress.store(true, Ordering::Release);
                 Ok(())
             }
+            CaptureMode::ReceivingRemote { position } => {
+                self.set_reference_point(position)?;
+                Self::warp(position)?;
+                self.show_cursor();
+                self.suppress.store(true, Ordering::Release);
+                Ok(())
+            }
         }
     }
 

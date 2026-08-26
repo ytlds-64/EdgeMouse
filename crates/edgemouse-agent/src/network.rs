@@ -125,19 +125,17 @@ async fn run_network(
 
     loop {
         tokio::select! {
-            command = commands.recv() => match command {
-                Some(NetworkCommand::Message(message)) => {
-                    if let Err(error) = sender.send(&message).await {
-                        drop(events.send(NetworkEvent::Disconnected(error.to_string())));
-                        break;
-                    }
-                }
-                Some(NetworkCommand::Shutdown) | None => {
-                    drop(sender.send(&WireMessage::Goodbye { session_id }).await);
-                    sender.close(b"normal shutdown");
+            biased;
+            _ = heartbeat.tick() => {
+                let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                if let Err(error) = sender.send(&WireMessage::Heartbeat {
+                    session_id,
+                    monotonic_ms: elapsed,
+                }).await {
+                    drop(events.send(NetworkEvent::Disconnected(error.to_string())));
                     break;
                 }
-            },
+            }
             message = receiver.receive() => match message {
                 Ok(WireMessage::Goodbye { .. }) => {
                     drop(events.send(NetworkEvent::Disconnected("peer shut down".to_owned())));
@@ -153,13 +151,16 @@ async fn run_network(
                     break;
                 }
             },
-            _ = heartbeat.tick() => {
-                let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                if let Err(error) = sender.send(&WireMessage::Heartbeat {
-                    session_id,
-                    monotonic_ms: elapsed,
-                }).await {
-                    drop(events.send(NetworkEvent::Disconnected(error.to_string())));
+            command = commands.recv() => match command {
+                Some(NetworkCommand::Message(message)) => {
+                    if let Err(error) = sender.send(&message).await {
+                        drop(events.send(NetworkEvent::Disconnected(error.to_string())));
+                        break;
+                    }
+                }
+                Some(NetworkCommand::Shutdown) | None => {
+                    drop(sender.send(&WireMessage::Goodbye { session_id }).await);
+                    sender.close(b"normal shutdown");
                     break;
                 }
             }
