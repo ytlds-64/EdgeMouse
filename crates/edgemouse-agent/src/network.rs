@@ -1,6 +1,7 @@
 use edgemouse_core::{NodeId, RemoteMouseEvent, RoutedEvent};
 use edgemouse_protocol::WireMessage;
 use edgemouse_transport::{PeerConfig, PeerLink};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -8,6 +9,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 const COMMAND_CAPACITY: usize = 1_024;
+const CONNECT_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
 const MOUSE_FLUSH_INTERVAL_FAST: Duration = Duration::from_millis(4);
 const METRICS_INTERVAL: Duration = Duration::from_secs(5);
@@ -147,7 +149,11 @@ impl IncomingMoveCoalescer {
 }
 
 impl Network {
-    pub fn connect(config: PeerConfig, session_id: u64) -> Result<Self, String> {
+    pub fn connect(
+        config: PeerConfig,
+        session_id: u64,
+        stopping: Arc<AtomicBool>,
+    ) -> Result<Self, String> {
         let (commands_sender, commands_receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (event_sender, event_receiver) = std_mpsc::channel();
         let (startup_sender, startup_receiver) = std_mpsc::sync_channel(1);
@@ -180,10 +186,16 @@ impl Network {
                     }
                 };
                 runtime.block_on(async move {
-                    let link = match PeerLink::connect(config).await {
-                        Ok(link) => link,
-                        Err(error) => {
-                            drop(startup_sender.send(Err(error.to_string())));
+                    let link = tokio::select! {
+                        result = PeerLink::connect(config) => match result {
+                            Ok(link) => link,
+                            Err(error) => {
+                                drop(startup_sender.send(Err(error.to_string())));
+                                return;
+                            }
+                        },
+                        () = wait_for_cancellation(&stopping) => {
+                            drop(startup_sender.send(Err("connection cancelled".to_owned())));
                             return;
                         }
                     };
@@ -286,6 +298,12 @@ impl Network {
                 Err("network event channel disconnected".to_owned())
             }
         }
+    }
+}
+
+async fn wait_for_cancellation(stopping: &AtomicBool) {
+    while !stopping.load(Ordering::Acquire) {
+        tokio::time::sleep(CONNECT_CANCELLATION_POLL_INTERVAL).await;
     }
 }
 

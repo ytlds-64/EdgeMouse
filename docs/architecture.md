@@ -120,8 +120,8 @@ restored during transitions and teardown.
 ## Deliberate next steps
 
 1. Test on physical Windows and macOS machines, including 125–1000 Hz mice,
-   long mixed Ethernet/Wi-Fi sessions, horizontal scroll, sleep/wake, and Wi-Fi
-   loss.
+   long mixed Ethernet/Wi-Fi sessions, horizontal scroll, sleep/wake, and the
+   automatic recovery path during Wi-Fi loss.
 2. Add Windows Raw Input based on latency measurements.
 3. Add automatic LAN discovery plus a short-code/fingerprint pairing UX.
 4. Add a tray/settings UI, signed installers, launch-at-login, and diagnostics.

@@ -23,6 +23,8 @@ tray UI, installers, and elevated Windows desktops.
 - Versioned, bounded binary frames with strict untrusted-input validation.
 - 500 ms heartbeats, 1.5 s default timeout, local-pointer recovery, and forced
   synthetic-button release on disconnect.
+- Automatic reconnection after an established link is interrupted, with local
+  mouse control kept available while the peer or network is offline.
 - Identity generation, configuration validation, diagnostics, and simulation
   commands.
 
@@ -104,8 +106,10 @@ Accessibility permission.
    ```
 
 The certificate with the lower derived node ID initiates the connection; the
-other side accepts it. Either process may be started first. Press Ctrl+C to
-release input and shut down cleanly.
+other side accepts it. Either process may be started first. After a successful
+connection, a temporary network loss or peer restart restores local mouse control
+and makes both agents retry automatically. Press Ctrl+C to release input and shut
+down cleanly.
 
 Screen coordinates must match the operating system's logical desktop coordinate
 space. For the single-screen MVP the origin is normally `(0, 0)`. On a Retina
@@ -123,7 +127,7 @@ and merged updates. Windows requests 1 ms timer resolution while EdgeMouse is
 running so the 4–12 ms movement schedule does not collapse to the default
 roughly 15.6 ms system timer period.
 
-Both computers must use protocol v2. Versions 0.1.5 through 0.1.8 use protocol
+Both computers must use protocol v2. Versions 0.1.5 through 0.1.9 use protocol
 v2 and will intentionally refuse a connection to a 0.1.4 executable. For the
 best movement behavior, install the latest version on both computers.
 

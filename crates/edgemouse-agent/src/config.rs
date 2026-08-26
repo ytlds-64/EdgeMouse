@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[derive(Clone)]
 pub struct LoadedConfig {
     pub transport: PeerConfig,
     pub topology: Topology,

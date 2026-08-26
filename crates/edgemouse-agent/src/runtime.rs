@@ -13,18 +13,43 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const RECONNECT_INITIAL_DELAY: Duration = Duration::from_secs(1);
+const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(5);
+const RECONNECT_STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConnectionEnd {
+    Stopped,
+    Disconnected(String),
+}
+
+#[derive(Debug)]
+struct ReconnectBackoff {
+    next: Duration,
+}
+
+impl Default for ReconnectBackoff {
+    fn default() -> Self {
+        Self {
+            next: RECONNECT_INITIAL_DELAY,
+        }
+    }
+}
+
+impl ReconnectBackoff {
+    fn next_delay(&mut self) -> Duration {
+        let delay = self.next;
+        self.next = self.next.saturating_mul(2).min(RECONNECT_MAX_DELAY);
+        delay
+    }
+
+    fn reset(&mut self) {
+        self.next = RECONNECT_INITIAL_DELAY;
+    }
+}
 
 pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     let config = LoadedConfig::load(config_path)?;
-    let initial_pointer = platform::current_pointer()?;
-    if !config.local_bounds.contains(initial_pointer) {
-        return Err(format!(
-            "current pointer ({:.1}, {:.1}) is outside configured local screen bounds; check origin_x, origin_y, width, and height",
-            initial_pointer.x, initial_pointer.y
-        )
-        .into());
-    }
-
     println!(
         "Local node : {}",
         edgemouse_transport::format_node_id(config.local_node)
@@ -33,25 +58,83 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         "Peer node  : {}",
         edgemouse_transport::format_node_id(config.peer_node)
     );
-    println!("Connecting to the trusted peer…");
-    let session_id = new_session_id(config.local_node.0);
-    let network = Network::connect(config.transport, session_id)?;
-    if network.peer_node != config.peer_node {
-        return Err("connected peer identity does not match configuration".into());
-    }
-    println!("Connected to {} with mutual TLS", network.peer_name);
+    let stopping = install_shutdown_handler()?;
+    let mut reconnecting = false;
+    let mut backoff = ReconnectBackoff::default();
 
+    loop {
+        if stopping.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let initial_pointer = platform::current_pointer()?;
+        validate_initial_pointer(&config, initial_pointer)?;
+        let session_id = new_session_id(config.local_node.0);
+        if reconnecting {
+            println!("Reconnecting to the trusted peer…");
+        } else {
+            println!("Connecting to the trusted peer…");
+        }
+        let network =
+            match Network::connect(config.transport.clone(), session_id, Arc::clone(&stopping)) {
+                Ok(network) => network,
+                Err(_) if stopping.load(Ordering::Acquire) => return Ok(()),
+                Err(error) if !reconnecting => return Err(error.into()),
+                Err(error) => {
+                    let delay = backoff.next_delay();
+                    eprintln!(
+                        "Reconnect attempt failed: {error}; retrying in {} second(s)",
+                        delay.as_secs()
+                    );
+                    if wait_until_retry_or_stop(&stopping, delay) {
+                        return Ok(());
+                    }
+                    continue;
+                }
+            };
+        if network.peer_node != config.peer_node {
+            return Err("connected peer identity does not match configuration".into());
+        }
+        if reconnecting {
+            println!("Reconnected to {} with mutual TLS", network.peer_name);
+        } else {
+            println!("Connected to {} with mutual TLS", network.peer_name);
+        }
+        backoff.reset();
+
+        match run_connected(&config, network, initial_pointer, session_id, &stopping)? {
+            ConnectionEnd::Stopped => return Ok(()),
+            ConnectionEnd::Disconnected(reason) => {
+                reconnecting = true;
+                let delay = backoff.next_delay();
+                eprintln!(
+                    "Connection lost: {reason}; local mouse control restored; retrying in {} second(s)",
+                    delay.as_secs()
+                );
+                if wait_until_retry_or_stop(&stopping, delay) {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+fn run_connected(
+    config: &LoadedConfig,
+    network: Network,
+    initial_pointer: Point,
+    session_id: u64,
+    stopping: &AtomicBool,
+) -> Result<ConnectionEnd, Box<dyn Error>> {
     let mut capture = platform::start_capture(config.local_bounds, config.local_scale)?;
     let mut injector = platform::injector(initial_pointer);
     let mut session = Session::new(
         config.local_node,
-        config.topology,
+        config.topology.clone(),
         config.local_screen,
         initial_pointer,
         config.session,
     )?;
     let mut remote = RemoteReceiver::new(config.local_screen, config.session.peer_timeout_ms);
-    let stopping = install_shutdown_handler()?;
     let clock = Instant::now();
 
     println!("Edge switching active; press Ctrl+C to stop");
@@ -62,7 +145,7 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         &mut session,
         &mut remote,
         session_id,
-        &stopping,
+        stopping,
         clock,
     );
 
@@ -84,6 +167,31 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     result
 }
 
+fn validate_initial_pointer(
+    config: &LoadedConfig,
+    initial_pointer: Point,
+) -> Result<(), Box<dyn Error>> {
+    if config.local_bounds.contains(initial_pointer) {
+        return Ok(());
+    }
+    Err(format!(
+        "current pointer ({:.1}, {:.1}) is outside configured local screen bounds; check origin_x, origin_y, width, and height",
+        initial_pointer.x, initial_pointer.y
+    )
+    .into())
+}
+
+fn wait_until_retry_or_stop(stopping: &AtomicBool, delay: Duration) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < delay {
+        if stopping.load(Ordering::Acquire) {
+            return true;
+        }
+        std::thread::sleep(RECONNECT_STOP_POLL_INTERVAL);
+    }
+    stopping.load(Ordering::Acquire)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_loop(
     network: &Network,
@@ -94,7 +202,7 @@ fn run_loop(
     session_id: u64,
     stopping: &AtomicBool,
     clock: Instant,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<ConnectionEnd, Box<dyn Error>> {
     while !stopping.load(Ordering::Acquire) {
         let now_ms = elapsed_ms(clock);
         while let Some(event) = network.try_receive()? {
@@ -133,7 +241,7 @@ fn run_loop(
                     return Err("peer sent a duplicate Hello message".into());
                 }
                 NetworkEvent::Message(WireMessage::Goodbye { .. }) => {
-                    return Err("peer shut down".into());
+                    return Ok(ConnectionEnd::Disconnected("peer shut down".to_owned()));
                 }
                 NetworkEvent::Message(WireMessage::MouseDatagram { .. }) => {
                     return Err("peer sent a movement datagram on the reliable stream".into());
@@ -155,9 +263,7 @@ fn run_loop(
                     if let Some(position) = remote.reset(injector) {
                         restore_incoming_control(remote.local_screen, position, capture, session)?;
                     }
-                    let effects = session.disconnect_peer(network.peer_node);
-                    apply_effects(effects, network, capture, session, session_id)?;
-                    return Err(format!("peer disconnected: {reason}").into());
+                    return Ok(ConnectionEnd::Disconnected(reason));
                 }
             }
         }
@@ -183,7 +289,7 @@ fn run_loop(
             std::thread::sleep(IDLE_POLL_INTERVAL);
         }
     }
-    Ok(())
+    Ok(ConnectionEnd::Stopped)
 }
 
 fn apply_remote_transition(
@@ -562,6 +668,18 @@ mod tests {
             self.releases += 1;
             Ok(())
         }
+    }
+
+    #[test]
+    fn reconnect_backoff_is_bounded_and_resettable() {
+        let mut backoff = ReconnectBackoff::default();
+        assert_eq!(backoff.next_delay(), Duration::from_secs(1));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(2));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(4));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(5));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(5));
+        backoff.reset();
+        assert_eq!(backoff.next_delay(), Duration::from_secs(1));
     }
 
     #[test]
