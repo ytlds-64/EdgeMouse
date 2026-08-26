@@ -105,6 +105,17 @@ Accessibility permission.
    edgemouse run ./edgemouse.toml
    ```
 
+   On macOS, the included launcher can start the release executable while showing
+   and saving the complete terminal output:
+
+   ```sh
+   ./scripts/run-macos-with-log.sh
+   ```
+
+   The newest run is written to `mac-current.log`, and timestamped copies are
+   kept under `logs/`. An alternative configuration path may be passed as the
+   script's only argument.
+
 The certificate with the lower derived node ID initiates the connection; the
 other side accepts it. Either process may be started first. After a successful
 connection, a temporary network loss or peer restart restores local mouse control
