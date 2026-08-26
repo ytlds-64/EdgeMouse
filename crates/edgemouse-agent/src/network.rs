@@ -11,6 +11,42 @@ const COMMAND_CAPACITY: usize = 1_024;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
 const MOUSE_FLUSH_INTERVAL_FAST: Duration = Duration::from_millis(4);
 const METRICS_INTERVAL: Duration = Duration::from_secs(5);
+#[cfg(target_os = "windows")]
+const WINDOWS_TIMER_PERIOD_MS: u32 = 1;
+
+#[cfg(target_os = "windows")]
+#[link(name = "Winmm")]
+unsafe extern "system" {
+    fn timeBeginPeriod(period: u32) -> u32;
+    fn timeEndPeriod(period: u32) -> u32;
+}
+
+struct TimerResolution;
+
+impl TimerResolution {
+    #[cfg(target_os = "windows")]
+    fn request() -> Result<Self, String> {
+        // SAFETY: timeBeginPeriod takes one integer value and retains no Rust memory.
+        if unsafe { timeBeginPeriod(WINDOWS_TIMER_PERIOD_MS) } == 0 {
+            Ok(Self)
+        } else {
+            Err("Windows refused the 1 ms network timer resolution".to_owned())
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn request() -> Result<Self, String> {
+        Ok(Self)
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for TimerResolution {
+    fn drop(&mut self) {
+        // SAFETY: This balances the one successful timeBeginPeriod call in request().
+        unsafe { timeEndPeriod(WINDOWS_TIMER_PERIOD_MS) };
+    }
+}
 
 pub enum NetworkEvent {
     Message(WireMessage),
@@ -23,6 +59,7 @@ pub enum NetworkEvent {
         rtt_ms: f64,
         send_interval_ms: u64,
         sent_moves: u64,
+        skipped_moves: u64,
         coalesced_moves: u64,
         received_moves: u64,
         stale_moves: u64,
@@ -121,6 +158,13 @@ impl Network {
         let thread = std::thread::Builder::new()
             .name("edgemouse-network".to_owned())
             .spawn(move || {
+                let _timer_resolution = match TimerResolution::request() {
+                    Ok(resolution) => resolution,
+                    Err(error) => {
+                        drop(startup_sender.send(Err(error)));
+                        return;
+                    }
+                };
                 let runtime = match tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(2)
                     .enable_all()
@@ -271,6 +315,7 @@ async fn run_network(
     let mut metrics = tokio::time::interval(METRICS_INTERVAL);
     metrics.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut sent_moves = 0_u64;
+    let mut skipped_moves = 0_u64;
     let mut last_reliable_sequence = 0_u64;
 
     loop {
@@ -324,11 +369,14 @@ async fn run_network(
                             break;
                         }
                     };
-                    if let Err(error) = datagrams.send(&message) {
-                        drop(events.send(NetworkEvent::Disconnected(error.to_string())));
-                        break;
+                    match datagrams.send(&message) {
+                        Ok(true) => sent_moves = sent_moves.saturating_add(1),
+                        Ok(false) => skipped_moves = skipped_moves.saturating_add(1),
+                        Err(error) => {
+                            drop(events.send(NetworkEvent::Disconnected(error.to_string())));
+                            break;
+                        }
                     }
-                    sent_moves = sent_moves.saturating_add(1);
                 }
                 mouse_flush.as_mut().reset(
                     tokio::time::Instant::now()
@@ -354,7 +402,7 @@ async fn run_network(
                         break;
                     }
                 };
-                if sent_moves > 0 || coalesced_moves > 0 || received_moves > 0 {
+                if sent_moves > 0 || skipped_moves > 0 || coalesced_moves > 0 || received_moves > 0 {
                     let rtt_ms = sender.smoothed_rtt().as_secs_f64() * 1_000.0;
                     let send_interval_ms = u64::try_from(
                         adaptive_mouse_interval(sender.smoothed_rtt()).as_millis(),
@@ -363,6 +411,7 @@ async fn run_network(
                         rtt_ms,
                         send_interval_ms,
                         sent_moves,
+                        skipped_moves,
                         coalesced_moves,
                         received_moves,
                         stale_moves,
@@ -370,6 +419,7 @@ async fn run_network(
                         break;
                     }
                     sent_moves = 0;
+                    skipped_moves = 0;
                 }
             },
             message = receiver.receive() => match message {

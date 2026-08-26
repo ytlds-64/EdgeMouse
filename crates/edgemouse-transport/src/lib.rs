@@ -3,7 +3,10 @@
 #![forbid(unsafe_code)]
 
 use edgemouse_core::NodeId;
-use edgemouse_protocol::{HEADER_LEN, WireMessage, decode_frame, encode_frame, expected_frame_len};
+use edgemouse_protocol::{
+    HEADER_LEN, MOUSE_DATAGRAM_FRAME_LEN, WireMessage, decode_frame, encode_frame,
+    expected_frame_len,
+};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{
     ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig, TransportConfig,
@@ -22,7 +25,8 @@ const TLS_SERVER_NAME: &str = "edgemouse.local";
 const ALPN: &[u8] = b"edgemouse/2";
 const RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const DATAGRAM_RECEIVE_BUFFER_BYTES: usize = 4 * 1024;
-const DATAGRAM_SEND_BUFFER_BYTES: usize = 1024;
+// One fixed-size movement frame: congestion drops positions at the application latest-value slot.
+const DATAGRAM_SEND_BUFFER_BYTES: usize = MOUSE_DATAGRAM_FRAME_LEN;
 const CAPABILITY_MOUSE: u32 = 1 << 0;
 const CAPABILITY_MOUSE_DATAGRAM: u32 = 1 << 1;
 const REQUIRED_CAPABILITIES: u32 = CAPABILITY_MOUSE | CAPABILITY_MOUSE_DATAGRAM;
@@ -330,13 +334,21 @@ pub struct PeerDatagrams {
 }
 
 impl PeerDatagrams {
-    pub fn send(&self, message: &WireMessage) -> Result<(), TransportError> {
+    /// Queues the newest movement only when Quinn has room without evicting an older datagram.
+    ///
+    /// `Ok(false)` means the caller should discard this stale position and try again with the
+    /// next absolute position instead of allowing a network backlog to form.
+    pub fn send(&self, message: &WireMessage) -> Result<bool, TransportError> {
         let frame = encode_frame(message)
             .map_err(|error| TransportError::with_source("failed to encode datagram", error))?;
+        if self.guard.connection.datagram_send_buffer_space() < frame.len() {
+            return Ok(false);
+        }
         self.guard
             .connection
             .send_datagram(frame.into())
-            .map_err(|error| TransportError::with_source("failed to send QUIC datagram", error))
+            .map_err(|error| TransportError::with_source("failed to send QUIC datagram", error))?;
+        Ok(true)
     }
 
     pub async fn receive(&self) -> Result<WireMessage, TransportError> {
@@ -635,8 +647,26 @@ mod tests {
             screen: edgemouse_core::ScreenId(3),
             position: edgemouse_core::Point::new(10.5, 20.25),
         };
-        first_datagrams.send(&movement).unwrap();
+        assert!(first_datagrams.send(&movement).unwrap());
         assert_eq!(second_datagrams.receive().await.unwrap(), movement);
+
+        // Keep the endpoint driver from draining the queue while this tight loop runs. The
+        // application must skip excess latest-value movement instead of entering Quinn's
+        // drop-oldest path or accumulating delayed cursor positions.
+        let mut skipped = 0;
+        for sequence in 9..10_000 {
+            let movement = WireMessage::MouseDatagram {
+                session_id: 42,
+                after_sequence: 7,
+                sequence,
+                screen: edgemouse_core::ScreenId(3),
+                position: edgemouse_core::Point::new(sequence as f64, 20.25),
+            };
+            if !first_datagrams.send(&movement).unwrap() {
+                skipped += 1;
+            }
+        }
+        assert!(skipped > 0);
 
         first_sender.close(b"test complete");
         second_sender.close(b"test complete");

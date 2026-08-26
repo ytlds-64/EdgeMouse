@@ -142,12 +142,13 @@ fn run_loop(
                     rtt_ms,
                     send_interval_ms,
                     sent_moves,
+                    skipped_moves,
                     coalesced_moves,
                     received_moves,
                     stale_moves,
                 } => {
                     println!(
-                        "Mouse link: RTT {rtt_ms:.1} ms; interval {send_interval_ms} ms; sent {sent_moves}; merged {coalesced_moves}; received {received_moves}; stale {stale_moves}"
+                        "Mouse link: RTT {rtt_ms:.1} ms; interval {send_interval_ms} ms; sent {sent_moves}; skipped {skipped_moves}; merged {coalesced_moves}; received {received_moves}; stale {stale_moves}"
                     );
                 }
                 NetworkEvent::Disconnected(reason) => {

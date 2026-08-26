@@ -118,9 +118,12 @@ always using the newest position. Stale movement is discarded during network
 jitter instead of being replayed later. Buttons, wheels, enter, leave, and the
 last position before each control event remain reliable and strictly ordered.
 While movement is active, the agent prints a five-second link summary containing
-QUIC RTT, the current movement interval, sent updates, and merged updates.
+QUIC RTT, the current movement interval, sent updates, skipped congested updates,
+and merged updates. Windows requests 1 ms timer resolution while EdgeMouse is
+running so the 4–12 ms movement schedule does not collapse to the default
+roughly 15.6 ms system timer period.
 
-Both computers must use protocol v2. Versions 0.1.5 through 0.1.7 use protocol
+Both computers must use protocol v2. Versions 0.1.5 through 0.1.8 use protocol
 v2 and will intentionally refuse a connection to a 0.1.4 executable. For the
 best movement behavior, install the latest version on both computers.
 

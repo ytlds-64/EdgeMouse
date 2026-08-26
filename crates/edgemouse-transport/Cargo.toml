@@ -10,6 +10,8 @@ authors.workspace = true
 edgemouse-core = { path = "../edgemouse-core" }
 edgemouse-protocol = { path = "../edgemouse-protocol" }
 quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+# 0.11.17 double-decrements queued DATAGRAM bytes when dropping an old packet.
+quinn-proto = { version = "=0.11.16", default-features = false }
 rcgen = { version = "0.14.7", default-features = false, features = ["crypto", "ring"] }
 ring = "0.17.14"
 rustls = { version = "0.23.35", default-features = false, features = ["ring", "std"] }

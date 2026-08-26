@@ -15,6 +15,7 @@ use std::fmt::{Display, Formatter};
 pub const PROTOCOL_VERSION: u16 = 2;
 pub const HEADER_LEN: usize = 12;
 pub const MAX_FRAME_LEN: usize = 64 * 1024;
+pub const MOUSE_DATAGRAM_FRAME_LEN: usize = HEADER_LEN + 6 * std::mem::size_of::<u64>();
 const MAGIC: [u8; 4] = *b"EMOU";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -526,6 +527,19 @@ mod tests {
         let mut trailing = encoded;
         trailing.push(0);
         assert_eq!(decode_frame(&trailing), Err(DecodeError::InvalidLength));
+    }
+
+    #[test]
+    fn mouse_datagram_has_the_documented_fixed_size() {
+        let encoded = encode_frame(&WireMessage::MouseDatagram {
+            session_id: 99,
+            after_sequence: 120,
+            sequence: 123,
+            screen: ScreenId(7),
+            position: Point::new(100.25, 200.75),
+        })
+        .unwrap();
+        assert_eq!(encoded.len(), MOUSE_DATAGRAM_FRAME_LEN);
     }
 
     #[test]

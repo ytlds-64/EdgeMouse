@@ -28,11 +28,16 @@ The native queues and the network command queue are bounded by failure behavior.
 Absolute movement uses latest-value slots on both sender and receiver and is
 flushed every 4–12 ms according to the smoothed RTT. Old movement datagrams may
 be discarded instead of retransmitted, preventing Wi-Fi jitter or a
-high-polling-rate mouse from building a stale network backlog. Before a button,
-wheel, enter, leave, or release event is queued, any pending movement is flushed
-reliably first so control ordering remains exact. If the 1,024-message control queue
-fills, the coordinator treats transport as unavailable and restores local input
-rather than silently losing button events.
+high-polling-rate mouse from building a stale network backlog. Before queuing a
+new QUIC Datagram, the sender checks that it fits without evicting an older
+packet; a congested absolute position is skipped because the next position
+supersedes it. Before a button, wheel, enter, leave, or release event is queued,
+any pending movement is flushed reliably first so control ordering remains
+exact. If the 1,024-message control queue fills, the coordinator treats
+transport as unavailable and restores local input rather than silently losing
+button events. On Windows, a balanced `timeBeginPeriod(1)`/`timeEndPeriod(1)`
+request keeps the movement timer from being rounded to the default scheduler
+period while the agent is running.
 
 ## Control state and safety
 
@@ -79,8 +84,10 @@ The receive slot compares event sequence numbers rather than packet arrival
 order, so a delayed older datagram cannot overwrite a newer position when the
 pointer reverses direction.
 
-The locked dependency graph resolves `quinn-proto` to 0.11.17, beyond the
-0.11.14 fix for the malformed transport-parameter denial-of-service advisory.
+The locked dependency graph pins `quinn-proto` to 0.11.16, beyond the 0.11.14
+fix for the malformed transport-parameter denial-of-service advisory. Version
+0.11.17 is intentionally excluded because its refactored Datagram buffer can
+double-decrement queued payload bytes when the drop-oldest path is exercised.
 
 ## Platform adapters
 
