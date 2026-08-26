@@ -120,8 +120,9 @@ last position before each control event remain reliable and strictly ordered.
 While movement is active, the agent prints a five-second link summary containing
 QUIC RTT, the current movement interval, sent updates, and merged updates.
 
-Both computers must run the same EdgeMouse version. Version 0.1.5 uses protocol
-v2 and will intentionally refuse a connection to a 0.1.4 executable.
+Both computers must use protocol v2. Versions 0.1.5 and 0.1.6 use protocol v2
+and will intentionally refuse a connection to a 0.1.4 executable. For the
+best movement behavior, install the latest version on both computers.
 
 ## Verify the source tree
 

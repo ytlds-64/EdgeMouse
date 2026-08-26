@@ -24,6 +24,8 @@ pub enum NetworkEvent {
         send_interval_ms: u64,
         sent_moves: u64,
         coalesced_moves: u64,
+        received_moves: u64,
+        stale_moves: u64,
     },
     Disconnected(String),
 }
@@ -37,7 +39,7 @@ pub struct Network {
     commands: mpsc::Sender<NetworkCommand>,
     events: std_mpsc::Receiver<NetworkEvent>,
     pending_move: Arc<Mutex<MoveCoalescer>>,
-    incoming_move: Arc<Mutex<Option<WireMessage>>>,
+    incoming_move: Arc<Mutex<IncomingMoveCoalescer>>,
     thread: Option<JoinHandle<()>>,
     pub peer_node: NodeId,
     pub peer_name: String,
@@ -47,6 +49,14 @@ pub struct Network {
 struct MoveCoalescer {
     pending: Option<WireMessage>,
     coalesced: u64,
+}
+
+#[derive(Default)]
+struct IncomingMoveCoalescer {
+    pending: Option<WireMessage>,
+    last_forwarded_sequence: u64,
+    received: u64,
+    stale: u64,
 }
 
 impl MoveCoalescer {
@@ -67,6 +77,38 @@ impl MoveCoalescer {
     }
 }
 
+impl IncomingMoveCoalescer {
+    fn push(&mut self, message: WireMessage) {
+        let sequence = mouse_datagram_sequence(&message)
+            .expect("incoming coalescer only accepts movement datagrams");
+        self.received = self.received.saturating_add(1);
+        let pending_sequence = self
+            .pending
+            .as_ref()
+            .and_then(mouse_datagram_sequence)
+            .unwrap_or(0);
+        if sequence <= self.last_forwarded_sequence || sequence <= pending_sequence {
+            self.stale = self.stale.saturating_add(1);
+            return;
+        }
+        self.pending = Some(message);
+    }
+
+    fn take(&mut self) -> Option<WireMessage> {
+        let message = self.pending.take()?;
+        self.last_forwarded_sequence = mouse_datagram_sequence(&message)
+            .expect("incoming coalescer only contains movement datagrams");
+        Some(message)
+    }
+
+    fn take_metrics(&mut self) -> (u64, u64) {
+        let metrics = (self.received, self.stale);
+        self.received = 0;
+        self.stale = 0;
+        metrics
+    }
+}
+
 impl Network {
     pub fn connect(config: PeerConfig, session_id: u64) -> Result<Self, String> {
         let (commands_sender, commands_receiver) = mpsc::channel(COMMAND_CAPACITY);
@@ -74,7 +116,7 @@ impl Network {
         let (startup_sender, startup_receiver) = std_mpsc::sync_channel(1);
         let pending_move = Arc::new(Mutex::new(MoveCoalescer::default()));
         let network_pending_move = Arc::clone(&pending_move);
-        let incoming_move = Arc::new(Mutex::new(None));
+        let incoming_move = Arc::new(Mutex::new(IncomingMoveCoalescer::default()));
         let network_incoming_move = Arc::clone(&incoming_move);
         let thread = std::thread::Builder::new()
             .name("edgemouse-network".to_owned())
@@ -217,7 +259,7 @@ async fn run_network(
     mut commands: mpsc::Receiver<NetworkCommand>,
     events: std_mpsc::Sender<NetworkEvent>,
     pending_move: Arc<Mutex<MoveCoalescer>>,
-    incoming_move: Arc<Mutex<Option<WireMessage>>>,
+    incoming_move: Arc<Mutex<IncomingMoveCoalescer>>,
     session_id: u64,
 ) {
     let (mut sender, mut receiver, datagrams) = link.split();
@@ -303,7 +345,16 @@ async fn run_network(
                         break;
                     }
                 };
-                if sent_moves > 0 || coalesced_moves > 0 {
+                let (received_moves, stale_moves) = match incoming_move.lock() {
+                    Ok(mut pending) => pending.take_metrics(),
+                    Err(_) => {
+                        drop(events.send(NetworkEvent::Disconnected(
+                            "incoming mouse buffer lock was poisoned".to_owned(),
+                        )));
+                        break;
+                    }
+                };
+                if sent_moves > 0 || coalesced_moves > 0 || received_moves > 0 {
                     let rtt_ms = sender.smoothed_rtt().as_secs_f64() * 1_000.0;
                     let send_interval_ms = u64::try_from(
                         adaptive_mouse_interval(sender.smoothed_rtt()).as_millis(),
@@ -313,6 +364,8 @@ async fn run_network(
                         send_interval_ms,
                         sent_moves,
                         coalesced_moves,
+                        received_moves,
+                        stale_moves,
                     }).is_err() {
                         break;
                     }
@@ -343,7 +396,7 @@ async fn run_network(
             message = datagrams.receive() => match message {
                 Ok(message @ WireMessage::MouseDatagram { .. }) => {
                     match incoming_move.lock() {
-                        Ok(mut pending) => *pending = Some(message),
+                        Ok(mut pending) => pending.push(message),
                         Err(_) => {
                             drop(events.send(NetworkEvent::Disconnected(
                                 "incoming mouse buffer lock was poisoned".to_owned(),
@@ -394,6 +447,13 @@ fn reliable_mouse_sequence(message: &WireMessage) -> Option<u64> {
     }
 }
 
+fn mouse_datagram_sequence(message: &WireMessage) -> Option<u64> {
+    match message {
+        WireMessage::MouseDatagram { sequence, .. } => Some(*sequence),
+        _ => None,
+    }
+}
+
 fn adaptive_mouse_interval(rtt: Duration) -> Duration {
     if rtt <= Duration::from_millis(25) {
         Duration::from_millis(4)
@@ -437,6 +497,16 @@ mod tests {
         }
     }
 
+    fn movement_datagram(sequence: u64, x: f64) -> WireMessage {
+        WireMessage::MouseDatagram {
+            session_id: 7,
+            after_sequence: 1,
+            sequence,
+            screen: ScreenId(3),
+            position: Point::new(x, 20.0),
+        }
+    }
+
     #[test]
     fn coalescer_keeps_only_the_latest_absolute_move() {
         let mut coalescer = MoveCoalescer::default();
@@ -469,6 +539,21 @@ mod tests {
                 position: Point::new(12.5, 20.0),
             }
         );
+    }
+
+    #[test]
+    fn incoming_coalescer_never_lets_a_late_packet_reverse_newer_motion() {
+        let mut coalescer = IncomingMoveCoalescer::default();
+
+        coalescer.push(movement_datagram(10, 120.0));
+        coalescer.push(movement_datagram(11, 110.0));
+        coalescer.push(movement_datagram(9, 130.0));
+        assert_eq!(coalescer.take(), Some(movement_datagram(11, 110.0)));
+
+        coalescer.push(movement_datagram(10, 120.0));
+        assert_eq!(coalescer.take(), None);
+        assert_eq!(coalescer.take_metrics(), (4, 2));
+        assert_eq!(coalescer.take_metrics(), (0, 0));
     }
 
     #[test]

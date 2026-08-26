@@ -75,6 +75,9 @@ unreliable and unordered. Each movement carries a reliable-event watermark, so
 the receiver cannot apply movement after a click until that click has been
 processed. Sequence numbers reject late datagrams, and latest-value receive
 coalescing prevents application-level backlog. A heartbeat is sent every 500 ms.
+The receive slot compares event sequence numbers rather than packet arrival
+order, so a delayed older datagram cannot overwrite a newer position when the
+pointer reverses direction.
 
 The locked dependency graph resolves `quinn-proto` to 0.11.17, beyond the
 0.11.14 fix for the malformed transport-parameter denial-of-service advisory.
