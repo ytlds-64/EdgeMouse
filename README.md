@@ -116,6 +116,15 @@ Accessibility permission.
    kept under `logs/`. An alternative configuration path may be passed as the
    script's only argument.
 
+   Windows has an equivalent PowerShell launcher:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\scripts\run-windows-with-log.ps1
+   ```
+
+   It writes the newest run to `windows-current.log` and preserves timestamped
+   copies under `logs/`, so restarting the agent does not destroy the prior log.
+
 The certificate with the lower derived node ID initiates the connection; the
 other side accepts it. Either process may be started first. After a successful
 connection, a temporary network loss or peer restart restores local mouse control
@@ -138,7 +147,7 @@ and merged updates. Windows requests 1 ms timer resolution while EdgeMouse is
 running so the 4–12 ms movement schedule does not collapse to the default
 roughly 15.6 ms system timer period.
 
-Both computers must use protocol v2. Versions 0.1.5 through 0.1.9 use protocol
+Both computers must use protocol v2. Versions 0.1.5 through 0.1.10 use protocol
 v2 and will intentionally refuse a connection to a 0.1.4 executable. For the
 best movement behavior, install the latest version on both computers.
 

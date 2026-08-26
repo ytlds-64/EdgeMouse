@@ -58,6 +58,9 @@ Safety invariants:
 - Receiver timeout/disconnect releases every tracked synthetic button.
 - The receiver rejects input before `Enter`, stale sequence numbers, zero
   session/sequence values, and events addressed to another screen.
+- Finite positions that fall outside the configured target bounds are clamped
+  before injection and recovery, so a boundary mismatch cannot terminate the
+  agent or prevent reconnection.
 - Protocol numbers must be finite and frames are capped at 64 KiB.
 - Ctrl+C restores local capture, releases injected buttons, and sends `Goodbye`.
 

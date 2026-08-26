@@ -36,6 +36,26 @@ jobs:
           rustup default stable
           rustup component add rustfmt clippy
 
+      - name: Check macOS launcher syntax
+        if: runner.os == 'macOS'
+        run: bash -n scripts/run-macos-with-log.sh
+
+      - name: Check Windows launcher syntax
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'scripts/run-windows-with-log.ps1'),
+            [ref]$tokens,
+            [ref]$errors
+          )
+          if ($errors.Count -ne 0) {
+            $errors | ForEach-Object { Write-Error $_ }
+            exit 1
+          }
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -57,4 +77,6 @@ jobs:
             ${{ matrix.binary }}
             ${{ matrix.example }}
             docs/EdgeMouse-Test-Guide.docx
+            scripts/run-macos-with-log.sh
+            scripts/run-windows-with-log.ps1
             README.md

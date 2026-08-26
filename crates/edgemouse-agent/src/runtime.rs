@@ -2,7 +2,7 @@ use crate::config::LoadedConfig;
 use crate::network::{Network, NetworkEvent};
 use crate::platform;
 use edgemouse_core::{
-    CaptureMode, ControlState, Effect, MouseCaptureBackend, MouseInjectionBackend, Point,
+    CaptureMode, ControlState, Effect, MouseCaptureBackend, MouseInjectionBackend, Point, Rect,
     RemoteMouseEvent, RoutedEvent, ScreenId, Session,
 };
 use edgemouse_protocol::WireMessage;
@@ -134,7 +134,11 @@ fn run_connected(
         initial_pointer,
         config.session,
     )?;
-    let mut remote = RemoteReceiver::new(config.local_screen, config.session.peer_timeout_ms);
+    let mut remote = RemoteReceiver::new(
+        config.local_screen,
+        config.local_bounds,
+        config.session.peer_timeout_ms,
+    );
     let clock = Instant::now();
 
     println!("Edge switching active; press Ctrl+C to stop");
@@ -379,6 +383,7 @@ fn apply_effects(
 
 struct RemoteReceiver {
     local_screen: ScreenId,
+    local_bounds: Rect,
     timeout_ms: u64,
     active_session: Option<u64>,
     last_sequence: u64,
@@ -386,6 +391,7 @@ struct RemoteReceiver {
     last_activity_ms: Option<u64>,
     last_position: Option<Point>,
     motion_reported: bool,
+    out_of_bounds_reported: bool,
     pending_datagram: Option<PendingDatagram>,
 }
 
@@ -405,9 +411,10 @@ enum RemoteTransition {
 }
 
 impl RemoteReceiver {
-    const fn new(local_screen: ScreenId, timeout_ms: u64) -> Self {
+    const fn new(local_screen: ScreenId, local_bounds: Rect, timeout_ms: u64) -> Self {
         Self {
             local_screen,
+            local_bounds,
             timeout_ms,
             active_session: None,
             last_sequence: 0,
@@ -415,6 +422,7 @@ impl RemoteReceiver {
             last_activity_ms: None,
             last_position: None,
             motion_reported: false,
+            out_of_bounds_reported: false,
             pending_datagram: None,
         }
     }
@@ -433,7 +441,12 @@ impl RemoteReceiver {
         if session_id == 0 || routed.sequence == 0 {
             return Err("peer sent a zero session or sequence number".into());
         }
-        validate_target_screen(routed.event, self.local_screen)?;
+        if matches!(routed.event, RemoteMouseEvent::Enter { .. })
+            && self.active_session != Some(session_id)
+        {
+            self.out_of_bounds_reported = false;
+        }
+        let routed = self.normalize_target_event(routed)?;
         let started = if matches!(routed.event, RemoteMouseEvent::Enter { .. }) {
             if self.active_session != Some(session_id) {
                 injector.release_all()?;
@@ -485,6 +498,7 @@ impl RemoteReceiver {
                 self.active_session = None;
                 self.last_activity_ms = None;
                 self.motion_reported = false;
+                self.out_of_bounds_reported = false;
                 self.pending_datagram = None;
                 Ok(RemoteTransition::Ended { position })
             }
@@ -509,7 +523,7 @@ impl RemoteReceiver {
         if !matches!(routed.event, RemoteMouseEvent::MoveAbsolute { .. }) {
             return Err("peer sent a non-movement event as a datagram".into());
         }
-        validate_target_screen(routed.event, self.local_screen)?;
+        let routed = self.normalize_target_event(routed)?;
         if self.active_session != Some(session_id) || routed.sequence <= self.last_sequence {
             return Ok(RemoteTransition::None);
         }
@@ -591,6 +605,7 @@ impl RemoteReceiver {
         self.active_session = None;
         self.last_activity_ms = None;
         self.motion_reported = false;
+        self.out_of_bounds_reported = false;
         self.pending_datagram = None;
         Ok(self.last_position.take())
     }
@@ -602,23 +617,72 @@ impl RemoteReceiver {
         self.last_sequence = 0;
         self.last_reliable_sequence = 0;
         self.motion_reported = false;
+        self.out_of_bounds_reported = false;
         self.pending_datagram = None;
         self.last_position.take()
     }
-}
 
-fn validate_target_screen(event: RemoteMouseEvent, local: ScreenId) -> Result<(), Box<dyn Error>> {
-    match event {
-        RemoteMouseEvent::Enter { screen, .. } | RemoteMouseEvent::MoveAbsolute { screen, .. }
-            if screen != local =>
+    fn normalize_target_event(
+        &mut self,
+        routed: RoutedEvent,
+    ) -> Result<RoutedEvent, Box<dyn Error>> {
+        let normalize = |screen: ScreenId, position: Point| -> Result<Point, Box<dyn Error>> {
+            if screen != self.local_screen {
+                return Err(format!(
+                    "peer targeted screen {}, but this node owns screen {}",
+                    screen.0, self.local_screen.0
+                )
+                .into());
+            }
+            if !position.is_finite() {
+                return Err("peer sent a non-finite pointer position".into());
+            }
+            Ok(if self.local_bounds.contains(position) {
+                position
+            } else {
+                self.local_bounds.clamp_inside(position, 1.0)
+            })
+        };
+
+        let (event, original, normalized) = match routed.event {
+            RemoteMouseEvent::Enter { screen, position } => {
+                let normalized = normalize(screen, position)?;
+                (
+                    RemoteMouseEvent::Enter {
+                        screen,
+                        position: normalized,
+                    },
+                    Some(position),
+                    Some(normalized),
+                )
+            }
+            RemoteMouseEvent::MoveAbsolute { screen, position } => {
+                let normalized = normalize(screen, position)?;
+                (
+                    RemoteMouseEvent::MoveAbsolute {
+                        screen,
+                        position: normalized,
+                    },
+                    Some(position),
+                    Some(normalized),
+                )
+            }
+            event => (event, None, None),
+        };
+        if let (Some(original), Some(normalized)) = (original, normalized)
+            && original != normalized
+            && !self.out_of_bounds_reported
         {
-            Err(format!(
-                "peer targeted screen {}, but this node owns screen {}",
-                screen.0, local.0
-            )
-            .into())
+            eprintln!(
+                "peer pointer ({:.1}, {:.1}) was outside screen {}; clamped to ({:.1}, {:.1})",
+                original.x, original.y, self.local_screen.0, normalized.x, normalized.y
+            );
+            self.out_of_bounds_reported = true;
         }
-        _ => Ok(()),
+        Ok(RoutedEvent {
+            sequence: routed.sequence,
+            event,
+        })
     }
 }
 
@@ -670,6 +734,14 @@ mod tests {
         }
     }
 
+    fn remote_receiver(timeout_ms: u64) -> RemoteReceiver {
+        RemoteReceiver::new(
+            ScreenId(7),
+            Rect::new(Point::new(0.0, 0.0), 100.0, 100.0).unwrap(),
+            timeout_ms,
+        )
+    }
+
     #[test]
     fn reconnect_backoff_is_bounded_and_resettable() {
         let mut backoff = ReconnectBackoff::default();
@@ -684,7 +756,7 @@ mod tests {
 
     #[test]
     fn remote_receiver_requires_enter_and_deduplicates_sequences() {
-        let mut receiver = RemoteReceiver::new(ScreenId(7), 1_500);
+        let mut receiver = remote_receiver(1_500);
         let mut injector = FakeInjector::default();
         let button = RoutedEvent {
             sequence: 2,
@@ -714,7 +786,7 @@ mod tests {
 
     #[test]
     fn remote_timeout_releases_buttons() {
-        let mut receiver = RemoteReceiver::new(ScreenId(7), 100);
+        let mut receiver = remote_receiver(100);
         let mut injector = FakeInjector::default();
         receiver
             .handle(
@@ -739,7 +811,7 @@ mod tests {
 
     #[test]
     fn datagram_waits_for_its_reliable_control_watermark() {
-        let mut receiver = RemoteReceiver::new(ScreenId(7), 1_500);
+        let mut receiver = remote_receiver(1_500);
         let mut injector = FakeInjector::default();
         let movement = RoutedEvent {
             sequence: 4,
@@ -813,7 +885,7 @@ mod tests {
 
     #[test]
     fn remote_leave_returns_the_last_injected_position() {
-        let mut receiver = RemoteReceiver::new(ScreenId(7), 1_500);
+        let mut receiver = remote_receiver(1_500);
         let mut injector = FakeInjector::default();
         receiver
             .handle(
@@ -863,5 +935,63 @@ mod tests {
             }
         );
         assert!(!receiver.is_active());
+    }
+
+    #[test]
+    fn remote_receiver_clamps_out_of_bounds_position_before_leave() {
+        let mut receiver = remote_receiver(1_500);
+        let mut injector = FakeInjector::default();
+        receiver
+            .handle(
+                9,
+                RoutedEvent {
+                    sequence: 1,
+                    event: RemoteMouseEvent::Enter {
+                        screen: ScreenId(7),
+                        position: Point::new(1.0, 5.0),
+                    },
+                },
+                &mut injector,
+                10,
+            )
+            .unwrap();
+        receiver
+            .handle(
+                9,
+                RoutedEvent {
+                    sequence: 2,
+                    event: RemoteMouseEvent::MoveAbsolute {
+                        screen: ScreenId(7),
+                        position: Point::new(-20.0, 120.0),
+                    },
+                },
+                &mut injector,
+                20,
+            )
+            .unwrap();
+
+        assert_eq!(
+            receiver
+                .handle(
+                    9,
+                    RoutedEvent {
+                        sequence: 3,
+                        event: RemoteMouseEvent::Leave,
+                    },
+                    &mut injector,
+                    30,
+                )
+                .unwrap(),
+            RemoteTransition::Ended {
+                position: Point::new(1.0, 99.0)
+            }
+        );
+        assert!(matches!(
+            injector.events[1],
+            RemoteMouseEvent::MoveAbsolute {
+                position: Point { x: 1.0, y: 99.0 },
+                ..
+            }
+        ));
     }
 }
