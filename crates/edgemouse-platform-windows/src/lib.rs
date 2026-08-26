@@ -150,7 +150,7 @@ struct CallbackState {
     sender: mpsc::SyncSender<PhysicalMouseEvent>,
     suppress: Arc<AtomicBool>,
     overflowed: Arc<AtomicBool>,
-    last_point: Arc<Mutex<Option<PointI32>>>,
+    last_point: Arc<Mutex<Option<Point>>>,
     coordinate_scale: f64,
 }
 
@@ -171,7 +171,7 @@ pub struct WindowsMouseCapture {
     receiver: mpsc::Receiver<PhysicalMouseEvent>,
     suppress: Arc<AtomicBool>,
     overflowed: Arc<AtomicBool>,
-    last_point: Arc<Mutex<Option<PointI32>>>,
+    last_point: Arc<Mutex<Option<Point>>>,
     thread_id: u32,
     thread: Option<JoinHandle<()>>,
     cursor_hidden: bool,
@@ -247,15 +247,11 @@ impl WindowsMouseCapture {
     }
 
     fn set_reference_point(&self, position: Point) -> Result<(), PlatformError> {
-        let point = PointI32 {
-            x: rounded_i32(position.x),
-            y: rounded_i32(position.y),
-        };
         let mut last = self
             .last_point
             .lock()
             .map_err(|_| PlatformError::new("Windows cursor reference lock was poisoned"))?;
-        *last = Some(point);
+        *last = Some(position);
         Ok(())
     }
 
@@ -470,7 +466,7 @@ fn run_hook_thread(
     sender: mpsc::SyncSender<PhysicalMouseEvent>,
     suppress: Arc<AtomicBool>,
     overflowed: Arc<AtomicBool>,
-    last_point: Arc<Mutex<Option<PointI32>>>,
+    last_point: Arc<Mutex<Option<Point>>>,
     coordinate_scale: f64,
     report_startup: impl FnOnce(Result<u32, PlatformError>),
 ) {
@@ -596,7 +592,7 @@ unsafe extern "system" fn mouse_hook_callback(code: i32, w_param: usize, l_param
 fn hook_event(
     message: u32,
     data: &MouseHookData,
-    last_point: &Mutex<Option<PointI32>>,
+    last_point: &Mutex<Option<Point>>,
     remote: bool,
     coordinate_scale: f64,
 ) -> Option<PhysicalMouseEvent> {
@@ -605,10 +601,7 @@ fn hook_event(
             let point = logical_hook_point(data.point, coordinate_scale);
             let mut last = last_point.lock().ok()?;
             let movement = last.map_or(Vector::new(0.0, 0.0), |previous| {
-                Vector::new(
-                    f64::from(point.x) - f64::from(previous.x),
-                    f64::from(point.y) - f64::from(previous.y),
-                )
+                Vector::new(point.x - previous.x, point.y - previous.y)
             });
             if !remote {
                 *last = Some(point);
@@ -652,11 +645,11 @@ fn hook_event(
     }
 }
 
-fn logical_hook_point(point: PointI32, coordinate_scale: f64) -> PointI32 {
-    PointI32 {
-        x: rounded_i32(f64::from(point.x) / coordinate_scale),
-        y: rounded_i32(f64::from(point.y) / coordinate_scale),
-    }
+fn logical_hook_point(point: PointI32, coordinate_scale: f64) -> Point {
+    Point::new(
+        f64::from(point.x) / coordinate_scale,
+        f64::from(point.y) / coordinate_scale,
+    )
 }
 
 fn button_event(button: MouseButton, state: ButtonState) -> PhysicalMouseEvent {
@@ -733,7 +726,15 @@ mod tests {
     fn normalizes_per_monitor_hook_coordinates_to_logical_points() {
         assert_eq!(
             logical_hook_point(PointI32 { x: 3_838, y: 2_158 }, 2.0),
-            PointI32 { x: 1_919, y: 1_079 }
+            Point::new(1_919.0, 1_079.0)
+        );
+    }
+
+    #[test]
+    fn preserves_fractional_logical_hook_coordinates() {
+        assert_eq!(
+            logical_hook_point(PointI32 { x: 101, y: 203 }, 2.0),
+            Point::new(50.5, 101.5)
         );
     }
 }

@@ -287,6 +287,11 @@ impl PeerSender {
     pub fn close(&self, reason: &'static [u8]) {
         self.guard.connection.close(0_u8.into(), reason);
     }
+
+    #[must_use]
+    pub fn smoothed_rtt(&self) -> Duration {
+        self.guard.connection.rtt()
+    }
 }
 
 pub struct PeerReceiver {

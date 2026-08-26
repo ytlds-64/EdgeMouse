@@ -24,9 +24,13 @@ The process has three execution contexts:
 3. A Tokio worker owns the QUIC endpoint, the reliable bidirectional stream, and
    heartbeat scheduling.
 
-The native queues and the network command queue are bounded by failure behavior:
-if the 1,024-message outbound queue fills, the coordinator treats transport as
-unavailable and restores local input rather than silently losing button events.
+The native queues and the network command queue are bounded by failure behavior.
+Absolute movement uses a latest-value slot flushed every 4 ms, preventing a
+high-polling-rate mouse from building a stale network backlog. Before a button,
+wheel, enter, leave, or release event is queued, any pending movement is flushed
+first so control ordering remains exact. If the 1,024-message control queue
+fills, the coordinator treats transport as unavailable and restores local input
+rather than silently losing button events.
 
 ## Control state and safety
 
@@ -74,8 +78,9 @@ The locked dependency graph resolves `quinn-proto` to 0.11.17, beyond the
 
 Capture runs a `WH_MOUSE_LL` hook on a dedicated message-loop thread. Local
 movement uses consecutive hook coordinates. The hook's per-monitor-aware
-coordinates are divided by the configured display scale before they enter the
-logical screen topology. During remote control, movement is calculated against
+coordinates are divided by the configured display scale as floating-point
+values before they enter the logical screen topology, preserving half-point
+motion at 200% scaling. During remote control, movement is calculated against
 the fixed capture anchor because suppressed input does not advance the real
 cursor. `SendInput` performs absolute virtual-desktop movement, buttons, and
 wheel injection. `dwExtraInfo` plus the injected flag prevent feedback loops.

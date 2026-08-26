@@ -111,6 +111,11 @@ Mac use the logical resolution shown by macOS, not the doubled backing-pixel
 resolution. Set each screen's `scale` to its OS display scale: for example,
 Windows 200% scaling is `2.0`, while Windows 100% scaling is `1.0`.
 
+Remote absolute movement is emitted at most every 4 ms, always using the newest
+position. Buttons, wheels, enter, and leave remain strictly ordered and are
+never coalesced. While movement is active, the agent prints a five-second link
+summary containing QUIC RTT, sent movement updates, and merged updates.
+
 ## Verify the source tree
 
 ```sh

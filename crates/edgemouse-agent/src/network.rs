@@ -1,16 +1,24 @@
-use edgemouse_core::NodeId;
+use edgemouse_core::{NodeId, RemoteMouseEvent};
 use edgemouse_protocol::WireMessage;
 use edgemouse_transport::{PeerConfig, PeerLink};
 use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 const COMMAND_CAPACITY: usize = 1_024;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
+const MOUSE_FLUSH_INTERVAL: Duration = Duration::from_millis(4);
+const METRICS_INTERVAL: Duration = Duration::from_secs(5);
 
 pub enum NetworkEvent {
     Message(WireMessage),
+    Metrics {
+        rtt_ms: f64,
+        sent_moves: u64,
+        coalesced_moves: u64,
+    },
     Disconnected(String),
 }
 
@@ -22,9 +30,34 @@ enum NetworkCommand {
 pub struct Network {
     commands: mpsc::Sender<NetworkCommand>,
     events: std_mpsc::Receiver<NetworkEvent>,
+    pending_move: Arc<Mutex<MoveCoalescer>>,
     thread: Option<JoinHandle<()>>,
     pub peer_node: NodeId,
     pub peer_name: String,
+}
+
+#[derive(Default)]
+struct MoveCoalescer {
+    pending: Option<WireMessage>,
+    coalesced: u64,
+}
+
+impl MoveCoalescer {
+    fn push(&mut self, message: WireMessage) {
+        if self.pending.replace(message).is_some() {
+            self.coalesced = self.coalesced.saturating_add(1);
+        }
+    }
+
+    fn take(&mut self) -> Option<WireMessage> {
+        self.pending.take()
+    }
+
+    fn take_coalesced(&mut self) -> u64 {
+        let count = self.coalesced;
+        self.coalesced = 0;
+        count
+    }
 }
 
 impl Network {
@@ -32,6 +65,8 @@ impl Network {
         let (commands_sender, commands_receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (event_sender, event_receiver) = std_mpsc::channel();
         let (startup_sender, startup_receiver) = std_mpsc::sync_channel(1);
+        let pending_move = Arc::new(Mutex::new(MoveCoalescer::default()));
+        let network_pending_move = Arc::clone(&pending_move);
         let thread = std::thread::Builder::new()
             .name("edgemouse-network".to_owned())
             .spawn(move || {
@@ -62,7 +97,14 @@ impl Network {
                     if startup_sender.send(Ok((peer_node, peer_name))).is_err() {
                         return;
                     }
-                    run_network(link, commands_receiver, event_sender, session_id).await;
+                    run_network(
+                        link,
+                        commands_receiver,
+                        event_sender,
+                        network_pending_move,
+                        session_id,
+                    )
+                    .await;
                 });
             })
             .map_err(|error| format!("failed to start network thread: {error}"))?;
@@ -71,6 +113,7 @@ impl Network {
             Ok(Ok((peer_node, peer_name))) => Ok(Self {
                 commands: commands_sender,
                 events: event_receiver,
+                pending_move,
                 thread: Some(thread),
                 peer_node,
                 peer_name,
@@ -87,6 +130,26 @@ impl Network {
     }
 
     pub fn send(&self, message: WireMessage) -> Result<(), String> {
+        if is_coalescible_move(&message) {
+            self.pending_move
+                .lock()
+                .map_err(|_| "mouse movement buffer lock was poisoned".to_owned())?
+                .push(message);
+            return Ok(());
+        }
+
+        let pending = self
+            .pending_move
+            .lock()
+            .map_err(|_| "mouse movement buffer lock was poisoned".to_owned())?
+            .take();
+        if let Some(pending) = pending {
+            self.send_immediate(pending)?;
+        }
+        self.send_immediate(message)
+    }
+
+    fn send_immediate(&self, message: WireMessage) -> Result<(), String> {
         self.commands
             .try_send(NetworkCommand::Message(message))
             .map_err(|error| format!("network queue unavailable: {error}"))
@@ -116,12 +179,18 @@ async fn run_network(
     link: PeerLink,
     mut commands: mpsc::Receiver<NetworkCommand>,
     events: std_mpsc::Sender<NetworkEvent>,
+    pending_move: Arc<Mutex<MoveCoalescer>>,
     session_id: u64,
 ) {
     let (mut sender, mut receiver) = link.split();
     let started = tokio::time::Instant::now();
     let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut mouse_flush = tokio::time::interval(MOUSE_FLUSH_INTERVAL);
+    mouse_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut metrics = tokio::time::interval(METRICS_INTERVAL);
+    metrics.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut sent_moves = 0_u64;
 
     loop {
         tokio::select! {
@@ -136,6 +205,63 @@ async fn run_network(
                     break;
                 }
             }
+            command = commands.recv() => match command {
+                Some(NetworkCommand::Message(message)) => {
+                    let is_move = is_coalescible_move(&message);
+                    if let Err(error) = sender.send(&message).await {
+                        drop(events.send(NetworkEvent::Disconnected(error.to_string())));
+                        break;
+                    }
+                    if is_move {
+                        sent_moves = sent_moves.saturating_add(1);
+                    }
+                }
+                Some(NetworkCommand::Shutdown) | None => {
+                    drop(sender.send(&WireMessage::Goodbye { session_id }).await);
+                    sender.close(b"normal shutdown");
+                    break;
+                }
+            },
+            _ = mouse_flush.tick() => {
+                let message = match pending_move.lock() {
+                    Ok(mut pending) => pending.take(),
+                    Err(_) => {
+                        drop(events.send(NetworkEvent::Disconnected(
+                            "mouse movement buffer lock was poisoned".to_owned(),
+                        )));
+                        break;
+                    }
+                };
+                if let Some(message) = message {
+                    if let Err(error) = sender.send(&message).await {
+                        drop(events.send(NetworkEvent::Disconnected(error.to_string())));
+                        break;
+                    }
+                    sent_moves = sent_moves.saturating_add(1);
+                }
+            },
+            _ = metrics.tick() => {
+                let coalesced_moves = match pending_move.lock() {
+                    Ok(mut pending) => pending.take_coalesced(),
+                    Err(_) => {
+                        drop(events.send(NetworkEvent::Disconnected(
+                            "mouse movement buffer lock was poisoned".to_owned(),
+                        )));
+                        break;
+                    }
+                };
+                if sent_moves > 0 || coalesced_moves > 0 {
+                    let rtt_ms = sender.smoothed_rtt().as_secs_f64() * 1_000.0;
+                    if events.send(NetworkEvent::Metrics {
+                        rtt_ms,
+                        sent_moves,
+                        coalesced_moves,
+                    }).is_err() {
+                        break;
+                    }
+                    sent_moves = 0;
+                }
+            },
             message = receiver.receive() => match message {
                 Ok(WireMessage::Goodbye { .. }) => {
                     drop(events.send(NetworkEvent::Disconnected("peer shut down".to_owned())));
@@ -150,20 +276,59 @@ async fn run_network(
                     drop(events.send(NetworkEvent::Disconnected(error.to_string())));
                     break;
                 }
-            },
-            command = commands.recv() => match command {
-                Some(NetworkCommand::Message(message)) => {
-                    if let Err(error) = sender.send(&message).await {
-                        drop(events.send(NetworkEvent::Disconnected(error.to_string())));
-                        break;
-                    }
-                }
-                Some(NetworkCommand::Shutdown) | None => {
-                    drop(sender.send(&WireMessage::Goodbye { session_id }).await);
-                    sender.close(b"normal shutdown");
-                    break;
-                }
             }
         }
+    }
+}
+
+fn is_coalescible_move(message: &WireMessage) -> bool {
+    matches!(
+        message,
+        WireMessage::Mouse {
+            event: edgemouse_core::RoutedEvent {
+                event: RemoteMouseEvent::MoveAbsolute { .. },
+                ..
+            },
+            ..
+        }
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use edgemouse_core::{Point, RoutedEvent, ScreenId};
+
+    fn movement(sequence: u64, x: f64) -> WireMessage {
+        WireMessage::Mouse {
+            session_id: 7,
+            event: RoutedEvent {
+                sequence,
+                event: RemoteMouseEvent::MoveAbsolute {
+                    screen: ScreenId(3),
+                    position: Point::new(x, 20.0),
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn coalescer_keeps_only_the_latest_absolute_move() {
+        let mut coalescer = MoveCoalescer::default();
+        coalescer.push(movement(1, 10.0));
+        coalescer.push(movement(2, 20.0));
+
+        assert_eq!(coalescer.take(), Some(movement(2, 20.0)));
+        assert_eq!(coalescer.take_coalesced(), 1);
+        assert_eq!(coalescer.take_coalesced(), 0);
+    }
+
+    #[test]
+    fn only_absolute_moves_are_coalescible() {
+        assert!(is_coalescible_move(&movement(1, 10.0)));
+        assert!(!is_coalescible_move(&WireMessage::Heartbeat {
+            session_id: 7,
+            monotonic_ms: 10,
+        }));
     }
 }

@@ -119,6 +119,15 @@ fn run_loop(
                 NetworkEvent::Message(WireMessage::Goodbye { .. }) => {
                     return Err("peer shut down".into());
                 }
+                NetworkEvent::Metrics {
+                    rtt_ms,
+                    sent_moves,
+                    coalesced_moves,
+                } => {
+                    println!(
+                        "Mouse link: RTT {rtt_ms:.1} ms; sent {sent_moves} updates; merged {coalesced_moves}"
+                    );
+                }
                 NetworkEvent::Disconnected(reason) => {
                     if let Some(position) = remote.reset(injector) {
                         restore_incoming_control(remote.local_screen, position, capture, session)?;
