@@ -127,6 +127,7 @@ pub struct PeerLink {
     guard: Arc<LinkGuard>,
     sender: SendStream,
     receiver: RecvStream,
+    read_state: FrameReadState,
     peer_node: NodeId,
     peer_name: String,
 }
@@ -172,6 +173,7 @@ impl PeerLink {
             }),
             sender,
             receiver,
+            read_state: FrameReadState::default(),
             peer_node,
             peer_name: String::new(),
         };
@@ -206,7 +208,7 @@ impl PeerLink {
     }
 
     pub async fn receive(&mut self) -> Result<WireMessage, TransportError> {
-        read_message(&mut self.receiver).await
+        self.read_state.receive(&mut self.receiver).await
     }
 
     pub fn close(&self, reason: &'static [u8]) {
@@ -223,6 +225,7 @@ impl PeerLink {
             PeerReceiver {
                 guard: self.guard,
                 receiver: self.receiver,
+                read_state: self.read_state,
             },
         )
     }
@@ -289,11 +292,12 @@ impl PeerSender {
 pub struct PeerReceiver {
     guard: Arc<LinkGuard>,
     receiver: RecvStream,
+    read_state: FrameReadState,
 }
 
 impl PeerReceiver {
     pub async fn receive(&mut self) -> Result<WireMessage, TransportError> {
-        read_message(&mut self.receiver).await
+        self.read_state.receive(&mut self.receiver).await
     }
 
     #[must_use]
@@ -379,23 +383,57 @@ fn roots_for(peer: &TrustedPeer) -> Result<RootCertStore, TransportError> {
     Ok(roots)
 }
 
-async fn read_message(receiver: &mut RecvStream) -> Result<WireMessage, TransportError> {
-    let mut header = [0_u8; HEADER_LEN];
-    receiver
-        .read_exact(&mut header)
-        .await
-        .map_err(|error| TransportError::with_source("failed to read QUIC frame header", error))?;
-    let frame_len = expected_frame_len(&header)
-        .map_err(|error| TransportError::with_source("invalid QUIC frame header", error))?
-        .ok_or_else(|| TransportError::new("incomplete QUIC frame header"))?;
-    let mut frame = vec![0_u8; frame_len];
-    frame[..HEADER_LEN].copy_from_slice(&header);
-    receiver
-        .read_exact(&mut frame[HEADER_LEN..])
-        .await
-        .map_err(|error| TransportError::with_source("failed to read QUIC frame payload", error))?;
-    decode_frame(&frame)
-        .map_err(|error| TransportError::with_source("invalid message from peer", error))
+#[derive(Default)]
+struct FrameReadState {
+    bytes: Vec<u8>,
+    expected_len: Option<usize>,
+}
+
+impl FrameReadState {
+    /// Reads one frame while preserving partial progress if this future is cancelled.
+    async fn receive(&mut self, receiver: &mut RecvStream) -> Result<WireMessage, TransportError> {
+        let mut chunk = [0_u8; 4_096];
+        loop {
+            let target_len = self.expected_len.unwrap_or(HEADER_LEN);
+            if self.bytes.len() == target_len {
+                if self.expected_len.is_none() {
+                    let frame_len = expected_frame_len(&self.bytes)
+                        .map_err(|error| {
+                            TransportError::with_source("invalid QUIC frame header", error)
+                        })?
+                        .ok_or_else(|| TransportError::new("incomplete QUIC frame header"))?;
+                    self.expected_len = Some(frame_len);
+                    continue;
+                }
+
+                let message = decode_frame(&self.bytes).map_err(|error| {
+                    TransportError::with_source("invalid message from peer", error)
+                });
+                self.bytes.clear();
+                self.expected_len = None;
+                return message;
+            }
+
+            let remaining = target_len.saturating_sub(self.bytes.len());
+            let read_len = remaining.min(chunk.len());
+            let read = receiver
+                .read(&mut chunk[..read_len])
+                .await
+                .map_err(|error| TransportError::with_source("failed to read QUIC frame", error))?
+                .ok_or_else(|| {
+                    TransportError::new(format!(
+                        "QUIC control stream ended with {} bytes of an incomplete frame",
+                        self.bytes.len()
+                    ))
+                })?;
+            if read == 0 {
+                return Err(TransportError::new(
+                    "QUIC control stream returned an empty read",
+                ));
+            }
+            self.bytes.extend_from_slice(&chunk[..read]);
+        }
+    }
 }
 
 #[must_use]
@@ -523,6 +561,54 @@ mod tests {
         };
         first_link.send(&heartbeat).await.unwrap();
         assert_eq!(second_link.receive().await.unwrap(), heartbeat);
+        first_link.close(b"test complete");
+        second_link.close(b"test complete");
+    }
+
+    #[tokio::test]
+    async fn cancelled_receive_preserves_a_partial_frame() {
+        let first = Identity::generate().unwrap();
+        let second = Identity::generate().unwrap();
+        let first_address = unused_udp_address();
+        let second_address = unused_udp_address();
+        let first_config = PeerConfig {
+            bind_address: first_address,
+            peer_address: second_address,
+            local_name: "first".to_owned(),
+            identity: Identity::from_der(first.certificate.clone(), first.private_key).unwrap(),
+            peer: TrustedPeer::from_der(second.certificate.clone()).unwrap(),
+            connect_timeout: Duration::from_secs(5),
+        };
+        let second_config = PeerConfig {
+            bind_address: second_address,
+            peer_address: first_address,
+            local_name: "second".to_owned(),
+            identity: Identity::from_der(second.certificate, second.private_key).unwrap(),
+            peer: TrustedPeer::from_der(first.certificate).unwrap(),
+            connect_timeout: Duration::from_secs(5),
+        };
+
+        let (first_link, second_link) = tokio::join!(
+            PeerLink::connect(first_config),
+            PeerLink::connect(second_config)
+        );
+        let mut first_link = first_link.unwrap();
+        let mut second_link = second_link.unwrap();
+        let heartbeat = WireMessage::Heartbeat {
+            session_id: 42,
+            monotonic_ms: 123,
+        };
+        let frame = encode_frame(&heartbeat).unwrap();
+
+        first_link.sender.write_all(&frame[..5]).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), second_link.receive())
+                .await
+                .is_err()
+        );
+        first_link.sender.write_all(&frame[5..]).await.unwrap();
+        assert_eq!(second_link.receive().await.unwrap(), heartbeat);
+
         first_link.close(b"test complete");
         second_link.close(b"test complete");
     }
