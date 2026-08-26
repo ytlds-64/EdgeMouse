@@ -90,12 +90,15 @@ Capture runs a `WH_MOUSE_LL` hook on a dedicated message-loop thread. Local
 movement uses consecutive hook coordinates. The hook's per-monitor-aware
 coordinates are divided by the configured display scale as floating-point
 values before they enter the logical screen topology, preserving half-point
-motion at 200% scaling. During remote control, movement is calculated against
-the fixed capture anchor because suppressed input does not advance the real
-cursor. `SendInput` performs absolute virtual-desktop movement, buttons, and
-wheel injection. `dwExtraInfo` plus the injected flag prevent feedback loops.
-Raw Input can later replace the movement source for high-rate devices while the
-hook remains responsible for suppression.
+motion at 200% scaling. During remote control, movement is calculated against a
+fixed anchor at the local screen center because suppressed input does not
+advance the real cursor. Mode changes temporarily ignore warp-generated mouse
+moves and discard queued pre-transition movement, so an edge handoff cannot
+replace the new relative-motion reference with an old position. `SendInput`
+performs absolute virtual-desktop movement, buttons, and wheel injection.
+`dwExtraInfo` plus the injected flag prevent feedback loops. Raw Input can later
+replace the movement source for high-rate devices while the hook remains
+responsible for suppression.
 
 ### macOS
 

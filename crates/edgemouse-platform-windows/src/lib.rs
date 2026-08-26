@@ -6,7 +6,7 @@ use edgemouse_core::{
     ButtonState, CaptureMode, MouseButton, MouseCaptureBackend, MouseInjectionBackend,
     PermissionState, PhysicalMouseEvent, PlatformError, Point, RemoteMouseEvent, Vector,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr;
@@ -149,6 +149,7 @@ unsafe extern "system" {
 struct CallbackState {
     sender: mpsc::SyncSender<PhysicalMouseEvent>,
     suppress: Arc<AtomicBool>,
+    transitioning: Arc<AtomicBool>,
     overflowed: Arc<AtomicBool>,
     last_point: Arc<Mutex<Option<Point>>>,
     coordinate_scale: f64,
@@ -169,20 +170,26 @@ pub fn current_pointer() -> Result<Point, PlatformError> {
 /// A low-level mouse hook hosted on a dedicated Win32 message-loop thread.
 pub struct WindowsMouseCapture {
     receiver: mpsc::Receiver<PhysicalMouseEvent>,
+    deferred_events: VecDeque<PhysicalMouseEvent>,
     suppress: Arc<AtomicBool>,
+    transitioning: Arc<AtomicBool>,
     overflowed: Arc<AtomicBool>,
     last_point: Arc<Mutex<Option<Point>>>,
+    capture_anchor: Point,
     thread_id: u32,
     thread: Option<JoinHandle<()>>,
     cursor_hidden: bool,
 }
 
 impl WindowsMouseCapture {
-    pub fn start(coordinate_scale: f64) -> Result<Self, PlatformError> {
+    pub fn start(coordinate_scale: f64, capture_anchor: Point) -> Result<Self, PlatformError> {
         if !coordinate_scale.is_finite() || coordinate_scale <= 0.0 {
             return Err(PlatformError::new(
                 "Windows coordinate scale must be finite and positive",
             ));
+        }
+        if !capture_anchor.is_finite() {
+            return Err(PlatformError::new("Windows capture anchor must be finite"));
         }
         if !CALLBACK_STATE.load(Ordering::Acquire).is_null() {
             return Err(PlatformError::new(
@@ -193,6 +200,8 @@ impl WindowsMouseCapture {
         let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
         let suppress = Arc::new(AtomicBool::new(false));
         let callback_suppress = Arc::clone(&suppress);
+        let transitioning = Arc::new(AtomicBool::new(false));
+        let callback_transitioning = Arc::clone(&transitioning);
         let overflowed = Arc::new(AtomicBool::new(false));
         let callback_overflowed = Arc::clone(&overflowed);
         let last_point = Arc::new(Mutex::new(None));
@@ -203,6 +212,7 @@ impl WindowsMouseCapture {
                 run_hook_thread(
                     event_sender,
                     callback_suppress,
+                    callback_transitioning,
                     callback_overflowed,
                     callback_last_point,
                     coordinate_scale,
@@ -217,9 +227,12 @@ impl WindowsMouseCapture {
             .map_err(|_| PlatformError::new("mouse hook exited during startup"))??;
         Ok(Self {
             receiver: event_receiver,
+            deferred_events: VecDeque::new(),
             suppress,
+            transitioning,
             overflowed,
             last_point,
+            capture_anchor,
             thread_id,
             thread: Some(thread),
             cursor_hidden: false,
@@ -262,6 +275,52 @@ impl WindowsMouseCapture {
             self.cursor_hidden = false;
         }
     }
+
+    fn discard_queued_movements(&mut self) -> Result<(), PlatformError> {
+        loop {
+            match self.receiver.try_recv() {
+                Ok(PhysicalMouseEvent::Move { .. }) => {}
+                Ok(event) => self.deferred_events.push_back(event),
+                Err(mpsc::TryRecvError::Empty) => return Ok(()),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(PlatformError::new("Windows mouse hook stopped"));
+                }
+            }
+        }
+    }
+
+    fn transition_pointer(
+        &mut self,
+        position: Option<Point>,
+        suppress: bool,
+        hide_cursor: bool,
+    ) -> Result<(), PlatformError> {
+        self.transitioning.store(true, Ordering::Release);
+        self.suppress.store(false, Ordering::Release);
+
+        let result = (|| {
+            self.discard_queued_movements()?;
+            if let Some(position) = position {
+                self.set_reference_point(position)?;
+                Self::warp(position)?;
+            }
+            self.discard_queued_movements()
+        })();
+
+        if result.is_ok() {
+            if hide_cursor {
+                self.hide_cursor();
+            } else {
+                self.show_cursor();
+            }
+            self.suppress.store(suppress, Ordering::Release);
+        } else {
+            self.show_cursor();
+            self.suppress.store(false, Ordering::Release);
+        }
+        self.transitioning.store(false, Ordering::Release);
+        result
+    }
 }
 
 impl MouseCaptureBackend for WindowsMouseCapture {
@@ -271,28 +330,12 @@ impl MouseCaptureBackend for WindowsMouseCapture {
 
     fn set_mode(&mut self, mode: CaptureMode) -> Result<(), PlatformError> {
         match mode {
-            CaptureMode::Local { restore } => {
-                self.suppress.store(false, Ordering::Release);
-                if let Some(position) = restore {
-                    self.set_reference_point(position)?;
-                    Self::warp(position)?;
-                }
-                self.show_cursor();
-                Ok(())
-            }
-            CaptureMode::Remote { anchor } => {
-                self.set_reference_point(anchor)?;
-                Self::warp(anchor)?;
-                self.hide_cursor();
-                self.suppress.store(true, Ordering::Release);
-                Ok(())
+            CaptureMode::Local { restore } => self.transition_pointer(restore, false, false),
+            CaptureMode::Remote { anchor: _ } => {
+                self.transition_pointer(Some(self.capture_anchor), true, true)
             }
             CaptureMode::ReceivingRemote { position } => {
-                self.set_reference_point(position)?;
-                Self::warp(position)?;
-                self.show_cursor();
-                self.suppress.store(true, Ordering::Release);
-                Ok(())
+                self.transition_pointer(Some(position), true, false)
             }
         }
     }
@@ -302,6 +345,9 @@ impl MouseCaptureBackend for WindowsMouseCapture {
             return Err(PlatformError::new(
                 "Windows capture queue overflowed; local input was released",
             ));
+        }
+        if let Some(event) = self.deferred_events.pop_front() {
+            return Ok(Some(event));
         }
         match self.receiver.try_recv() {
             Ok(event) => Ok(Some(event)),
@@ -315,6 +361,7 @@ impl MouseCaptureBackend for WindowsMouseCapture {
 
 impl Drop for WindowsMouseCapture {
     fn drop(&mut self) {
+        self.transitioning.store(false, Ordering::Release);
         self.suppress.store(false, Ordering::Release);
         self.show_cursor();
         if self.thread_id != 0 {
@@ -465,6 +512,7 @@ impl MouseInjectionBackend for WindowsMouseInjector {
 fn run_hook_thread(
     sender: mpsc::SyncSender<PhysicalMouseEvent>,
     suppress: Arc<AtomicBool>,
+    transitioning: Arc<AtomicBool>,
     overflowed: Arc<AtomicBool>,
     last_point: Arc<Mutex<Option<Point>>>,
     coordinate_scale: f64,
@@ -473,6 +521,7 @@ fn run_hook_thread(
     let state = Box::new(CallbackState {
         sender,
         suppress,
+        transitioning,
         overflowed,
         last_point,
         coordinate_scale,
@@ -556,6 +605,12 @@ unsafe extern "system" fn mouse_hook_callback(code: i32, w_param: usize, l_param
     let data = unsafe { &*(l_param as *const MouseHookData) };
     if data.extra_info == EVENT_MARKER || data.flags & LLMHF_INJECTED != 0 {
         // SAFETY: Synthetic input must remain visible to other hooks and applications.
+        return unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) };
+    }
+
+    if w_param as u32 == WM_MOUSEMOVE && state.transitioning.load(Ordering::Acquire) {
+        // SetCursorPos can surface as a low-level move. Do not treat a mode-transition
+        // warp (or a concurrent physical move) as relative input for the new owner.
         return unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) };
     }
 

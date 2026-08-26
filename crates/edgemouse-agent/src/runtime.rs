@@ -41,7 +41,7 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     }
     println!("Connected to {} with mutual TLS", network.peer_name);
 
-    let mut capture = platform::start_capture(config.local_scale)?;
+    let mut capture = platform::start_capture(config.local_bounds, config.local_scale)?;
     let mut injector = platform::injector(initial_pointer);
     let mut session = Session::new(
         config.local_node,
