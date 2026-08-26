@@ -44,16 +44,22 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: |
-          $tokens = $null
-          $errors = $null
-          [void][System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path 'scripts/run-windows-with-log.ps1'),
-            [ref]$tokens,
-            [ref]$errors
+          $scriptPaths = @(
+            'scripts/run-windows-with-log.ps1',
+            'scripts/update-build-run-windows.ps1'
           )
-          if ($errors.Count -ne 0) {
-            $errors | ForEach-Object { Write-Error $_ }
-            exit 1
+          foreach ($scriptPath in $scriptPaths) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $scriptPath),
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -ne 0) {
+              $errors | ForEach-Object { Write-Error $_ }
+              exit 1
+            }
           }
 
       - name: Check formatting
@@ -79,4 +85,5 @@ jobs:
             docs/EdgeMouse-Test-Guide.docx
             scripts/run-macos-with-log.sh
             scripts/run-windows-with-log.ps1
+            scripts/update-build-run-windows.ps1
             README.md

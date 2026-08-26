@@ -67,6 +67,18 @@ Use `--verify-only` on macOS or `-VerifyOnly` on Windows to run the full source
 verification without creating an identity or configuration. Generated private
 keys, certificates, and `edgemouse.toml` are ignored by Git.
 
+After the first Windows setup, this single command checks that the tracked source
+tree is clean, fast-forwards `main` from GitHub, builds the release executable,
+prints its version, then starts EdgeMouse with current and timestamped logs:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\update-build-run-windows.ps1
+```
+
+Machine-specific configuration, certificates, private keys, and logs are ignored
+by Git and are not overwritten. The script deliberately stops instead of stashing
+or discarding tracked local source changes.
+
 GitHub Actions repeats the formatting, static-analysis, test, and release-build
 steps on both macOS and Windows after every push to `main`. A successful run also
 publishes downloadable platform packages under the run's **Artifacts** section.
