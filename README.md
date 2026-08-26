@@ -108,7 +108,8 @@ release input and shut down cleanly.
 Screen coordinates must match the operating system's logical desktop coordinate
 space. For the single-screen MVP the origin is normally `(0, 0)`. On a Retina
 Mac use the logical resolution shown by macOS, not the doubled backing-pixel
-resolution.
+resolution. Set each screen's `scale` to its OS display scale: for example,
+Windows 200% scaling is `2.0`, while Windows 100% scaling is `1.0`.
 
 ## Verify the source tree
 

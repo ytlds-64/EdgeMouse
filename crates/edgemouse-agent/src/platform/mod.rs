@@ -58,13 +58,17 @@ pub fn current_pointer() -> Result<edgemouse_core::Point, edgemouse_core::Platfo
 }
 
 #[cfg(target_os = "macos")]
-pub fn start_capture() -> Result<NativeMouseCapture, edgemouse_core::PlatformError> {
+pub fn start_capture(
+    _coordinate_scale: f64,
+) -> Result<NativeMouseCapture, edgemouse_core::PlatformError> {
     NativeMouseCapture::start()
 }
 
 #[cfg(target_os = "windows")]
-pub fn start_capture() -> Result<NativeMouseCapture, edgemouse_core::PlatformError> {
-    NativeMouseCapture::start()
+pub fn start_capture(
+    coordinate_scale: f64,
+) -> Result<NativeMouseCapture, edgemouse_core::PlatformError> {
+    NativeMouseCapture::start(coordinate_scale)
 }
 
 #[cfg(target_os = "macos")]

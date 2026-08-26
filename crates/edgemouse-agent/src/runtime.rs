@@ -41,7 +41,7 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     }
     println!("Connected to {} with mutual TLS", network.peer_name);
 
-    let mut capture = platform::start_capture()?;
+    let mut capture = platform::start_capture(config.local_scale)?;
     let mut injector = platform::injector(initial_pointer);
     let mut session = Session::new(
         config.local_node,
@@ -173,6 +173,10 @@ fn apply_remote_transition(
             println!("Peer took mouse control on this screen");
             Ok(())
         }
+        RemoteTransition::FirstMotion => {
+            println!("Receiving mouse movement from peer");
+            Ok(())
+        }
         RemoteTransition::Ended { position } => {
             restore_incoming_control(local_screen, position, capture, session)?;
             println!("Peer returned mouse control to this computer");
@@ -205,6 +209,7 @@ fn apply_effects(
         match effect {
             Effect::CapturePointer { anchor } => {
                 capture.set_mode(CaptureMode::Remote { anchor })?;
+                println!("Mouse control handed to peer");
             }
             Effect::ReleasePointer {
                 restore_position, ..
@@ -215,6 +220,7 @@ fn apply_effects(
                 if matches!(session.state(), ControlState::Recovering { .. }) {
                     session.complete_recovery()?;
                 }
+                println!("Local mouse control restored");
             }
             Effect::Send { peer, event } => {
                 if peer != network.peer_node {
@@ -240,12 +246,14 @@ struct RemoteReceiver {
     last_sequence: u64,
     last_activity_ms: Option<u64>,
     last_position: Option<Point>,
+    motion_reported: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum RemoteTransition {
     None,
     Started { position: Point },
+    FirstMotion,
     Ended { position: Point },
 }
 
@@ -258,6 +266,7 @@ impl RemoteReceiver {
             last_sequence: 0,
             last_activity_ms: None,
             last_position: None,
+            motion_reported: false,
         }
     }
 
@@ -282,6 +291,7 @@ impl RemoteReceiver {
                 self.active_session = Some(session_id);
                 self.last_sequence = 0;
                 self.last_position = None;
+                self.motion_reported = false;
                 true
             } else {
                 false
@@ -298,13 +308,21 @@ impl RemoteReceiver {
         self.last_sequence = routed.sequence;
         self.last_activity_ms = Some(now_ms);
         match routed.event {
-            RemoteMouseEvent::Enter { position, .. }
-            | RemoteMouseEvent::MoveAbsolute { position, .. } => {
+            RemoteMouseEvent::Enter { position, .. } => {
                 self.last_position = Some(position);
                 if started {
                     Ok(RemoteTransition::Started { position })
                 } else {
                     Ok(RemoteTransition::None)
+                }
+            }
+            RemoteMouseEvent::MoveAbsolute { position, .. } => {
+                self.last_position = Some(position);
+                if self.motion_reported {
+                    Ok(RemoteTransition::None)
+                } else {
+                    self.motion_reported = true;
+                    Ok(RemoteTransition::FirstMotion)
                 }
             }
             RemoteMouseEvent::Leave => {
@@ -314,6 +332,7 @@ impl RemoteReceiver {
                     .ok_or("peer left before announcing a pointer position")?;
                 self.active_session = None;
                 self.last_activity_ms = None;
+                self.motion_reported = false;
                 Ok(RemoteTransition::Ended { position })
             }
             _ => Ok(RemoteTransition::None),
@@ -340,6 +359,7 @@ impl RemoteReceiver {
         injector.release_all()?;
         self.active_session = None;
         self.last_activity_ms = None;
+        self.motion_reported = false;
         Ok(self.last_position.take())
     }
 
@@ -348,6 +368,7 @@ impl RemoteReceiver {
         self.active_session = None;
         self.last_activity_ms = None;
         self.last_sequence = 0;
+        self.motion_reported = false;
         self.last_position.take()
     }
 }

@@ -14,6 +14,7 @@ pub struct LoadedConfig {
     pub peer_node: NodeId,
     pub local_screen: ScreenId,
     pub local_bounds: Rect,
+    pub local_scale: f64,
     pub session: SessionConfig,
 }
 
@@ -106,6 +107,7 @@ impl RawConfig {
         let local_screen = ScreenId(self.local.screen.id);
         let peer_screen = ScreenId(self.peer.screen.id);
         let local_bounds = self.local.screen.bounds()?;
+        let local_scale = self.local.screen.scale;
 
         let mut topology = Topology::default();
         topology.add_screen(self.local.screen.build(local_node)?)?;
@@ -139,6 +141,7 @@ impl RawConfig {
             peer_node,
             local_screen,
             local_bounds,
+            local_scale,
             session,
         })
     }

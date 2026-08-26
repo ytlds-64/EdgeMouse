@@ -33,6 +33,8 @@ unavailable and restores local input rather than silently losing button events.
 - `Local`: physical events pass through on this machine.
 - `Remote`: the local cursor is hidden and anchored; physical events are
   suppressed, routed, and injected on the peer.
+- `ReceivingRemote`: the peer cursor stays visible while this machine's physical
+  mouse is temporarily prevented from competing for the same OS cursor.
 - `Recovering`: the link timed out or failed and the saved local position is
   restored before returning to `Local`.
 
@@ -71,20 +73,24 @@ The locked dependency graph resolves `quinn-proto` to 0.11.17, beyond the
 ### Windows
 
 Capture runs a `WH_MOUSE_LL` hook on a dedicated message-loop thread. Local
-movement uses consecutive hook coordinates. During remote control, movement is
-calculated against the fixed capture anchor because suppressed input does not
-advance the real cursor. `SendInput` performs absolute virtual-desktop movement,
-buttons, and wheel injection. `dwExtraInfo` plus the injected flag prevent
-feedback loops. Raw Input can later replace the movement source for high-rate
-devices while the hook remains responsible for suppression.
+movement uses consecutive hook coordinates. The hook's per-monitor-aware
+coordinates are divided by the configured display scale before they enter the
+logical screen topology. During remote control, movement is calculated against
+the fixed capture anchor because suppressed input does not advance the real
+cursor. `SendInput` performs absolute virtual-desktop movement, buttons, and
+wheel injection. `dwExtraInfo` plus the injected flag prevent feedback loops.
+Raw Input can later replace the movement source for high-rate devices while the
+hook remains responsible for suppression.
 
 ### macOS
 
 An active session `CGEventTap` captures and suppresses mouse events on a
 dedicated `CFRunLoop`. `CGEventPost` injects absolute movement, drag variants,
 buttons, and pixel scrolling with a dedicated event-source marker. Startup
-checks Accessibility permission; cursor hide/show and warp calls are balanced
-during transitions and teardown.
+checks Accessibility permission. During remote send or receive,
+`CGAssociateMouseAndMouseCursorPosition` prevents local hardware movement from
+dragging the OS cursor; association, cursor hide/show, and warp calls are
+restored during transitions and teardown.
 
 ## Deliberate next steps
 

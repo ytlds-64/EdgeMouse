@@ -58,7 +58,7 @@ const SM_CXVIRTUALSCREEN: i32 = 78;
 const SM_CYVIRTUALSCREEN: i32 = 79;
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PointI32 {
     x: i32,
     y: i32,
@@ -151,6 +151,7 @@ struct CallbackState {
     suppress: Arc<AtomicBool>,
     overflowed: Arc<AtomicBool>,
     last_point: Arc<Mutex<Option<PointI32>>>,
+    coordinate_scale: f64,
 }
 
 static CALLBACK_STATE: AtomicPtr<CallbackState> = AtomicPtr::new(ptr::null_mut());
@@ -177,7 +178,12 @@ pub struct WindowsMouseCapture {
 }
 
 impl WindowsMouseCapture {
-    pub fn start() -> Result<Self, PlatformError> {
+    pub fn start(coordinate_scale: f64) -> Result<Self, PlatformError> {
+        if !coordinate_scale.is_finite() || coordinate_scale <= 0.0 {
+            return Err(PlatformError::new(
+                "Windows coordinate scale must be finite and positive",
+            ));
+        }
         if !CALLBACK_STATE.load(Ordering::Acquire).is_null() {
             return Err(PlatformError::new(
                 "only one Windows mouse capture instance is supported",
@@ -199,6 +205,7 @@ impl WindowsMouseCapture {
                     callback_suppress,
                     callback_overflowed,
                     callback_last_point,
+                    coordinate_scale,
                     |result| {
                         drop(startup_sender.send(result));
                     },
@@ -464,6 +471,7 @@ fn run_hook_thread(
     suppress: Arc<AtomicBool>,
     overflowed: Arc<AtomicBool>,
     last_point: Arc<Mutex<Option<PointI32>>>,
+    coordinate_scale: f64,
     report_startup: impl FnOnce(Result<u32, PlatformError>),
 ) {
     let state = Box::new(CallbackState {
@@ -471,6 +479,7 @@ fn run_hook_thread(
         suppress,
         overflowed,
         last_point,
+        coordinate_scale,
     });
     let state_ptr = Box::into_raw(state);
     if CALLBACK_STATE
@@ -555,7 +564,13 @@ unsafe extern "system" fn mouse_hook_callback(code: i32, w_param: usize, l_param
     }
 
     let suppress = state.suppress.load(Ordering::Acquire);
-    let event = hook_event(w_param as u32, data, &state.last_point, suppress);
+    let event = hook_event(
+        w_param as u32,
+        data,
+        &state.last_point,
+        suppress,
+        state.coordinate_scale,
+    );
     if let Some(event) = event {
         match state.sender.try_send(event) {
             Ok(()) => {}
@@ -583,18 +598,20 @@ fn hook_event(
     data: &MouseHookData,
     last_point: &Mutex<Option<PointI32>>,
     remote: bool,
+    coordinate_scale: f64,
 ) -> Option<PhysicalMouseEvent> {
     match message {
         WM_MOUSEMOVE => {
+            let point = logical_hook_point(data.point, coordinate_scale);
             let mut last = last_point.lock().ok()?;
             let movement = last.map_or(Vector::new(0.0, 0.0), |previous| {
                 Vector::new(
-                    f64::from(data.point.x) - f64::from(previous.x),
-                    f64::from(data.point.y) - f64::from(previous.y),
+                    f64::from(point.x) - f64::from(previous.x),
+                    f64::from(point.y) - f64::from(previous.y),
                 )
             });
             if !remote {
-                *last = Some(data.point);
+                *last = Some(point);
             }
             Some(PhysicalMouseEvent::Move { movement })
         }
@@ -632,6 +649,13 @@ fn hook_event(
             }
         }
         _ => None,
+    }
+}
+
+fn logical_hook_point(point: PointI32, coordinate_scale: f64) -> PointI32 {
+    PointI32 {
+        x: rounded_i32(f64::from(point.x) / coordinate_scale),
+        y: rounded_i32(f64::from(point.y) / coordinate_scale),
     }
 }
 
@@ -703,5 +727,13 @@ mod tests {
             (MOUSEEVENTF_XDOWN, u32::from(XBUTTON1))
         );
         assert!(button_flags(MouseButton::Other(8), ButtonState::Pressed).is_err());
+    }
+
+    #[test]
+    fn normalizes_per_monitor_hook_coordinates_to_logical_points() {
+        assert_eq!(
+            logical_hook_point(PointI32 { x: 3_838, y: 2_158 }, 2.0),
+            PointI32 { x: 1_919, y: 1_079 }
+        );
     }
 }

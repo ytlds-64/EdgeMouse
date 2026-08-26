@@ -97,6 +97,7 @@ unsafe extern "C" {
     fn CGMainDisplayID() -> u32;
     fn CGDisplayHideCursor(display: u32) -> i32;
     fn CGDisplayShowCursor(display: u32) -> i32;
+    fn CGAssociateMouseAndMouseCursorPosition(connected: u32) -> i32;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -248,6 +249,18 @@ impl MacMouseCapture {
             )))
         }
     }
+
+    fn associate_cursor(connected: bool) -> Result<(), PlatformError> {
+        // SAFETY: CoreGraphics accepts a Boolean flag and owns no caller memory.
+        let result = unsafe { CGAssociateMouseAndMouseCursorPosition(u32::from(connected)) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(PlatformError::new(format!(
+                "CGAssociateMouseAndMouseCursorPosition failed with code {result}"
+            )))
+        }
+    }
 }
 
 impl MouseCaptureBackend for MacMouseCapture {
@@ -263,18 +276,21 @@ impl MouseCaptureBackend for MacMouseCapture {
         match mode {
             CaptureMode::Local { restore } => {
                 self.suppress.store(false, Ordering::Release);
+                Self::associate_cursor(true)?;
                 if let Some(position) = restore {
                     Self::warp(position)?;
                 }
                 self.show_cursor()
             }
             CaptureMode::Remote { anchor } => {
+                Self::associate_cursor(false)?;
                 Self::warp(anchor)?;
                 self.hide_cursor()?;
                 self.suppress.store(true, Ordering::Release);
                 Ok(())
             }
             CaptureMode::ReceivingRemote { position } => {
+                Self::associate_cursor(false)?;
                 Self::warp(position)?;
                 self.show_cursor()?;
                 self.suppress.store(true, Ordering::Release);
@@ -302,6 +318,7 @@ impl MouseCaptureBackend for MacMouseCapture {
 impl Drop for MacMouseCapture {
     fn drop(&mut self) {
         self.suppress.store(false, Ordering::Release);
+        drop(Self::associate_cursor(true));
         drop(self.show_cursor());
         if self.run_loop != 0 {
             let run_loop = self.run_loop as *mut c_void;
@@ -442,6 +459,7 @@ impl MouseInjectionBackend for MacMouseInjector {
                     return Err(PlatformError::new("mouse position must be finite"));
                 }
                 self.position = position;
+                MacMouseCapture::warp(position)?;
                 let (event_type, button) = self.movement_type();
                 self.post_mouse(event_type, button)
             }
