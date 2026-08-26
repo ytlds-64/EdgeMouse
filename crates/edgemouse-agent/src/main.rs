@@ -1,4 +1,5 @@
 mod config;
+mod discovery;
 mod network;
 mod platform;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -13,6 +14,8 @@ use std::error::Error;
 use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 fn main() -> ExitCode {
     match run() {
@@ -43,6 +46,13 @@ fn run() -> Result<(), Box<dyn Error>> {
             ensure_no_extra_arguments(arguments)?;
             check_config(Path::new(&config))
         }
+        Some("discover") => {
+            let config = arguments
+                .next()
+                .ok_or("discover requires a TOML config path")?;
+            ensure_no_extra_arguments(arguments)?;
+            discover_peer(Path::new(&config))
+        }
         Some("run") => {
             let config = arguments.next().ok_or("run requires a TOML config path")?;
             ensure_no_extra_arguments(arguments)?;
@@ -62,7 +72,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 
 fn usage() {
     println!(
-        "EdgeMouse MVP\n\nUSAGE:\n    edgemouse <COMMAND>\n\nCOMMANDS:\n    doctor                  Check platform APIs and permissions\n    identity <DIRECTORY>    Generate this node's certificate and private key\n    check-config <CONFIG>   Validate configuration and certificate pairing\n    run <CONFIG>            Connect to the trusted peer and enable edge switching\n    demo                    Simulate a Windows-to-macOS edge transition\n    version                 Print the build version\n    help                    Show this help"
+        "EdgeMouse MVP\n\nUSAGE:\n    edgemouse <COMMAND>\n\nCOMMANDS:\n    doctor                  Check platform APIs and permissions\n    identity <DIRECTORY>    Generate this node's certificate and private key\n    check-config <CONFIG>   Validate configuration and certificate pairing\n    discover <CONFIG>       Find the configured trusted peer on the LAN\n    run <CONFIG>            Connect to the trusted peer and enable edge switching\n    demo                    Simulate a Windows-to-macOS edge transition\n    version                 Print the build version\n    help                    Show this help"
     );
 }
 
@@ -78,9 +88,41 @@ fn check_config(path: &Path) -> Result<(), Box<dyn Error>> {
         edgemouse_transport::format_node_id(config.peer_node)
     );
     println!("Listen     : {}", config.transport.bind_address);
-    println!("Peer       : {}", config.transport.peer_address);
+    match config.peer_address {
+        config::PeerAddress::Static(address) => println!("Peer       : {address}"),
+        config::PeerAddress::Auto => {
+            println!("Peer       : auto (UDP {})", discovery::DISCOVERY_PORT)
+        }
+    }
     println!("Local screen: {}", config.local_screen.0);
     Ok(())
+}
+
+fn discover_peer(path: &Path) -> Result<(), Box<dyn Error>> {
+    let config = config::LoadedConfig::load(path)?;
+    let stopping = Arc::new(AtomicBool::new(false));
+    let handler_state = Arc::clone(&stopping);
+    ctrlc::set_handler(move || handler_state.store(true, Ordering::Release))?;
+    println!(
+        "Looking for trusted peer {} on UDP {}…",
+        edgemouse_transport::format_node_id(config.peer_node),
+        discovery::DISCOVERY_PORT
+    );
+    let request = discovery::DiscoveryRequest {
+        local_node: config.local_node,
+        expected_peer: config.peer_node,
+        local_name: config.transport.local_name,
+        quic_port: config.transport.bind_address.port(),
+        timeout: config.transport.connect_timeout,
+    };
+    match discovery::discover_trusted_peer(&request, &stopping) {
+        Ok(peer) => {
+            println!("Trusted peer found: {} at {}", peer.name, peer.address);
+            Ok(())
+        }
+        Err(_) if stopping.load(Ordering::Acquire) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn generate_identity(directory: &Path) -> Result<(), Box<dyn Error>> {

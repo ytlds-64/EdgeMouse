@@ -6,7 +6,7 @@ screen edge transfers movement, buttons, and scrolling to the other machine;
 crossing back restores local control.
 
 This repository contains a functional mouse-only MVP. It intentionally excludes
-keyboard input, clipboard sync, discovery, relay servers, multi-monitor setup,
+keyboard input, clipboard sync, automatic certificate exchange, relay servers, multi-monitor setup,
 tray UI, installers, and elevated Windows desktops.
 
 ## Implemented
@@ -25,6 +25,8 @@ tray UI, installers, and elevated Windows desktops.
   synthetic-button release on disconnect.
 - Automatic reconnection after an established link is interrupted, with local
   mouse control kept available while the peer or network is offline.
+- Automatic IPv4 LAN discovery of the configured certificate-pinned peer, both
+  at startup and during reconnection; static peer addresses remain supported.
 - Identity generation, configuration validation, diagnostics, and simulation
   commands.
 
@@ -84,8 +86,8 @@ steps on both macOS and Windows after every push to `main`. A successful run als
 publishes downloadable platform packages under the run's **Artifacts** section.
 
 The scripts deliberately leave these machine-specific decisions to the user:
-exchange only the public certificates, enter the peer LAN address and real screen
-geometry, allow UDP port `43891` through Windows Firewall, and grant macOS
+exchange only the public certificates, enter the real screen geometry, allow UDP
+ports `43891` and `43892` through Windows Firewall, and grant macOS
 Accessibility permission.
 
 ## Pair the two machines
@@ -101,12 +103,22 @@ Accessibility permission.
 3. Copy and edit [the Windows example](examples/windows.toml) and
    [the macOS example](examples/macos.toml). The two files must use the same
    screen IDs and geometry, with opposite `layout.peer_on` values.
-4. Set each `peer.address` to the other machine's LAN IP. Permit inbound UDP
-   port `43891` in Windows Firewall and any host firewall in use.
+4. Keep `peer.address = "auto"` to discover the already trusted computer on the
+   local IPv4 network. Alternatively, set it to the other machine's static LAN
+   address, such as `192.168.8.202:43891`. Permit inbound UDP ports `43891`
+   (QUIC mouse traffic) and `43892` (discovery) in Windows Firewall and any host
+   firewall in use.
 5. Validate both files before connecting:
 
    ```sh
    edgemouse check-config ./edgemouse.toml
+   ```
+
+   To test discovery without capturing either mouse, run this command on both
+   computers at about the same time:
+
+   ```sh
+   edgemouse discover ./edgemouse.toml
    ```
 
 6. On macOS, enable EdgeMouse under **System Settings → Privacy & Security →
@@ -143,6 +155,12 @@ connection, a temporary network loss or peer restart restores local mouse contro
 and makes both agents retry automatically. Press Ctrl+C to release input and shut
 down cleanly.
 
+Discovery packets contain only the node ID, device name, and QUIC port. Their IP
+address is taken from the UDP source and they are treated only as connection
+hints: a discovered endpoint must still present the exact certificate already
+configured for that peer and complete mutual TLS. A forged LAN broadcast cannot
+become a trusted EdgeMouse peer.
+
 Screen coordinates must match the operating system's logical desktop coordinate
 space. For the single-screen MVP the origin is normally `(0, 0)`. On a Retina
 Mac use the logical resolution shown by macOS, not the doubled backing-pixel
@@ -159,7 +177,7 @@ and merged updates. Windows requests 1 ms timer resolution while EdgeMouse is
 running so the 4–12 ms movement schedule does not collapse to the default
 roughly 15.6 ms system timer period.
 
-Both computers must use protocol v2. Versions 0.1.5 through 0.1.10 use protocol
+Both computers must use protocol v2. Versions 0.1.5 through 0.1.11 use protocol
 v2 and will intentionally refuse a connection to a 0.1.4 executable. For the
 best movement behavior, install the latest version on both computers.
 

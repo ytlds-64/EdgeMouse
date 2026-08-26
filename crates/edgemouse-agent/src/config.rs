@@ -7,9 +7,16 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerAddress {
+    Static(SocketAddr),
+    Auto,
+}
+
 #[derive(Clone)]
 pub struct LoadedConfig {
     pub transport: PeerConfig,
+    pub peer_address: PeerAddress,
     pub topology: Topology,
     pub local_node: NodeId,
     pub peer_node: NodeId,
@@ -119,9 +126,15 @@ impl RawConfig {
             peer_screen,
         )?;
 
+        let bind_address = parse_address(&self.local.listen, "local listen address")?;
+        let peer_address = parse_peer_address(&self.peer.address)?;
         let transport = PeerConfig {
-            bind_address: parse_address(&self.local.listen, "local listen address")?,
-            peer_address: parse_address(&self.peer.address, "peer address")?,
+            bind_address,
+            // Auto discovery replaces this sentinel before the transport starts.
+            peer_address: match peer_address {
+                PeerAddress::Static(address) => address,
+                PeerAddress::Auto => "0.0.0.0:0".parse()?,
+            },
             local_name: self.local.name,
             identity,
             peer,
@@ -137,6 +150,7 @@ impl RawConfig {
 
         Ok(LoadedConfig {
             transport,
+            peer_address,
             topology,
             local_node,
             peer_node,
@@ -184,6 +198,14 @@ fn parse_address(value: &str, label: &str) -> Result<SocketAddr, Box<dyn Error>>
         .map_err(|error| format!("invalid {label} `{value}`: {error}").into())
 }
 
+fn parse_peer_address(value: &str) -> Result<PeerAddress, Box<dyn Error>> {
+    if value.eq_ignore_ascii_case("auto") {
+        Ok(PeerAddress::Auto)
+    } else {
+        Ok(PeerAddress::Static(parse_address(value, "peer address")?))
+    }
+}
+
 fn parse_edge(value: &str) -> Result<Edge, Box<dyn Error>> {
     match value.to_ascii_lowercase().as_str() {
         "left" => Ok(Edge::Left),
@@ -219,5 +241,20 @@ mod tests {
         assert_eq!(session.hysteresis, 8.0);
         assert_eq!(session.timeout_ms, 1_500);
         assert_eq!(session.connect_timeout_seconds, 30);
+    }
+
+    #[test]
+    fn peer_address_accepts_auto_case_insensitively() {
+        assert_eq!(parse_peer_address("auto").unwrap(), PeerAddress::Auto);
+        assert_eq!(parse_peer_address("AUTO").unwrap(), PeerAddress::Auto);
+    }
+
+    #[test]
+    fn peer_address_preserves_static_socket_addresses() {
+        assert_eq!(
+            parse_peer_address("192.168.8.202:43891").unwrap(),
+            PeerAddress::Static("192.168.8.202:43891".parse().unwrap())
+        );
+        assert!(parse_peer_address("automatic").is_err());
     }
 }

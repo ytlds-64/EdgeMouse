@@ -1,4 +1,5 @@
-use crate::config::LoadedConfig;
+use crate::config::{LoadedConfig, PeerAddress};
+use crate::discovery::{DISCOVERY_PORT, DiscoveryRequest, discover_trusted_peer};
 use crate::network::{Network, NetworkEvent};
 use crate::platform;
 use edgemouse_core::{
@@ -74,15 +75,30 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         } else {
             println!("Connecting to the trusted peer…");
         }
-        let network =
-            match Network::connect(config.transport.clone(), session_id, Arc::clone(&stopping)) {
-                Ok(network) => network,
+        let mut transport = config.transport.clone();
+        if config.peer_address == PeerAddress::Auto {
+            println!("Discovering the trusted peer on UDP {DISCOVERY_PORT}…");
+            let request = DiscoveryRequest {
+                local_node: config.local_node,
+                expected_peer: config.peer_node,
+                local_name: transport.local_name.clone(),
+                quic_port: transport.bind_address.port(),
+                timeout: transport.connect_timeout,
+            };
+            match discover_trusted_peer(&request, &stopping) {
+                Ok(discovered) => {
+                    transport.peer_address = discovered.address;
+                    println!(
+                        "Discovered trusted peer {} at {}",
+                        discovered.name, discovered.address
+                    );
+                }
                 Err(_) if stopping.load(Ordering::Acquire) => return Ok(()),
                 Err(error) if !reconnecting => return Err(error.into()),
                 Err(error) => {
                     let delay = backoff.next_delay();
                     eprintln!(
-                        "Reconnect attempt failed: {error}; retrying in {} second(s)",
+                        "Peer discovery failed: {error}; retrying in {} second(s)",
                         delay.as_secs()
                     );
                     if wait_until_retry_or_stop(&stopping, delay) {
@@ -90,7 +106,24 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
                     }
                     continue;
                 }
-            };
+            }
+        }
+        let network = match Network::connect(transport, session_id, Arc::clone(&stopping)) {
+            Ok(network) => network,
+            Err(_) if stopping.load(Ordering::Acquire) => return Ok(()),
+            Err(error) if !reconnecting => return Err(error.into()),
+            Err(error) => {
+                let delay = backoff.next_delay();
+                eprintln!(
+                    "Reconnect attempt failed: {error}; retrying in {} second(s)",
+                    delay.as_secs()
+                );
+                if wait_until_retry_or_stop(&stopping, delay) {
+                    return Ok(());
+                }
+                continue;
+            }
+        };
         if network.peer_node != config.peer_node {
             return Err("connected peer identity does not match configuration".into());
         }

@@ -84,7 +84,7 @@ echo
 echo "Manual steps still required:"
 echo "1. Send only mac-identity/certificate.der to Windows. Never send private-key.der."
 echo "2. Save the Windows certificate as windows-certificate.der in this project folder."
-echo "3. Edit edgemouse.toml: peer.address, both screen sizes, and layout.peer_on."
+echo "3. Edit edgemouse.toml: both screen sizes and layout.peer_on. Keep peer.address as auto, or set a static LAN address."
 echo "4. Grant EdgeMouse Accessibility access in macOS System Settings."
 echo "5. Run: ${binary_path} check-config ${config_path}"
 echo "6. Run: ${binary_path} run ${config_path}"
