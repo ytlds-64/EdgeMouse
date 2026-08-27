@@ -237,9 +237,17 @@ impl Session {
                 match (from_node == self.local_node, to_node == self.local_node) {
                     (true, true) => Ok(InputResult::pass_through()),
                     (true, false) => {
+                        let restore_position = self
+                            .topology
+                            .screen(transition.from)
+                            .ok_or(SessionError::Topology(TopologyError::MissingScreen(
+                                transition.from,
+                            )))?
+                            .bounds
+                            .clamp_inside(previous_pointer, 1.0);
                         self.state = ControlState::Remote { peer: to_node };
                         self.last_peer_activity_ms = Some(now_ms);
-                        self.local_restore = Some((transition.from, previous_pointer));
+                        self.local_restore = Some((transition.from, restore_position));
                         let enter = self.next_remote_event(RemoteMouseEvent::Enter {
                             screen: transition.to,
                             position: transition.position,
@@ -665,6 +673,36 @@ mod tests {
         session.complete_recovery().unwrap();
         assert_eq!(session.state(), ControlState::Local);
         assert_eq!(session.current_screen(), LOCAL_SCREEN);
+    }
+
+    #[test]
+    fn timeout_restore_point_is_kept_inside_the_local_screen() {
+        let mut session = Session::new(
+            LOCAL,
+            topology(),
+            LOCAL_SCREEN,
+            Point::new(99.75, 50.0),
+            SessionConfig::default(),
+        )
+        .unwrap();
+        session
+            .handle_input(
+                PhysicalMouseEvent::Move {
+                    movement: Vector::new(5.0, 0.0),
+                },
+                100,
+            )
+            .unwrap();
+
+        let effects = session.poll_timeout(1_600);
+
+        assert!(matches!(
+            effects[1],
+            Effect::ReleasePointer {
+                restore_position: Point { x: 99.0, y: 50.0 },
+                ..
+            }
+        ));
     }
 
     #[test]

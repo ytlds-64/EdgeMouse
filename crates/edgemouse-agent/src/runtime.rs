@@ -20,6 +20,8 @@ const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const RECONNECT_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(5);
 const RECONNECT_STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const POINTER_BOUNDARY_TOLERANCE: f64 = 1.0;
+const POINTER_INTERIOR_INSET: f64 = 1.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ConnectionEnd {
@@ -71,8 +73,7 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         if stopping.load(Ordering::Acquire) {
             return Ok(());
         }
-        let initial_pointer = platform::current_pointer()?;
-        validate_initial_pointer(&config, initial_pointer)?;
+        let initial_pointer = normalize_initial_pointer(&config, platform::current_pointer()?)?;
         let session_id = new_session_id(config.local_node.0);
         if reconnecting {
             println!("Reconnecting to the trusted peer…");
@@ -244,18 +245,36 @@ fn run_connected(
     result
 }
 
-fn validate_initial_pointer(
+fn normalize_initial_pointer(
     config: &LoadedConfig,
     initial_pointer: Point,
-) -> Result<(), Box<dyn Error>> {
-    if config.local_bounds.contains(initial_pointer) {
-        return Ok(());
+) -> Result<Point, Box<dyn Error>> {
+    let Some(normalized) = normalize_pointer_to_bounds(config.local_bounds, initial_pointer) else {
+        return Err(format!(
+            "current pointer ({:.1}, {:.1}) is outside configured local screen bounds; check origin_x, origin_y, width, and height",
+            initial_pointer.x, initial_pointer.y
+        )
+        .into());
+    };
+    if normalized != initial_pointer {
+        eprintln!(
+            "current pointer ({:.1}, {:.1}) was on the configured screen boundary; clamped to ({:.1}, {:.1}) for safe reconnect",
+            initial_pointer.x, initial_pointer.y, normalized.x, normalized.y
+        );
     }
-    Err(format!(
-        "current pointer ({:.1}, {:.1}) is outside configured local screen bounds; check origin_x, origin_y, width, and height",
-        initial_pointer.x, initial_pointer.y
-    )
-    .into())
+    Ok(normalized)
+}
+
+fn normalize_pointer_to_bounds(bounds: Rect, pointer: Point) -> Option<Point> {
+    if bounds.contains(pointer) {
+        return Some(pointer);
+    }
+    let is_near_closed_bounds = pointer.is_finite()
+        && pointer.x >= bounds.left() - POINTER_BOUNDARY_TOLERANCE
+        && pointer.x <= bounds.right() + POINTER_BOUNDARY_TOLERANCE
+        && pointer.y >= bounds.top() - POINTER_BOUNDARY_TOLERANCE
+        && pointer.y <= bounds.bottom() + POINTER_BOUNDARY_TOLERANCE;
+    is_near_closed_bounds.then(|| bounds.clamp_inside(pointer, POINTER_INTERIOR_INSET))
 }
 
 fn wait_until_retry_or_stop(stopping: &AtomicBool, delay: Duration) -> bool {
@@ -835,6 +854,27 @@ mod tests {
         assert_eq!(backoff.next_delay(), Duration::from_secs(5));
         backoff.reset();
         assert_eq!(backoff.next_delay(), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn reconnect_clamps_a_windows_pointer_on_the_closed_right_edge() {
+        let bounds = Rect::new(Point::new(0.0, 0.0), 1_920.0, 1_080.0).unwrap();
+        let pointer = Point::new(1_920.0, 601.0);
+
+        assert_eq!(
+            normalize_pointer_to_bounds(bounds, pointer),
+            Some(Point::new(1_919.0, 601.0))
+        );
+    }
+
+    #[test]
+    fn reconnect_rejects_a_pointer_far_outside_the_configured_screen() {
+        let bounds = Rect::new(Point::new(0.0, 0.0), 1_920.0, 1_080.0).unwrap();
+
+        assert_eq!(
+            normalize_pointer_to_bounds(bounds, Point::new(2_500.0, 601.0)),
+            None
+        );
     }
 
     #[test]
