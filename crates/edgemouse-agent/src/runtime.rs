@@ -175,9 +175,7 @@ fn start_discovery_responder(
     let thread = std::thread::Builder::new()
         .name("edgemouse-discovery".to_owned())
         .spawn(move || {
-            respond_to_trusted_peer(&request, &thread_stopping)
-                .map(|_| ())
-                .map_err(|error| error.to_string())
+            respond_to_trusted_peer(&request, &thread_stopping).map_err(|error| error.to_string())
         })?;
     Ok((stopping, thread))
 }

@@ -100,7 +100,8 @@ pointer reverses direction.
 
 When `peer.address` is `auto`, the lower node ID locates the higher node on IPv4
 UDP port 43892 while the higher node immediately opens its QUIC listener and
-answers discovery concurrently. Separating the connector and listener roles
+answers every discovery request concurrently until the connection succeeds.
+Separating the connector and listener roles
 prevents two login agents from waiting on each other. Discovery first uses
 limited and interface-directed broadcast; on macOS it also performs a bounded
 unicast sweep of small active LAN subnets because VPN routing and some Windows

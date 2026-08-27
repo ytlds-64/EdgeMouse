@@ -73,9 +73,22 @@ pub fn discover_trusted_peer(
 pub fn respond_to_trusted_peer(
     request: &DiscoveryRequest,
     stopping: &AtomicBool,
-) -> Result<DiscoveredPeer, DiscoveryError> {
+) -> Result<(), DiscoveryError> {
     let bind_address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, DISCOVERY_PORT));
-    discover_on(request, stopping, bind_address, &[], false)
+    respond_on(request, stopping, bind_address)
+}
+
+fn respond_on(
+    request: &DiscoveryRequest,
+    stopping: &AtomicBool,
+    bind_address: SocketAddr,
+) -> Result<(), DiscoveryError> {
+    while !stopping.load(Ordering::Acquire) {
+        // Rebind after every valid request so a lost UDP reply does not leave
+        // the acceptor silent for the rest of the QUIC connection timeout.
+        discover_on(request, stopping, bind_address, &[], false)?;
+    }
+    Err(DiscoveryError::new("peer discovery cancelled"))
 }
 
 fn discover_on(
@@ -559,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn a_listener_replies_without_needing_to_announce() {
+    fn a_listener_keeps_replying_until_cancelled() {
         let listener_probe = UdpSocket::bind("127.0.0.1:0").unwrap();
         let listener_address = listener_probe.local_addr().unwrap();
         drop(listener_probe);
@@ -567,33 +580,37 @@ mod tests {
         sender
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
-        let stopping = AtomicBool::new(false);
+        let stopping = Arc::new(AtomicBool::new(false));
+        let listener_stopping = Arc::clone(&stopping);
 
         let listener = std::thread::spawn(move || {
-            discover_on(
+            respond_on(
                 &request(2, 1, "listener", 50_002),
-                &stopping,
+                &listener_stopping,
                 listener_address,
-                &[],
-                false,
             )
         });
-        std::thread::sleep(Duration::from_millis(50));
         let packet = encode_announcement(&Announcement {
             node: NodeId(1),
             quic_port: 50_001,
             name: "sender".to_owned(),
         })
         .unwrap();
-        sender.send_to(&packet, listener_address).unwrap();
         let mut reply = [0_u8; DISCOVERY_PACKET_MAX_LEN];
-        let (reply_length, _) = sender.recv_from(&mut reply).unwrap();
-
+        for _ in 0..2 {
+            std::thread::sleep(Duration::from_millis(50));
+            sender.send_to(&packet, listener_address).unwrap();
+            let (reply_length, _) = sender.recv_from(&mut reply).unwrap();
+            assert_eq!(
+                decode_announcement(&reply[..reply_length]).unwrap().node,
+                NodeId(2)
+            );
+        }
+        stopping.store(true, Ordering::Release);
         assert_eq!(
-            decode_announcement(&reply[..reply_length]).unwrap().node,
-            NodeId(2)
+            listener.join().unwrap().unwrap_err().to_string(),
+            "peer discovery cancelled"
         );
-        assert_eq!(listener.join().unwrap().unwrap().node, NodeId(1));
     }
 
     #[test]
