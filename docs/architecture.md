@@ -101,16 +101,18 @@ networks that block IPv4 broadcast.
 Initial trust can be installed through the short-code pairing protocol. A host
 broadcasts a bounded offer on UDP 43892 containing a random 128-bit offer ID,
 device name, and TCP 43893 port; it never broadcasts the code or a reusable code
-verifier. The joiner uses the UDP source IP as an untrusted locator. Both sides
-run single-use asymmetric SPAKE2 with the random offer ID bound into the role
-identities. The derived key authenticates both public-certificate records and a
-two-way confirmation over the complete transcript. Each side recomputes the
-certificate-derived node ID, rejects its own certificate, enforces strict length
-bounds and timeouts, and only then saves the peer certificate. The random
-8-digit code expires after five minutes and a host accepts at most three
-attempts. Existing different trust is never overwritten. Private keys are not
-part of any pairing message, and normal sessions still require
-certificate-pinned mutual TLS.
+verifier. The joiner uses the UDP source IP as an untrusted locator, or a
+user-supplied IP when broadcast is blocked. After TCP connects, the host sends
+the same fresh bounded offer before the key exchange, and a discovery-based
+joiner verifies that its offer ID matches. Both sides run single-use asymmetric
+SPAKE2 with the random offer ID bound into the role identities. The derived key
+authenticates both public-certificate records and a two-way confirmation over the
+complete transcript. Each side recomputes the certificate-derived node ID,
+rejects its own certificate, enforces strict length bounds and timeouts, and only
+then saves the peer certificate. The random 8-digit code expires after five
+minutes and a host accepts at most three attempts. Existing different trust is
+never overwritten. Private keys are not part of any pairing message, and normal
+sessions still require certificate-pinned mutual TLS.
 
 The locked dependency graph pins `quinn-proto` to 0.11.16, beyond the 0.11.14
 fix for the malformed transport-parameter denial-of-service advisory. Version

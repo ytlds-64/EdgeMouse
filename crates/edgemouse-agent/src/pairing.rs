@@ -8,7 +8,9 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
+use std::net::{
+    IpAddr, Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket,
+};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -125,7 +127,7 @@ impl PairingHost {
             match self.listener.accept() {
                 Ok((stream, _source)) => {
                     attempts += 1;
-                    match host_exchange(stream, &self.config, &self.offer.id, &self.code) {
+                    match host_exchange(stream, &self.config, &self.offer, &self.code) {
                         Ok(peer) => return finish_pairing(&self.config, peer),
                         Err(error) if attempts < MAX_ATTEMPTS => {
                             eprintln!(
@@ -160,20 +162,45 @@ impl PairingHost {
 pub fn join(
     config: PairingConfig,
     code: &str,
+    direct_host: Option<&str>,
     stopping: &AtomicBool,
 ) -> Result<PairingResult, PairingError> {
     validate_config(&config)?;
     let code = normalize_code(code)?;
-    let discovered = discover_offer(config.timeout, stopping)?;
-    let address = SocketAddr::new(discovered.source.ip(), discovered.offer.tcp_port);
+    let (address, expected_offer_id) = if let Some(host) = direct_host {
+        (parse_direct_host(host)?, None)
+    } else {
+        let discovered = discover_offer(config.timeout, stopping)?;
+        (
+            SocketAddr::new(discovered.source.ip(), discovered.offer.tcp_port),
+            Some(discovered.offer.id),
+        )
+    };
     let peer = join_exchange(
         address,
         config.timeout,
         &config,
-        &discovered.offer.id,
+        expected_offer_id.as_ref(),
         &code,
     )?;
     finish_pairing(&config, peer)
+}
+
+fn parse_direct_host(value: &str) -> Result<SocketAddr, PairingError> {
+    if let Ok(address) = value.parse::<SocketAddr>() {
+        if address.port() == 0 {
+            return Err(PairingError::new("direct pairing port cannot be zero"));
+        }
+        return Ok(address);
+    }
+    value
+        .parse::<IpAddr>()
+        .map(|address| SocketAddr::new(address, PAIRING_PORT))
+        .map_err(|error| {
+            PairingError::new(format!(
+                "invalid direct pairing host `{value}`; use an IP address such as 192.168.8.202: {error}"
+            ))
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -382,19 +409,21 @@ fn discover_offer(
 fn host_exchange(
     mut stream: TcpStream,
     config: &PairingConfig,
-    offer_id: &[u8; 16],
+    offer: &PairingOffer,
     code: &str,
 ) -> Result<CertificateRecord, PairingError> {
     configure_stream(&stream)?;
+    write_tcp_offer(&mut stream, offer)?;
     let mut client_hello = [0_u8; EXCHANGE_MESSAGE_LEN];
     stream
         .read_exact(&mut client_hello)
         .map_err(|error| PairingError::io("failed to read pairing key exchange", error))?;
-    if &client_hello[..8] != PAIRING_EXCHANGE_MAGIC || &client_hello[8..24] != offer_id {
+    if &client_hello[..8] != PAIRING_EXCHANGE_MAGIC || client_hello[8..24] != offer.id {
         return Err(PairingError::new(
             "pairing key exchange does not match this one-time offer",
         ));
     }
+    let offer_id = &offer.id;
     let client_spake = &client_hello[24..];
     let (id_a, id_b) = spake_identities(offer_id);
     let (state, host_spake) =
@@ -462,7 +491,7 @@ fn join_exchange(
     address: SocketAddr,
     timeout: Duration,
     config: &PairingConfig,
-    offer_id: &[u8; 16],
+    expected_offer_id: Option<&[u8; 16]>,
     code: &str,
 ) -> Result<CertificateRecord, PairingError> {
     let mut stream =
@@ -473,6 +502,13 @@ fn join_exchange(
             )
         })?;
     configure_stream(&stream)?;
+    let tcp_offer = read_tcp_offer(&mut stream)?;
+    if expected_offer_id.is_some_and(|expected| *expected != tcp_offer.id) {
+        return Err(PairingError::new(
+            "TCP pairing host does not match the discovered one-time offer",
+        ));
+    }
+    let offer_id = &tcp_offer.id;
     let (id_a, id_b) = spake_identities(offer_id);
     let (state, client_spake) =
         Spake2::<Ed25519Group>::start_a(&Password::new(code.as_bytes()), &id_a, &id_b);
@@ -559,6 +595,34 @@ fn configure_stream(stream: &TcpStream) -> Result<(), PairingError> {
         .set_nodelay(true)
         .map_err(|error| PairingError::io("failed to configure pairing latency", error))?;
     Ok(())
+}
+
+fn write_tcp_offer(stream: &mut TcpStream, offer: &PairingOffer) -> Result<(), PairingError> {
+    let packet = encode_offer(offer)?;
+    let length = u16::try_from(packet.len())
+        .map_err(|_| PairingError::new("TCP pairing offer is too large"))?;
+    stream
+        .write_all(&length.to_be_bytes())
+        .and_then(|()| stream.write_all(&packet))
+        .map_err(|error| PairingError::io("failed to send TCP pairing offer", error))
+}
+
+fn read_tcp_offer(stream: &mut TcpStream) -> Result<PairingOffer, PairingError> {
+    let mut length_bytes = [0_u8; 2];
+    stream
+        .read_exact(&mut length_bytes)
+        .map_err(|error| PairingError::io("failed to read TCP pairing offer", error))?;
+    let length = usize::from(u16::from_be_bytes(length_bytes));
+    if !(PAIRING_DISCOVERY_HEADER_LEN..=PAIRING_DISCOVERY_MAX_LEN).contains(&length) {
+        return Err(PairingError::new(
+            "TCP pairing offer has an invalid bounded length",
+        ));
+    }
+    let mut packet = vec![0_u8; length];
+    stream
+        .read_exact(&mut packet)
+        .map_err(|error| PairingError::io("failed to read TCP pairing offer", error))?;
+    decode_offer(&packet)
 }
 
 fn spake_identities(offer_id: &[u8; 16]) -> (SpakeIdentity, SpakeIdentity) {
@@ -1067,6 +1131,20 @@ mod tests {
     }
 
     #[test]
+    fn direct_hosts_accept_an_ip_or_an_explicit_port() {
+        assert_eq!(
+            parse_direct_host("192.168.8.202").unwrap(),
+            "192.168.8.202:43893".parse().unwrap()
+        );
+        assert_eq!(
+            parse_direct_host("192.168.8.202:50000").unwrap(),
+            "192.168.8.202:50000".parse().unwrap()
+        );
+        assert!(parse_direct_host("windows-pc").is_err());
+        assert!(parse_direct_host("192.168.8.202:0").is_err());
+    }
+
+    #[test]
     fn offers_round_trip_and_reject_malformed_lengths() {
         let offer = PairingOffer {
             id: [7; 16],
@@ -1142,21 +1220,19 @@ mod tests {
         );
         let host_certificate = host.local_certificate.clone();
         let joiner_certificate = joiner.local_certificate.clone();
-        let offer_id = [42_u8; 16];
+        let offer = PairingOffer {
+            id: [42_u8; 16],
+            tcp_port: PAIRING_PORT,
+            name: "windows-pc".to_owned(),
+        };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let host_thread = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            host_exchange(stream, &host, &offer_id, "12345678")
+            host_exchange(stream, &host, &offer, "12345678")
         });
-        let host_record = join_exchange(
-            address,
-            Duration::from_secs(2),
-            &joiner,
-            &offer_id,
-            "12345678",
-        )
-        .unwrap();
+        let host_record =
+            join_exchange(address, Duration::from_secs(2), &joiner, None, "12345678").unwrap();
         let joiner_record = host_thread.join().unwrap().unwrap();
 
         assert_eq!(host_record.name, "windows-pc");

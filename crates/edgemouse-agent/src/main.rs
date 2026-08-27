@@ -74,7 +74,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 
 fn usage() {
     println!(
-        "EdgeMouse MVP\n\nUSAGE:\n    edgemouse <COMMAND>\n\nCOMMANDS:\n    doctor                         Check platform APIs and permissions\n    identity <DIRECTORY>           Generate this node's certificate and private key\n    pair host <CONFIG>             Show a one-time code and offer secure pairing\n    pair join <CONFIG> <CODE>      Find the host and pair using its one-time code\n    check-config <CONFIG>          Validate configuration and certificate pairing\n    discover <CONFIG>              Find the configured trusted peer on the LAN\n    run <CONFIG>                   Connect to the trusted peer and enable edge switching\n    demo                           Simulate a Windows-to-macOS edge transition\n    version                        Print the build version\n    help                           Show this help"
+        "EdgeMouse MVP\n\nUSAGE:\n    edgemouse <COMMAND>\n\nCOMMANDS:\n    doctor                                Check platform APIs and permissions\n    identity <DIRECTORY>                  Generate this node's certificate and private key\n    pair host <CONFIG>                    Show a one-time code and offer secure pairing\n    pair join <CONFIG> <CODE> [HOST]      Pair by discovery or a direct host IP\n    check-config <CONFIG>                 Validate configuration and certificate pairing\n    discover <CONFIG>                     Find the configured trusted peer on the LAN\n    run <CONFIG>                          Connect to the trusted peer and enable edge switching\n    demo                                  Simulate a Windows-to-macOS edge transition\n    version                               Print the build version\n    help                                  Show this help"
     );
 }
 
@@ -98,6 +98,9 @@ fn pair(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error
                 "On the other computer run: edgemouse pair join <CONFIG> {}",
                 host.formatted_code()
             );
+            println!(
+                "If broadcast discovery is blocked, append this computer's IP address to that command."
+            );
             println!("The code expires in 5 minutes and allows at most 3 attempts.");
             println!("Press Ctrl+C to cancel.");
             host.run(&stopping)?
@@ -106,12 +109,17 @@ fn pair(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error
             let code = arguments
                 .next()
                 .ok_or("pair join requires the 8-digit code shown by the host")?;
+            let host = arguments.next();
             ensure_no_extra_arguments(arguments)?;
-            println!(
-                "Looking for a pairing host on UDP {}…",
-                discovery::DISCOVERY_PORT
-            );
-            pairing::join(config, &code, &stopping)?
+            if let Some(host) = &host {
+                println!("Connecting directly to pairing host {host}…");
+            } else {
+                println!(
+                    "Looking for a pairing host on UDP {}…",
+                    discovery::DISCOVERY_PORT
+                );
+            }
+            pairing::join(config, &code, host.as_deref(), &stopping)?
         }
         _ => return Err(format!("unknown pair mode `{mode}`; use `host` or `join`").into()),
     };

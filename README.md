@@ -131,6 +131,13 @@ permission.
    ./target/release/edgemouse pair join ./edgemouse.toml 1234-5678
    ```
 
+   If UDP broadcast does not cross the wired/Wi-Fi network, append the Windows
+   IP address to bypass discovery while keeping the same authenticated pairing:
+
+   ```sh
+   ./target/release/edgemouse pair join ./edgemouse.toml 1234-5678 192.168.8.202
+   ```
+
    Either platform can technically host, but Windows-host/Mac-join avoids adding
    a new inbound TCP rule to macOS. The code expires after five minutes and the
    host stops after three rejected attempts. Existing identical peer
@@ -190,7 +197,8 @@ configured for that peer and complete mutual TLS. A forged LAN broadcast cannot
 become a trusted EdgeMouse peer.
 
 Pairing offers contain only a random one-time session ID, device name, and TCP
-port; the short code and its hash are never broadcast. SPAKE2 derives a session
+port; the short code and its hash are never broadcast. If a direct host IP is
+provided, the same fresh offer is sent over TCP instead. SPAKE2 derives a session
 key from the code without sending the code itself. Both certificate records and
 the final confirmation are authenticated over the complete handshake transcript
 before either certificate is saved. Certificates are public; private keys never
@@ -213,7 +221,7 @@ and merged updates. Windows requests 1 ms timer resolution while EdgeMouse is
 running so the 4–12 ms movement schedule does not collapse to the default
 roughly 15.6 ms system timer period.
 
-Both computers must use protocol v2. Versions 0.1.5 through 0.1.13 use protocol
+Both computers must use protocol v2. Versions 0.1.5 through 0.1.14 use protocol
 v2 and will intentionally refuse a connection to a 0.1.4 executable. For the
 best movement behavior, install the latest version on both computers.
 
