@@ -79,7 +79,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\update-build-run-windows.ps1
 
 Machine-specific configuration, certificates, private keys, and logs are ignored
 by Git and are not overwritten. The script deliberately stops instead of stashing
-or discarding tracked local source changes.
+or discarding tracked local source changes. It retries a temporarily unavailable
+GitHub connection three times. `-SkipUpdate` builds and starts the source already
+present on disk, while `run-windows-with-log.ps1` starts the existing release
+executable without contacting GitHub.
 
 GitHub Actions repeats the formatting, static-analysis, test, and release-build
 steps on both macOS and Windows after every push to `main`. A successful run also

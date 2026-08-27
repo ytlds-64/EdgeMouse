@@ -37,28 +37,51 @@ function Write-LogLine {
     Write-Host $Line
 }
 
+function Invoke-LoggedEdgeMouse {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    # Windows PowerShell 5 wraps a native program's redirected stderr as
+    # NativeCommandError. EdgeMouse intentionally uses stderr for recoverable
+    # network diagnostics, so do not let ErrorActionPreference=Stop terminate
+    # the logging pipeline while the native process is running.
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $NativeExitCode = 1
+    try {
+        $ErrorActionPreference = "Continue"
+        & $BinaryPath @Arguments 2>&1 | ForEach-Object {
+            Write-LogLine -Line ([string]$_)
+        }
+        $NativeExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+    return $NativeExitCode
+}
+
 Write-LogLine "EdgeMouse Windows session"
 Write-LogLine "Started : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss K')"
 Write-LogLine "Config  : $ConfigPath"
 Write-LogLine "Current : $CurrentLog"
 Write-LogLine "Archive : $ArchiveLog"
 
-& $BinaryPath version 2>&1 | ForEach-Object { Write-LogLine -Line ([string]$_) }
-if ($LASTEXITCODE -ne 0) {
+$ExitCode = Invoke-LoggedEdgeMouse -Arguments @("version")
+if ($ExitCode -ne 0) {
     Write-LogLine "Version check failed; EdgeMouse was not started."
-    exit $LASTEXITCODE
+    exit $ExitCode
 }
 
 Write-LogLine ""
-& $BinaryPath check-config $ConfigPath 2>&1 | ForEach-Object { Write-LogLine -Line ([string]$_) }
-if ($LASTEXITCODE -ne 0) {
+$ExitCode = Invoke-LoggedEdgeMouse -Arguments @("check-config", $ConfigPath)
+if ($ExitCode -ne 0) {
     Write-LogLine "Configuration check failed; EdgeMouse was not started."
-    exit $LASTEXITCODE
+    exit $ExitCode
 }
 
 Write-LogLine ""
-& $BinaryPath run $ConfigPath 2>&1 | ForEach-Object { Write-LogLine -Line ([string]$_) }
-$ExitCode = $LASTEXITCODE
+$ExitCode = Invoke-LoggedEdgeMouse -Arguments @("run", $ConfigPath)
 
 Write-Host ""
 Write-Host "Latest log : $CurrentLog"

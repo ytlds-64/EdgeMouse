@@ -1,6 +1,9 @@
 [CmdletBinding()]
 param(
-    [string]$ConfigPath
+    [string]$ConfigPath,
+    [ValidateRange(1, 10)]
+    [int]$UpdateAttempts = 3,
+    [switch]$SkipUpdate
 )
 
 $ErrorActionPreference = "Stop"
@@ -40,10 +43,30 @@ if ($TrackedChanges.Count -ne 0) {
     throw "Commit or discard those tracked changes before updating. Ignored configuration, certificates, and logs do not block this script."
 }
 
-Write-Host "==> Updating source from origin/main"
-& git pull --ff-only origin main
-if ($LASTEXITCODE -ne 0) {
-    throw "Git update failed with exit code $LASTEXITCODE."
+if ($SkipUpdate) {
+    Write-Host "==> Skipping GitHub update; building the currently available local source" -ForegroundColor Yellow
+} else {
+    $GitExitCode = 1
+    for ($Attempt = 1; $Attempt -le $UpdateAttempts; $Attempt++) {
+        Write-Host "==> Updating source from origin/main (attempt $Attempt of $UpdateAttempts)"
+        & git pull --ff-only origin main
+        $GitExitCode = $LASTEXITCODE
+        if ($GitExitCode -eq 0) {
+            break
+        }
+        if ($Attempt -lt $UpdateAttempts) {
+            $DelaySeconds = [Math]::Min(15, $Attempt * 5)
+            Write-Host "GitHub is currently unreachable; retrying in $DelaySeconds second(s)..." -ForegroundColor Yellow
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+    if ($GitExitCode -ne 0) {
+        Write-Host ""
+        Write-Host "Windows could not connect to github.com on TCP port 443. No tracked source files were changed." -ForegroundColor Yellow
+        Write-Host "To start the already-built local version without updating, run:" -ForegroundColor Yellow
+        Write-Host "  powershell -ExecutionPolicy Bypass -File .\scripts\run-windows-with-log.ps1" -ForegroundColor Yellow
+        throw "Git update failed after $UpdateAttempts attempt(s). Check the Windows network or proxy settings, then retry."
+    }
 }
 
 Write-Host "==> Building EdgeMouse release"
