@@ -1,6 +1,7 @@
 mod config;
 mod discovery;
 mod network;
+mod pairing;
 mod platform;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod runtime;
@@ -53,6 +54,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             ensure_no_extra_arguments(arguments)?;
             discover_peer(Path::new(&config))
         }
+        Some("pair") => pair(arguments),
         Some("run") => {
             let config = arguments.next().ok_or("run requires a TOML config path")?;
             ensure_no_extra_arguments(arguments)?;
@@ -72,8 +74,62 @@ fn run() -> Result<(), Box<dyn Error>> {
 
 fn usage() {
     println!(
-        "EdgeMouse MVP\n\nUSAGE:\n    edgemouse <COMMAND>\n\nCOMMANDS:\n    doctor                  Check platform APIs and permissions\n    identity <DIRECTORY>    Generate this node's certificate and private key\n    check-config <CONFIG>   Validate configuration and certificate pairing\n    discover <CONFIG>       Find the configured trusted peer on the LAN\n    run <CONFIG>            Connect to the trusted peer and enable edge switching\n    demo                    Simulate a Windows-to-macOS edge transition\n    version                 Print the build version\n    help                    Show this help"
+        "EdgeMouse MVP\n\nUSAGE:\n    edgemouse <COMMAND>\n\nCOMMANDS:\n    doctor                         Check platform APIs and permissions\n    identity <DIRECTORY>           Generate this node's certificate and private key\n    pair host <CONFIG>             Show a one-time code and offer secure pairing\n    pair join <CONFIG> <CODE>      Find the host and pair using its one-time code\n    check-config <CONFIG>          Validate configuration and certificate pairing\n    discover <CONFIG>              Find the configured trusted peer on the LAN\n    run <CONFIG>                   Connect to the trusted peer and enable edge switching\n    demo                           Simulate a Windows-to-macOS edge transition\n    version                        Print the build version\n    help                           Show this help"
     );
+}
+
+fn pair(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    let mode = arguments
+        .next()
+        .ok_or("pair requires `host <CONFIG>` or `join <CONFIG> <CODE>`")?;
+    let config_path = arguments.next().ok_or("pair requires a TOML config path")?;
+    let config = config::PairingConfig::load(Path::new(&config_path))?;
+    let stopping = Arc::new(AtomicBool::new(false));
+    let handler_state = Arc::clone(&stopping);
+    ctrlc::set_handler(move || handler_state.store(true, Ordering::Release))?;
+
+    let result = match mode.as_str() {
+        "host" => {
+            ensure_no_extra_arguments(arguments)?;
+            let host = pairing::PairingHost::start(config)?;
+            println!("Secure pairing is ready");
+            println!("One-time code: {}", host.formatted_code());
+            println!(
+                "On the other computer run: edgemouse pair join <CONFIG> {}",
+                host.formatted_code()
+            );
+            println!("The code expires in 5 minutes and allows at most 3 attempts.");
+            println!("Press Ctrl+C to cancel.");
+            host.run(&stopping)?
+        }
+        "join" => {
+            let code = arguments
+                .next()
+                .ok_or("pair join requires the 8-digit code shown by the host")?;
+            ensure_no_extra_arguments(arguments)?;
+            println!(
+                "Looking for a pairing host on UDP {}…",
+                discovery::DISCOVERY_PORT
+            );
+            pairing::join(config, &code, &stopping)?
+        }
+        _ => return Err(format!("unknown pair mode `{mode}`; use `host` or `join`").into()),
+    };
+
+    println!("Secure pairing completed");
+    println!("Peer name   : {}", result.peer_name);
+    println!(
+        "Peer node   : {}",
+        edgemouse_transport::format_node_id(result.peer_node)
+    );
+    println!("Certificate : {}", result.certificate_path.display());
+    if result.certificate_installed {
+        println!("Trust status: new certificate saved");
+    } else {
+        println!("Trust status: existing identical certificate kept");
+    }
+    println!("Next step   : run `edgemouse check-config {config_path}` on this computer");
+    Ok(())
 }
 
 fn check_config(path: &Path) -> Result<(), Box<dyn Error>> {

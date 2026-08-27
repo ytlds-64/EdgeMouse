@@ -26,14 +26,54 @@ pub struct LoadedConfig {
     pub session: SessionConfig,
 }
 
+#[derive(Debug, Clone)]
+pub struct PairingConfig {
+    pub local_name: String,
+    pub local_certificate: Vec<u8>,
+    pub local_node: NodeId,
+    pub peer_certificate_path: PathBuf,
+    pub timeout: Duration,
+}
+
 impl LoadedConfig {
     pub fn load(path: &Path) -> Result<Self, Box<dyn Error>> {
-        let source = fs::read_to_string(path)
-            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-        let raw: RawConfig = toml::from_str(&source)
-            .map_err(|error| format!("invalid config {}: {error}", path.display()))?;
+        let raw = read_raw(path)?;
         raw.finish(path.parent().unwrap_or_else(|| Path::new(".")))
     }
+}
+
+impl PairingConfig {
+    pub fn load(path: &Path) -> Result<Self, Box<dyn Error>> {
+        let raw = read_raw(path)?;
+        let base = path.parent().unwrap_or_else(|| Path::new("."));
+        let local_certificate = read_relative(base, &raw.local.certificate, "local certificate")?;
+        let private_key = read_relative(base, &raw.local.private_key, "local private key")?;
+        let identity = Identity::from_der(local_certificate.clone(), private_key)?;
+        let peer_certificate_path = resolve_relative(base, &raw.peer.certificate);
+        if raw.local.name.is_empty() || raw.local.name.chars().any(char::is_control) {
+            return Err("local.name must be non-empty and contain no control characters".into());
+        }
+        if raw.local.name.len() > 63 {
+            return Err("local.name cannot exceed 63 UTF-8 bytes".into());
+        }
+        if raw.session.connect_timeout_seconds == 0 {
+            return Err("session.connect_timeout_seconds must be greater than zero".into());
+        }
+        Ok(Self {
+            local_name: raw.local.name,
+            local_certificate,
+            local_node: identity.node_id(),
+            peer_certificate_path,
+            timeout: Duration::from_secs(raw.session.connect_timeout_seconds),
+        })
+    }
+}
+
+fn read_raw(path: &Path) -> Result<RawConfig, Box<dyn Error>> {
+    let source = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    toml::from_str(&source)
+        .map_err(|error| format!("invalid config {}: {error}", path.display()).into())
 }
 
 #[derive(Deserialize)]
@@ -183,13 +223,17 @@ impl RawScreen {
 }
 
 fn read_relative(base: &Path, path: &Path, label: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-    let resolved = if path.is_absolute() {
+    let resolved = resolve_relative(base, path);
+    fs::read(&resolved)
+        .map_err(|error| format!("failed to read {label} {}: {error}", resolved.display()).into())
+}
+
+fn resolve_relative(base: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
         path.to_owned()
     } else {
         base.join(path)
-    };
-    fs::read(&resolved)
-        .map_err(|error| format!("failed to read {label} {}: {error}", resolved.display()).into())
+    }
 }
 
 fn parse_address(value: &str, label: &str) -> Result<SocketAddr, Box<dyn Error>> {
@@ -225,6 +269,7 @@ const fn default_scale() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn parses_all_edge_names_case_insensitively() {
@@ -256,5 +301,65 @@ mod tests {
             PeerAddress::Static("192.168.8.202:43891".parse().unwrap())
         );
         assert!(parse_peer_address("automatic").is_err());
+    }
+
+    #[test]
+    fn pairing_config_loads_before_the_peer_certificate_exists() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "edgemouse-pairing-config-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(directory.join("identity")).unwrap();
+        let identity = Identity::generate().unwrap();
+        fs::write(
+            directory.join("identity/certificate.der"),
+            &identity.certificate,
+        )
+        .unwrap();
+        fs::write(
+            directory.join("identity/private-key.der"),
+            &identity.private_key,
+        )
+        .unwrap();
+        let config_path = directory.join("edgemouse.toml");
+        fs::write(
+            &config_path,
+            r#"
+[local]
+name = "test-machine"
+listen = "0.0.0.0:43891"
+certificate = "identity/certificate.der"
+private_key = "identity/private-key.der"
+[local.screen]
+id = 1
+name = "Local"
+width = 1920
+height = 1080
+[peer]
+address = "auto"
+certificate = "not-created-yet.der"
+[peer.screen]
+id = 2
+name = "Peer"
+width = 1512
+height = 982
+[layout]
+peer_on = "right"
+"#,
+        )
+        .unwrap();
+
+        let pairing = PairingConfig::load(&config_path).unwrap();
+        assert_eq!(pairing.local_node, identity.node_id);
+        assert_eq!(
+            pairing.peer_certificate_path,
+            directory.join("not-created-yet.der")
+        );
+        assert!(LoadedConfig::load(&config_path).is_err());
+        fs::remove_dir_all(directory).unwrap();
     }
 }

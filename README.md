@@ -6,7 +6,7 @@ screen edge transfers movement, buttons, and scrolling to the other machine;
 crossing back restores local control.
 
 This repository contains a functional mouse-only MVP. It intentionally excludes
-keyboard input, clipboard sync, automatic certificate exchange, relay servers, multi-monitor setup,
+keyboard input, clipboard sync, relay servers, multi-monitor setup,
 tray UI, installers, and elevated Windows desktops.
 
 ## Implemented
@@ -18,6 +18,8 @@ tray UI, installers, and elevated Windows desktops.
 - Native macOS `CGEventTap` capture and marked `CGEventPost` injection.
 - Native Windows `WH_MOUSE_LL` capture and marked `SendInput` injection.
 - Mutually authenticated QUIC/TLS with one explicitly trusted peer certificate.
+- One-time 8-digit short-code pairing that securely exchanges public certificates
+  while keeping both private keys on their original machines.
 - Latest-position QUIC datagrams for movement, with reliable ordered delivery
   retained for clicks, scrolling, edge transitions, and final positions.
 - Versioned, bounded binary frames with strict untrusted-input validation.
@@ -89,29 +91,52 @@ steps on both macOS and Windows after every push to `main`. A successful run als
 publishes downloadable platform packages under the run's **Artifacts** section.
 
 The scripts deliberately leave these machine-specific decisions to the user:
-exchange only the public certificates, enter the real screen geometry, allow UDP
-ports `43891` and `43892` through Windows Firewall, and grant macOS
-Accessibility permission.
+enter the real screen geometry, allow inbound UDP ports `43891` and `43892` plus
+TCP port `43893` through Windows Firewall, and grant macOS Accessibility
+permission.
 
 ## Pair the two machines
 
-1. Generate a different identity on each machine:
+1. Generate a different identity on each machine and create its configuration.
+   The preparation scripts do both without overwriting existing files:
 
-   ```sh
-   edgemouse identity ./identity
+   ```powershell
+   # Windows
+   powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-windows.ps1
    ```
 
-2. Copy only `certificate.der` to the other machine. Never copy or share
-   `private-key.der`.
-3. Copy and edit [the Windows example](examples/windows.toml) and
+   ```sh
+   # macOS
+   ./scripts/bootstrap-macos.sh
+   ```
+
+2. Edit [the Windows example](examples/windows.toml) and
    [the macOS example](examples/macos.toml). The two files must use the same
-   screen IDs and geometry, with opposite `layout.peer_on` values.
-4. Keep `peer.address = "auto"` to discover the already trusted computer on the
-   local IPv4 network. Alternatively, set it to the other machine's static LAN
-   address, such as `192.168.8.202:43891`. Permit inbound UDP ports `43891`
-   (QUIC mouse traffic) and `43892` (discovery) in Windows Firewall and any host
-   firewall in use.
-5. Validate both files before connecting:
+   screen IDs and geometry, with opposite `layout.peer_on` values. The peer
+   certificate named in each config does not need to exist before pairing.
+3. Keep `peer.address = "auto"` to discover the trusted computer on the local
+   IPv4 network. Alternatively, set it to the other machine's static LAN
+   address, such as `192.168.8.202:43891`. Permit inbound UDP `43891` (QUIC
+   mouse traffic), UDP `43892` (discovery/pairing offer), and TCP `43893`
+   (one-time pairing) in Windows Firewall.
+4. Stop any running EdgeMouse agents. On Windows, display a one-time code:
+
+   ```powershell
+   .\target\release\edgemouse.exe pair host .\edgemouse.toml
+   ```
+
+   On the Mac, enter that code exactly as displayed:
+
+   ```sh
+   ./target/release/edgemouse pair join ./edgemouse.toml 1234-5678
+   ```
+
+   Either platform can technically host, but Windows-host/Mac-join avoids adding
+   a new inbound TCP rule to macOS. The code expires after five minutes and the
+   host stops after three rejected attempts. Existing identical peer
+   certificates are kept; a different existing certificate is never replaced
+   silently.
+5. Validate both files after pairing:
 
    ```sh
    edgemouse check-config ./edgemouse.toml
@@ -164,6 +189,14 @@ hints: a discovered endpoint must still present the exact certificate already
 configured for that peer and complete mutual TLS. A forged LAN broadcast cannot
 become a trusted EdgeMouse peer.
 
+Pairing offers contain only a random one-time session ID, device name, and TCP
+port; the short code and its hash are never broadcast. SPAKE2 derives a session
+key from the code without sending the code itself. Both certificate records and
+the final confirmation are authenticated over the complete handshake transcript
+before either certificate is saved. Certificates are public; private keys never
+leave their machine. The saved certificate remains the trust anchor for normal
+mutual TLS connections after pairing.
+
 Screen coordinates must match the operating system's logical desktop coordinate
 space. For the single-screen MVP the origin is normally `(0, 0)`. On a Retina
 Mac use the logical resolution shown by macOS, not the doubled backing-pixel
@@ -180,7 +213,7 @@ and merged updates. Windows requests 1 ms timer resolution while EdgeMouse is
 running so the 4–12 ms movement schedule does not collapse to the default
 roughly 15.6 ms system timer period.
 
-Both computers must use protocol v2. Versions 0.1.5 through 0.1.12 use protocol
+Both computers must use protocol v2. Versions 0.1.5 through 0.1.13 use protocol
 v2 and will intentionally refuse a connection to a 0.1.4 executable. For the
 best movement behavior, install the latest version on both computers.
 

@@ -92,6 +92,10 @@ impl TrustedPeer {
             return Err(TransportError::new("peer certificate cannot be empty"));
         }
         let certificate = CertificateDer::from(certificate);
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate.clone()).map_err(|error| {
+            TransportError::with_source("peer certificate is not valid DER", error)
+        })?;
         let node_id = node_id_for_certificate(certificate.as_ref());
         Ok(Self {
             certificate,

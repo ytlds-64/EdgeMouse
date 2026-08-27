@@ -1,5 +1,5 @@
-# Paths are relative to this TOML file. Generate windows-identity locally and
-# copy only the Mac's certificate.der to mac-certificate.der.
+# Paths are relative to this TOML file. Generate windows-identity locally; short-code
+# pairing will securely save the Mac's public certificate as mac-certificate.der.
 [local]
 name = "windows-pc"
 listen = "0.0.0.0:43891"

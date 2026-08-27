@@ -6,7 +6,7 @@ The MVP connects one Windows user session and one macOS user session on the
 same LAN. Moving through a configured edge transfers the physical mouse to the
 paired logical screen; moving back through the opposite edge restores it.
 
-Keyboard, clipboard, file transfer, automatic certificate exchange, relay servers, multi-monitor
+Keyboard, clipboard, file transfer, relay servers, multi-monitor
 topologies, tray UI, installers, lock screens, and Windows UAC secure desktops
 are outside this milestone.
 
@@ -98,6 +98,20 @@ mutual TLS. Discovery runs again on reconnect so a DHCP address change does not
 require editing the configuration. A static `host:port` remains available for
 networks that block IPv4 broadcast.
 
+Initial trust can be installed through the short-code pairing protocol. A host
+broadcasts a bounded offer on UDP 43892 containing a random 128-bit offer ID,
+device name, and TCP 43893 port; it never broadcasts the code or a reusable code
+verifier. The joiner uses the UDP source IP as an untrusted locator. Both sides
+run single-use asymmetric SPAKE2 with the random offer ID bound into the role
+identities. The derived key authenticates both public-certificate records and a
+two-way confirmation over the complete transcript. Each side recomputes the
+certificate-derived node ID, rejects its own certificate, enforces strict length
+bounds and timeouts, and only then saves the peer certificate. The random
+8-digit code expires after five minutes and a host accepts at most three
+attempts. Existing different trust is never overwritten. Private keys are not
+part of any pairing message, and normal sessions still require
+certificate-pinned mutual TLS.
+
 The locked dependency graph pins `quinn-proto` to 0.11.16, beyond the 0.11.14
 fix for the malformed transport-parameter denial-of-service advisory. Version
 0.11.17 is intentionally excluded because its refactored Datagram buffer can
@@ -137,6 +151,6 @@ restored during transitions and teardown.
    long mixed Ethernet/Wi-Fi sessions, horizontal scroll, sleep/wake, and the
    automatic recovery path during Wi-Fi loss.
 2. Add Windows Raw Input based on latency measurements.
-3. Add a short-code/fingerprint pairing UX for securely exchanging certificates.
-4. Add a tray/settings UI, signed installers, launch-at-login, and diagnostics.
+3. Put the short-code pairing flow into a tray/settings UI.
+4. Add signed installers, launch-at-login, and diagnostics export.
 5. Only then consider keyboard and clipboard channels.
