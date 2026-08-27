@@ -132,8 +132,8 @@ show_status() {
 case "${action}" in
     install)
         validate_installation
+        safe_stop
         if is_loaded; then
-            safe_stop
             launchctl bootout "${service}" >/dev/null 2>&1 || true
         fi
         write_plist

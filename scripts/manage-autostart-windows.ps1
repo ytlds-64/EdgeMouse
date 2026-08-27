@@ -111,6 +111,7 @@ switch ($Action) {
         if ($LASTEXITCODE -ne 0) {
             throw "EdgeMouse configuration check failed."
         }
+        Stop-EdgeMouse
 
         $Shell = New-Object -ComObject WScript.Shell
         $Shortcut = $Shell.CreateShortcut($ShortcutPath)
