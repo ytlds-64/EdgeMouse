@@ -54,7 +54,8 @@ Safety invariants:
 - Synthetic events carry an OS-specific marker and are never retransmitted.
 - Screen transition is blocked while any button is held.
 - An entry guard prevents immediately bouncing back across the entry edge.
-- A 1.5-second heartbeat timeout cannot leave the source pointer captured.
+- A 1.5-second heartbeat timeout restores local input, closes the desynchronized
+  link, and enters automatic reconnection; it cannot leave either pointer captured.
 - Receiver timeout/disconnect releases every tracked synthetic button.
 - The receiver rejects input before `Enter`, stale sequence numbers, zero
   session/sequence values, and events addressed to another screen.

@@ -307,11 +307,21 @@ fn run_loop(
 
         if let Some(position) = remote.poll_timeout(injector, now_ms)? {
             restore_incoming_control(remote.local_screen, position, capture, session)?;
-            eprintln!("incoming remote control timed out; restored local mouse control");
+            return Ok(ConnectionEnd::Disconnected(
+                "incoming remote control timed out".to_owned(),
+            ));
         }
 
         let timeout_effects = session.poll_timeout(now_ms);
+        let peer_timed_out = timeout_effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::PeerTimedOut { .. }));
         apply_effects(timeout_effects, network, capture, session, session_id)?;
+        if peer_timed_out {
+            return Ok(ConnectionEnd::Disconnected(
+                "trusted peer heartbeat timed out".to_owned(),
+            ));
+        }
 
         let mut handled_input = false;
         while let Some(event) = capture.try_next_event()? {
