@@ -6,12 +6,13 @@ use edgemouse_core::{
     ButtonState, CaptureMode, MouseButton, MouseCaptureBackend, MouseInjectionBackend,
     PermissionState, PhysicalMouseEvent, PlatformError, Point, RemoteMouseEvent, Vector,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 const EVENT_TAP_SESSION: u32 = 1;
 const EVENT_TAP_HEAD: u32 = 0;
@@ -20,6 +21,9 @@ const EVENT_SOURCE_USER_DATA: u32 = 42;
 const EVENT_MARKER: i64 = 0x4544_4745_4d4f_5553;
 const SCROLL_UNIT_PIXEL: u32 = 0;
 const CAPTURE_QUEUE_CAPACITY: usize = 4_096;
+const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+const DOUBLE_CLICK_DISTANCE: f64 = 5.0;
+const MAX_CLICK_STATE: i64 = 3;
 
 const EVENT_LEFT_DOWN: u32 = 1;
 const EVENT_LEFT_UP: u32 = 2;
@@ -35,6 +39,7 @@ const EVENT_OTHER_DRAGGED: u32 = 27;
 const EVENT_TAP_DISABLED_TIMEOUT: u32 = 0xffff_fffe;
 const EVENT_TAP_DISABLED_USER_INPUT: u32 = 0xffff_ffff;
 
+const FIELD_MOUSE_CLICK_STATE: u32 = 1;
 const FIELD_MOUSE_BUTTON_NUMBER: u32 = 3;
 const FIELD_MOUSE_DELTA_X: u32 = 4;
 const FIELD_MOUSE_DELTA_Y: u32 = 5;
@@ -338,6 +343,92 @@ impl Drop for MacMouseCapture {
 pub struct MacMouseInjector {
     position: Point,
     pressed: BTreeSet<MouseButton>,
+    clicks: ClickTracker,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActiveClick {
+    pressed_at: Instant,
+    position: Point,
+    state: i64,
+    moved_too_far: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CompletedClick {
+    pressed_at: Instant,
+    position: Point,
+    state: i64,
+}
+
+#[derive(Debug, Default)]
+struct ClickTracker {
+    active: BTreeMap<MouseButton, ActiveClick>,
+    completed: BTreeMap<MouseButton, CompletedClick>,
+}
+
+impl ClickTracker {
+    fn press(&mut self, button: MouseButton, position: Point, now: Instant) -> i64 {
+        let state = self
+            .completed
+            .get(&button)
+            .filter(|previous| {
+                now.saturating_duration_since(previous.pressed_at) <= DOUBLE_CLICK_INTERVAL
+                    && points_are_close(previous.position, position)
+            })
+            .map_or(1, |previous| (previous.state + 1).min(MAX_CLICK_STATE));
+        self.active.insert(
+            button,
+            ActiveClick {
+                pressed_at: now,
+                position,
+                state,
+                moved_too_far: false,
+            },
+        );
+        state
+    }
+
+    fn release(&mut self, button: MouseButton) -> i64 {
+        let Some(active) = self.active.remove(&button) else {
+            self.completed.remove(&button);
+            return 1;
+        };
+        if active.moved_too_far {
+            self.completed.remove(&button);
+        } else {
+            self.completed.insert(
+                button,
+                CompletedClick {
+                    pressed_at: active.pressed_at,
+                    position: active.position,
+                    state: active.state,
+                },
+            );
+        }
+        active.state
+    }
+
+    fn note_movement(&mut self, position: Point) {
+        for active in self.active.values_mut() {
+            active.moved_too_far |= !points_are_close(active.position, position);
+        }
+    }
+
+    fn active_state(&self, button: MouseButton) -> Option<i64> {
+        self.active.get(&button).map(|click| click.state)
+    }
+
+    fn reset(&mut self) {
+        self.active.clear();
+        self.completed.clear();
+    }
+}
+
+fn points_are_close(left: Point, right: Point) -> bool {
+    let dx = left.x - right.x;
+    let dy = left.y - right.y;
+    dx.mul_add(dx, dy * dy) <= DOUBLE_CLICK_DISTANCE * DOUBLE_CLICK_DISTANCE
 }
 
 impl MacMouseInjector {
@@ -346,10 +437,16 @@ impl MacMouseInjector {
         Self {
             position: initial_position,
             pressed: BTreeSet::new(),
+            clicks: ClickTracker::default(),
         }
     }
 
-    fn post_mouse(&self, event_type: u32, button: u32) -> Result<(), PlatformError> {
+    fn post_mouse(
+        &self,
+        event_type: u32,
+        button: u32,
+        click_state: Option<i64>,
+    ) -> Result<(), PlatformError> {
         // SAFETY: A null source requests the default event source. The returned
         // create-rule object is checked and released after synchronous posting.
         let event = unsafe {
@@ -369,6 +466,9 @@ impl MacMouseInjector {
         // SAFETY: `event` is a live CGEventRef owned by this function.
         unsafe {
             CGEventSetIntegerValueField(event, EVENT_SOURCE_USER_DATA, EVENT_MARKER);
+            if let Some(click_state) = click_state {
+                CGEventSetIntegerValueField(event, FIELD_MOUSE_CLICK_STATE, click_state);
+            }
             CGEventPost(EVENT_TAP_SESSION, event);
             CFRelease(event);
         }
@@ -416,6 +516,22 @@ impl MacMouseInjector {
         }
     }
 
+    fn post_movement(&mut self, position: Point) -> Result<(), PlatformError> {
+        if !position.is_finite() {
+            return Err(PlatformError::new("mouse position must be finite"));
+        }
+        self.position = position;
+        self.clicks.note_movement(position);
+        MacMouseCapture::warp(position)?;
+        let (event_type, button) = self.movement_type();
+        let click_state = self
+            .pressed
+            .iter()
+            .next()
+            .and_then(|button| self.clicks.active_state(*button));
+        self.post_mouse(event_type, button, click_state)
+    }
+
     fn post_button(
         &mut self,
         button: MouseButton,
@@ -429,7 +545,11 @@ impl MacMouseInjector {
             (_, ButtonState::Pressed) => EVENT_OTHER_DOWN,
             (_, ButtonState::Released) => EVENT_OTHER_UP,
         };
-        self.post_mouse(event_type, mac_button_number(button))?;
+        let click_state = match state {
+            ButtonState::Pressed => self.clicks.press(button, self.position, Instant::now()),
+            ButtonState::Released => self.clicks.release(button),
+        };
+        self.post_mouse(event_type, mac_button_number(button), Some(click_state))?;
         match state {
             ButtonState::Pressed => {
                 self.pressed.insert(button);
@@ -453,16 +573,11 @@ impl MouseInjectionBackend for MacMouseInjector {
 
     fn inject(&mut self, event: RemoteMouseEvent) -> Result<(), PlatformError> {
         match event {
-            RemoteMouseEvent::Enter { position, .. }
-            | RemoteMouseEvent::MoveAbsolute { position, .. } => {
-                if !position.is_finite() {
-                    return Err(PlatformError::new("mouse position must be finite"));
-                }
-                self.position = position;
-                MacMouseCapture::warp(position)?;
-                let (event_type, button) = self.movement_type();
-                self.post_mouse(event_type, button)
+            RemoteMouseEvent::Enter { position, .. } => {
+                self.clicks.reset();
+                self.post_movement(position)
             }
+            RemoteMouseEvent::MoveAbsolute { position, .. } => self.post_movement(position),
             RemoteMouseEvent::Button { button, state } => self.post_button(button, state),
             RemoteMouseEvent::Wheel {
                 horizontal,
@@ -480,6 +595,7 @@ impl MouseInjectionBackend for MacMouseInjector {
                 first_error.get_or_insert(error);
             }
         }
+        self.clicks.reset();
         if let Some(error) = first_error {
             Err(error)
         } else {
@@ -719,5 +835,52 @@ mod tests {
         assert_eq!(rounded_i32(f64::MAX), i32::MAX);
         assert_eq!(rounded_i32(f64::MIN), i32::MIN);
         assert_eq!(rounded_i32(12.6), 13);
+    }
+
+    #[test]
+    fn marks_fast_nearby_clicks_as_a_double_click() {
+        let mut clicks = ClickTracker::default();
+        let start = Instant::now();
+        let position = Point::new(100.0, 200.0);
+
+        assert_eq!(clicks.press(MouseButton::Primary, position, start), 1);
+        assert_eq!(clicks.release(MouseButton::Primary), 1);
+        assert_eq!(
+            clicks.press(
+                MouseButton::Primary,
+                Point::new(102.0, 201.0),
+                start + Duration::from_millis(120),
+            ),
+            2
+        );
+        assert_eq!(clicks.release(MouseButton::Primary), 2);
+    }
+
+    #[test]
+    fn resets_click_count_after_timeout_or_drag() {
+        let mut clicks = ClickTracker::default();
+        let start = Instant::now();
+        let position = Point::new(100.0, 200.0);
+
+        assert_eq!(clicks.press(MouseButton::Primary, position, start), 1);
+        assert_eq!(clicks.release(MouseButton::Primary), 1);
+        assert_eq!(
+            clicks.press(
+                MouseButton::Primary,
+                position,
+                start + DOUBLE_CLICK_INTERVAL + Duration::from_millis(1),
+            ),
+            1
+        );
+        clicks.note_movement(Point::new(120.0, 200.0));
+        assert_eq!(clicks.release(MouseButton::Primary), 1);
+        assert_eq!(
+            clicks.press(
+                MouseButton::Primary,
+                Point::new(120.0, 200.0),
+                start + DOUBLE_CLICK_INTERVAL + Duration::from_millis(100),
+            ),
+            1
+        );
     }
 }
