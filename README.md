@@ -200,6 +200,14 @@ On macOS:
 ./scripts/manage-autostart-macos.sh install ./edgemouse.toml
 ```
 
+The installer creates a background-only `~/Applications/EdgeMouse.app` and
+associates the login agent with its stable `com.edgemouse.agent` identity. On
+first install, allow EdgeMouse in **System Settings > Privacy & Security > Local
+Network** and **Accessibility**. The Local Network permission lets EdgeMouse
+automatically discover its trusted peer after either computer receives a new
+DHCP address; Accessibility permits mouse capture and injection. These
+permissions are attributed to EdgeMouse instead of Terminal.
+
 On Windows PowerShell:
 
 ```powershell

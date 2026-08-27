@@ -16,12 +16,17 @@ action="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_root="$(cd "${script_dir}/.." && pwd)"
 binary_path="${project_root}/target/release/edgemouse"
+plist_template="${project_root}/crates/edgemouse-agent/Info.plist.in"
 config_path="${2:-${project_root}/edgemouse.toml}"
 if [[ "${config_path}" != /* ]]; then
     config_path="${project_root}/${config_path}"
 fi
 
 label="com.edgemouse.agent"
+associated_bundle_identifier="com.edgemouse.agent"
+app_bundle="${HOME}/Applications/EdgeMouse.app"
+app_binary="${app_bundle}/Contents/MacOS/edgemouse"
+app_plist="${app_bundle}/Contents/Info.plist"
 domain="gui/$(id -u)"
 service="${domain}/${label}"
 plist_path="${HOME}/Library/LaunchAgents/${label}.plist"
@@ -52,18 +57,49 @@ validate_installation() {
         echo "EdgeMouse configuration not found: ${config_path}" >&2
         exit 1
     fi
+    if [[ ! -f "${plist_template}" ]]; then
+        echo "EdgeMouse macOS identity template not found: ${plist_template}" >&2
+        exit 1
+    fi
     "${binary_path}" version
     "${binary_path}" check-config "${config_path}"
 }
 
+prepare_app_bundle() {
+    local version
+    version="$("${binary_path}" version | awk '{print $2}')"
+    if [[ "${1:-}" != "force" && -x "${app_binary}" ]] && \
+        [[ "$("${app_binary}" version)" == "edgemouse ${version}" ]]; then
+        return
+    fi
+    mkdir -p "$(dirname "${app_binary}")"
+    cp "${binary_path}" "${app_binary}"
+    chmod 755 "${app_binary}"
+    sed "s/@EDGEMOUSE_VERSION@/${version}/g" "${plist_template}" >"${app_plist}"
+    /usr/bin/codesign \
+        --force \
+        --sign - \
+        --identifier "${associated_bundle_identifier}" \
+        "${app_binary}" >/dev/null
+    /usr/bin/codesign \
+        --force \
+        --deep \
+        --sign - \
+        --identifier "${associated_bundle_identifier}" \
+        "${app_bundle}" >/dev/null
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+        -f "${app_bundle}"
+}
+
 write_plist() {
     mkdir -p "$(dirname "${plist_path}")" "${log_dir}"
-    local binary_xml config_xml root_xml stdout_xml stderr_xml
-    binary_xml="$(xml_escape "${binary_path}")"
+    local binary_xml config_xml root_xml stdout_xml stderr_xml bundle_identifier_xml
+    binary_xml="$(xml_escape "${app_binary}")"
     config_xml="$(xml_escape "${config_path}")"
     root_xml="$(xml_escape "${project_root}")"
     stdout_xml="$(xml_escape "${stdout_log}")"
     stderr_xml="$(xml_escape "${stderr_log}")"
+    bundle_identifier_xml="$(xml_escape "${associated_bundle_identifier}")"
     local temporary_plist="${plist_path}.tmp.$$"
     trap 'rm -f "${temporary_plist}"' RETURN
     {
@@ -73,6 +109,10 @@ write_plist() {
         echo '<dict>'
         echo '    <key>Label</key>'
         echo "    <string>${label}</string>"
+        echo '    <key>AssociatedBundleIdentifiers</key>'
+        echo '    <array>'
+        echo "        <string>${bundle_identifier_xml}</string>"
+        echo '    </array>'
         echo '    <key>ProgramArguments</key>'
         echo '    <array>'
         echo "        <string>${binary_xml}</string>"
@@ -127,12 +167,14 @@ show_status() {
     fi
     echo "Output log : ${stdout_log}"
     echo "Error log  : ${stderr_log}"
+    echo "Application: ${app_bundle}"
 }
 
 case "${action}" in
     install)
         validate_installation
         safe_stop
+        prepare_app_bundle force
         if is_loaded; then
             launchctl bootout "${service}" >/dev/null 2>&1 || true
         fi
@@ -141,6 +183,7 @@ case "${action}" in
         launchctl kickstart "${service}"
         sleep 1
         echo "EdgeMouse login startup installed"
+        echo "On first install, allow EdgeMouse under Local Network and Accessibility in macOS Privacy & Security."
         show_status
         ;;
     start)
@@ -148,6 +191,7 @@ case "${action}" in
         if "${binary_path}" status | grep -q 'is running'; then
             echo "EdgeMouse is already running"
         else
+            prepare_app_bundle
             if ! is_loaded; then
                 if [[ ! -f "${plist_path}" ]]; then
                     echo "Login startup is not installed; run: $0 install \"${config_path}\"" >&2
