@@ -1,6 +1,8 @@
 use crate::config::{LoadedConfig, PeerAddress};
 use crate::control::ControlServer;
-use crate::discovery::{DISCOVERY_PORT, DiscoveryRequest, discover_trusted_peer};
+use crate::discovery::{
+    DISCOVERY_PORT, DiscoveryRequest, discover_trusted_peer, respond_to_trusted_peer,
+};
 use crate::network::{Network, NetworkEvent};
 use crate::platform;
 use edgemouse_core::{
@@ -78,8 +80,8 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
             println!("Connecting to the trusted peer…");
         }
         let mut transport = config.transport.clone();
+        let mut discovery_responder = None;
         if config.peer_address == PeerAddress::Auto {
-            println!("Discovering the trusted peer on UDP {DISCOVERY_PORT}…");
             let request = DiscoveryRequest {
                 local_node: config.local_node,
                 expected_peer: config.peer_node,
@@ -87,30 +89,40 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
                 quic_port: transport.bind_address.port(),
                 timeout: transport.connect_timeout,
             };
-            match discover_trusted_peer(&request, &stopping) {
-                Ok(discovered) => {
-                    transport.peer_address = discovered.address;
-                    println!(
-                        "Discovered trusted peer {} at {}",
-                        discovered.name, discovered.address
-                    );
-                }
-                Err(_) if stopping.load(Ordering::Acquire) => return Ok(()),
-                Err(error) => {
-                    reconnecting = true;
-                    let delay = backoff.next_delay();
-                    eprintln!(
-                        "Peer discovery failed: {error}; local mouse control remains available; retrying in {} second(s)",
-                        delay.as_secs()
-                    );
-                    if wait_until_retry_or_stop(&stopping, delay) {
-                        return Ok(());
+            if config.local_node < config.peer_node {
+                println!("Discovering the trusted peer on UDP {DISCOVERY_PORT}…");
+                match discover_trusted_peer(&request, &stopping) {
+                    Ok(discovered) => {
+                        transport.peer_address = discovered.address;
+                        println!(
+                            "Discovered trusted peer {} at {}",
+                            discovered.name, discovered.address
+                        );
                     }
-                    continue;
+                    Err(_) if stopping.load(Ordering::Acquire) => return Ok(()),
+                    Err(error) => {
+                        reconnecting = true;
+                        let delay = backoff.next_delay();
+                        eprintln!(
+                            "Peer discovery failed: {error}; local mouse control remains available; retrying in {} second(s)",
+                            delay.as_secs()
+                        );
+                        if wait_until_retry_or_stop(&stopping, delay) {
+                            return Ok(());
+                        }
+                        continue;
+                    }
                 }
+            } else {
+                println!(
+                    "Waiting for the trusted peer and answering UDP {DISCOVERY_PORT} discovery…"
+                );
+                discovery_responder = Some(start_discovery_responder(request)?);
             }
         }
-        let network = match Network::connect(transport, session_id, Arc::clone(&stopping)) {
+        let network_result = Network::connect(transport, session_id, Arc::clone(&stopping));
+        finish_discovery_responder(discovery_responder)?;
+        let network = match network_result {
             Ok(network) => network,
             Err(_) if stopping.load(Ordering::Acquire) => return Ok(()),
             Err(error) => {
@@ -150,6 +162,34 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
                 }
             }
         }
+    }
+}
+
+type DiscoveryResponder = (Arc<AtomicBool>, std::thread::JoinHandle<Result<(), String>>);
+
+fn start_discovery_responder(
+    request: DiscoveryRequest,
+) -> Result<DiscoveryResponder, Box<dyn Error>> {
+    let stopping = Arc::new(AtomicBool::new(false));
+    let thread_stopping = Arc::clone(&stopping);
+    let thread = std::thread::Builder::new()
+        .name("edgemouse-discovery".to_owned())
+        .spawn(move || {
+            respond_to_trusted_peer(&request, &thread_stopping)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })?;
+    Ok((stopping, thread))
+}
+
+fn finish_discovery_responder(responder: Option<DiscoveryResponder>) -> Result<(), Box<dyn Error>> {
+    let Some((stopping, thread)) = responder else {
+        return Ok(());
+    };
+    stopping.store(true, Ordering::Release);
+    match thread.join() {
+        Ok(_) => Ok(()),
+        Err(_) => Err("UDP discovery responder thread panicked".into()),
     }
 }
 

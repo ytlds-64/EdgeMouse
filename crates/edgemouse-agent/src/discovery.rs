@@ -12,8 +12,10 @@ const DISCOVERY_VERSION: u8 = 1;
 const DISCOVERY_NAME_MAX_LEN: usize = 63;
 const DISCOVERY_HEADER_LEN: usize = 28;
 const DISCOVERY_PACKET_MAX_LEN: usize = DISCOVERY_HEADER_LEN + DISCOVERY_NAME_MAX_LEN;
-const ANNOUNCE_INTERVAL: Duration = Duration::from_millis(500);
+const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(5);
 const RECEIVE_POLL_INTERVAL: Duration = Duration::from_millis(200);
+#[cfg(any(target_os = "macos", test))]
+const MAX_SUBNET_DISCOVERY_TARGETS: u64 = 2_048;
 
 #[derive(Debug, Clone)]
 pub struct DiscoveryRequest {
@@ -64,15 +66,23 @@ pub fn discover_trusted_peer(
     stopping: &AtomicBool,
 ) -> Result<DiscoveredPeer, DiscoveryError> {
     let bind_address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, DISCOVERY_PORT));
-    let destination = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::BROADCAST, DISCOVERY_PORT));
-    discover_on(request, stopping, bind_address, destination, true)
+    let destinations = discovery_destinations();
+    discover_on(request, stopping, bind_address, &destinations, true)
+}
+
+pub fn respond_to_trusted_peer(
+    request: &DiscoveryRequest,
+    stopping: &AtomicBool,
+) -> Result<DiscoveredPeer, DiscoveryError> {
+    let bind_address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, DISCOVERY_PORT));
+    discover_on(request, stopping, bind_address, &[], false)
 }
 
 fn discover_on(
     request: &DiscoveryRequest,
     stopping: &AtomicBool,
     bind_address: SocketAddr,
-    destination: SocketAddr,
+    destinations: &[SocketAddr],
     broadcast: bool,
 ) -> Result<DiscoveredPeer, DiscoveryError> {
     validate_request(request)?;
@@ -91,7 +101,9 @@ fn discover_on(
         .set_read_timeout(Some(RECEIVE_POLL_INTERVAL))
         .map_err(|error| DiscoveryError::io("failed to configure discovery timeout", error))?;
 
-    send_announcement(&socket, &packet, destination)?;
+    if !destinations.is_empty() {
+        send_announcements(&socket, &packet, destinations)?;
+    }
     let started = Instant::now();
     let mut next_announcement = Instant::now() + ANNOUNCE_INTERVAL;
     // The extra byte lets us detect and reject an oversized datagram instead of
@@ -102,8 +114,8 @@ fn discover_on(
         if stopping.load(Ordering::Acquire) {
             return Err(DiscoveryError::new("peer discovery cancelled"));
         }
-        if Instant::now() >= next_announcement {
-            send_announcement(&socket, &packet, destination)?;
+        if !destinations.is_empty() && Instant::now() >= next_announcement {
+            send_announcements(&socket, &packet, destinations)?;
             next_announcement = Instant::now() + ANNOUNCE_INTERVAL;
         }
 
@@ -156,6 +168,126 @@ fn discover_on(
     )))
 }
 
+fn discovery_destinations() -> Vec<SocketAddr> {
+    let mut addresses = Vec::new();
+
+    // macOS can route the limited broadcast through a VPN interface, while some
+    // routers and Windows firewall profiles drop directed broadcasts. Add a
+    // bounded unicast sweep of each small local subnet so login agents can still
+    // discover a DHCP peer without storing yesterday's IP address.
+    #[cfg(target_os = "macos")]
+    if let Ok(local_addresses) = macos_discovery_addresses() {
+        addresses.extend(
+            local_addresses
+                .into_iter()
+                .map(|address| SocketAddr::V4(SocketAddrV4::new(address, DISCOVERY_PORT))),
+        );
+    }
+
+    addresses.push(SocketAddr::V4(SocketAddrV4::new(
+        Ipv4Addr::BROADCAST,
+        DISCOVERY_PORT,
+    )));
+    addresses.sort_unstable();
+    addresses.dedup();
+    addresses
+}
+
+#[cfg(target_os = "macos")]
+fn macos_discovery_addresses() -> io::Result<Vec<Ipv4Addr>> {
+    struct InterfaceAddresses(*mut libc::ifaddrs);
+
+    impl Drop for InterfaceAddresses {
+        fn drop(&mut self) {
+            // SAFETY: getifaddrs allocated this list, and this guard owns it.
+            unsafe { libc::freeifaddrs(self.0) };
+        }
+    }
+
+    let mut head = std::ptr::null_mut();
+    // SAFETY: head is a valid output pointer and is freed exactly once below.
+    if unsafe { libc::getifaddrs(&raw mut head) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if head.is_null() {
+        return Ok(Vec::new());
+    }
+    let _addresses = InterfaceAddresses(head);
+    let mut current = head;
+    let mut addresses = Vec::new();
+
+    while !current.is_null() {
+        // SAFETY: current belongs to the live getifaddrs list and remains valid
+        // until the InterfaceAddresses guard is dropped after this loop.
+        let interface = unsafe { &*current };
+        let flags = interface.ifa_flags;
+        let is_usable = flags & (libc::IFF_UP as u32) != 0
+            && flags & (libc::IFF_BROADCAST as u32) != 0
+            && flags & (libc::IFF_LOOPBACK as u32) == 0;
+        if is_usable {
+            let local = ipv4_from_sockaddr(interface.ifa_addr);
+            let netmask = ipv4_from_sockaddr(interface.ifa_netmask);
+            let broadcast = ipv4_from_sockaddr(interface.ifa_dstaddr);
+            if let Some(broadcast) = broadcast
+                && !broadcast.is_unspecified()
+                && broadcast != Ipv4Addr::BROADCAST
+            {
+                addresses.push(broadcast);
+            }
+            if let (Some(local), Some(netmask)) = (local, netmask) {
+                addresses.extend(subnet_discovery_targets(local, netmask));
+            }
+        }
+        current = interface.ifa_next;
+    }
+
+    addresses.sort_unstable();
+    addresses.dedup();
+    Ok(addresses)
+}
+
+#[cfg(target_os = "macos")]
+fn ipv4_from_sockaddr(address: *const libc::sockaddr) -> Option<Ipv4Addr> {
+    if address.is_null() {
+        return None;
+    }
+    // SAFETY: address points into the live getifaddrs list. The family check
+    // happens before interpreting the OS-provided structure as sockaddr_in.
+    if i32::from(unsafe { (*address).sa_family }) != libc::AF_INET {
+        return None;
+    }
+    // SAFETY: AF_INET guarantees sockaddr_in layout and alignment here.
+    let address = unsafe { &*address.cast::<libc::sockaddr_in>() };
+    Some(Ipv4Addr::from(address.sin_addr.s_addr.to_ne_bytes()))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn subnet_discovery_targets(local: Ipv4Addr, netmask: Ipv4Addr) -> Vec<Ipv4Addr> {
+    let local = u32::from(local);
+    let netmask = u32::from(netmask);
+    let prefix_length = netmask.leading_ones();
+    let expected_netmask = if prefix_length == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix_length)
+    };
+    if netmask != expected_netmask {
+        return Vec::new();
+    }
+
+    let address_count = 1_u64 << (32 - prefix_length);
+    if address_count <= 2 || address_count - 2 > MAX_SUBNET_DISCOVERY_TARGETS {
+        return Vec::new();
+    }
+
+    let network = local & netmask;
+    let broadcast = network | !netmask;
+    ((network + 1)..broadcast)
+        .filter(|candidate| *candidate != local)
+        .map(Ipv4Addr::from)
+        .collect()
+}
+
 fn validate_request(request: &DiscoveryRequest) -> Result<(), DiscoveryError> {
     if request.local_node.0 == 0 || request.expected_peer.0 == 0 {
         return Err(DiscoveryError::new("discovery node IDs must be non-zero"));
@@ -193,18 +325,25 @@ fn validate_name(name: &str) -> Result<(), DiscoveryError> {
     Ok(())
 }
 
-fn send_announcement(
+fn send_announcements(
     socket: &UdpSocket,
     packet: &[u8],
-    destination: SocketAddr,
+    destinations: &[SocketAddr],
 ) -> Result<(), DiscoveryError> {
-    let sent = socket
-        .send_to(packet, destination)
-        .map_err(|error| DiscoveryError::io("failed to send UDP discovery announcement", error))?;
-    if sent != packet.len() {
-        return Err(DiscoveryError::new(
-            "UDP discovery announcement was only partially sent",
-        ));
+    let mut successful = 0_usize;
+    let mut failures = Vec::new();
+    for destination in destinations {
+        match socket.send_to(packet, destination) {
+            Ok(sent) if sent == packet.len() => successful += 1,
+            Ok(_) => failures.push(format!("{destination}: datagram was only partially sent")),
+            Err(error) => failures.push(format!("{destination}: {error}")),
+        }
+    }
+    if successful == 0 {
+        return Err(DiscoveryError::new(format!(
+            "failed to send UDP discovery announcement to every destination ({})",
+            failures.join("; ")
+        )));
     }
     Ok(())
 }
@@ -334,7 +473,7 @@ mod tests {
                 &request(1, 2, "first", 50_001),
                 &first_stopping,
                 first_address,
-                second_address,
+                &[second_address],
                 false,
             )
         });
@@ -343,7 +482,7 @@ mod tests {
                 &request(2, 1, "second", 50_002),
                 &second_stopping,
                 second_address,
-                first_address,
+                &[first_address],
                 false,
             )
         });
@@ -382,7 +521,7 @@ mod tests {
                 &request,
                 &discovery_stopping,
                 listener_address,
-                sender_address,
+                &[sender_address],
                 false,
             )
         });
@@ -413,9 +552,78 @@ mod tests {
             &request(1, 2, "first", 50_001),
             &stopping,
             bind_address,
-            destination,
+            &[destination],
             false,
         );
         assert_eq!(result.unwrap_err().to_string(), "peer discovery cancelled");
+    }
+
+    #[test]
+    fn a_listener_replies_without_needing_to_announce() {
+        let listener_probe = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let listener_address = listener_probe.local_addr().unwrap();
+        drop(listener_probe);
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let stopping = AtomicBool::new(false);
+
+        let listener = std::thread::spawn(move || {
+            discover_on(
+                &request(2, 1, "listener", 50_002),
+                &stopping,
+                listener_address,
+                &[],
+                false,
+            )
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        let packet = encode_announcement(&Announcement {
+            node: NodeId(1),
+            quic_port: 50_001,
+            name: "sender".to_owned(),
+        })
+        .unwrap();
+        sender.send_to(&packet, listener_address).unwrap();
+        let mut reply = [0_u8; DISCOVERY_PACKET_MAX_LEN];
+        let (reply_length, _) = sender.recv_from(&mut reply).unwrap();
+
+        assert_eq!(
+            decode_announcement(&reply[..reply_length]).unwrap().node,
+            NodeId(2)
+        );
+        assert_eq!(listener.join().unwrap().unwrap().node, NodeId(1));
+    }
+
+    #[test]
+    fn subnet_targets_cover_a_small_dhcp_network_without_self_or_broadcast() {
+        let targets = subnet_discovery_targets(
+            "192.168.8.189".parse().unwrap(),
+            "255.255.254.0".parse().unwrap(),
+        );
+        assert_eq!(targets.len(), 509);
+        assert!(targets.contains(&"192.168.8.201".parse().unwrap()));
+        assert!(!targets.contains(&"192.168.8.189".parse().unwrap()));
+        assert!(!targets.contains(&"192.168.8.0".parse().unwrap()));
+        assert!(!targets.contains(&"192.168.9.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn subnet_targets_refuse_an_excessive_or_invalid_sweep() {
+        assert!(
+            subnet_discovery_targets(
+                "192.168.8.189".parse().unwrap(),
+                "255.255.0.0".parse().unwrap(),
+            )
+            .is_empty()
+        );
+        assert!(
+            subnet_discovery_targets(
+                "192.168.8.189".parse().unwrap(),
+                "255.0.255.0".parse().unwrap(),
+            )
+            .is_empty()
+        );
     }
 }

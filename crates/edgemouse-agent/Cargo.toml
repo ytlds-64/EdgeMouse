@@ -24,6 +24,7 @@ toml = "1.1.4"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 edgemouse-platform-macos = { path = "../edgemouse-platform-macos" }
+libc = "0.2.189"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 edgemouse-platform-windows = { path = "../edgemouse-platform-windows" }

@@ -98,17 +98,23 @@ The receive slot compares event sequence numbers rather than packet arrival
 order, so a delayed older datagram cannot overwrite a newer position when the
 pointer reverses direction.
 
-When `peer.address` is `auto`, each agent also binds IPv4 UDP port 43892 and
-broadcasts a bounded discovery announcement containing its node ID, display
+When `peer.address` is `auto`, the lower node ID locates the higher node on IPv4
+UDP port 43892 while the higher node immediately opens its QUIC listener and
+answers discovery concurrently. Separating the connector and listener roles
+prevents two login agents from waiting on each other. Discovery first uses
+limited and interface-directed broadcast; on macOS it also performs a bounded
+unicast sweep of small active LAN subnets because VPN routing and some Windows
+firewall profiles can discard broadcast. The sweep is capped at 2,048 targets
+and repeats every five seconds. Announcements contain only a node ID, display
 name, and QUIC port. Receivers reject malformed, oversized, self-originated, and
 unexpected-node announcements. The advertised data is an untrusted locator, not
 an authentication mechanism: the IP comes from the datagram source and the
 subsequent QUIC connection still requires the configured peer certificate and
-mutual TLS. Discovery runs again on reconnect so a DHCP address change does not
-require editing the configuration. Initial discovery and connection failures
-also remain in the retry loop, allowing a login agent to start before Wi-Fi or
-the peer is ready without capturing the local mouse. A static `host:port` remains
-available for networks that block IPv4 broadcast.
+mutual TLS. Discovery runs again on reconnect, so a DHCP address change or a
+different computer startup order does not require editing the configuration.
+Initial discovery and connection failures remain in the retry loop, allowing a
+login agent to start before Wi-Fi or the peer is ready without capturing the
+local mouse. A static `host:port` remains available for unusual routed networks.
 
 Initial trust can be installed through the short-code pairing protocol. A host
 broadcasts a bounded offer on UDP 43892 containing a random 128-bit offer ID,

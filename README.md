@@ -118,11 +118,12 @@ permission.
    [the macOS example](examples/macos.toml). The two files must use the same
    screen IDs and geometry, with opposite `layout.peer_on` values. The peer
    certificate named in each config does not need to exist before pairing.
-3. Keep `peer.address = "auto"` to discover the trusted computer on the local
-   IPv4 network. Alternatively, set it to the other machine's static LAN
-   address, such as `192.168.8.202:43891`. Permit inbound UDP `43891` (QUIC
-   mouse traffic), UDP `43892` (discovery/pairing offer), and TCP `43893`
-   (one-time pairing) in Windows Firewall.
+3. Keep `peer.address = "auto"` on both computers to follow DHCP address changes
+   automatically; no IP edit or re-pairing is needed after a reboot. Alternatively,
+   set it to the other machine's static LAN address, such as
+   `192.168.8.202:43891`. Permit inbound UDP `43891` (QUIC mouse traffic), UDP
+   `43892` (discovery/pairing offer), and TCP `43893` (one-time pairing) in
+   Windows Firewall.
 4. Stop any running EdgeMouse agents. On Windows, display a one-time code:
 
    ```powershell
