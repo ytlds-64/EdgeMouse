@@ -96,11 +96,11 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
                     );
                 }
                 Err(_) if stopping.load(Ordering::Acquire) => return Ok(()),
-                Err(error) if !reconnecting => return Err(error.into()),
                 Err(error) => {
+                    reconnecting = true;
                     let delay = backoff.next_delay();
                     eprintln!(
-                        "Peer discovery failed: {error}; retrying in {} second(s)",
+                        "Peer discovery failed: {error}; local mouse control remains available; retrying in {} second(s)",
                         delay.as_secs()
                     );
                     if wait_until_retry_or_stop(&stopping, delay) {
@@ -113,11 +113,11 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         let network = match Network::connect(transport, session_id, Arc::clone(&stopping)) {
             Ok(network) => network,
             Err(_) if stopping.load(Ordering::Acquire) => return Ok(()),
-            Err(error) if !reconnecting => return Err(error.into()),
             Err(error) => {
+                reconnecting = true;
                 let delay = backoff.next_delay();
                 eprintln!(
-                    "Reconnect attempt failed: {error}; retrying in {} second(s)",
+                    "Connection attempt failed: {error}; local mouse control remains available; retrying in {} second(s)",
                     delay.as_secs()
                 );
                 if wait_until_retry_or_stop(&stopping, delay) {

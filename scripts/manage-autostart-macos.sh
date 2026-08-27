@@ -139,6 +139,7 @@ case "${action}" in
         write_plist
         launchctl bootstrap "${domain}" "${plist_path}"
         launchctl kickstart "${service}"
+        sleep 1
         echo "EdgeMouse login startup installed"
         show_status
         ;;
@@ -155,6 +156,7 @@ case "${action}" in
                 launchctl bootstrap "${domain}" "${plist_path}"
             fi
             launchctl kickstart "${service}"
+            sleep 1
             echo "EdgeMouse start requested"
         fi
         show_status

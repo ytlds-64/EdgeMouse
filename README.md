@@ -27,6 +27,8 @@ tray UI, installers, and elevated Windows desktops.
   synthetic-button release on disconnect.
 - Automatic reconnection after an established link is interrupted, with local
   mouse control kept available while the peer or network is offline.
+- Persistent startup retry when the peer or local network is unavailable during
+  login, without capturing the local mouse between attempts.
 - Automatic IPv4 LAN discovery of the configured certificate-pinned peer, both
   at startup and during reconnection; static peer addresses remain supported.
 - Single-instance protection plus local `status` and graceful `stop` commands.
@@ -254,7 +256,7 @@ and merged updates. Windows requests 1 ms timer resolution while EdgeMouse is
 running so the 4–12 ms movement schedule does not collapse to the default
 roughly 15.6 ms system timer period.
 
-Both computers must use protocol v2. Versions 0.1.5 through 0.1.15 use protocol
+Both computers must use protocol v2. Versions 0.1.5 through 0.1.16 use protocol
 v2 and will intentionally refuse a connection to a 0.1.4 executable. For the
 best movement behavior, install the latest version on both computers.
 

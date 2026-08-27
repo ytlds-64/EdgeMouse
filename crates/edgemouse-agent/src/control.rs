@@ -152,7 +152,7 @@ fn request(address: &str, command: Command) -> Result<Option<RunningStatus>, Con
             }
             decode_response(&response[..length], command).map(Some)
         }
-        Err(error) if is_timeout(&error) => Ok(None),
+        Err(error) if is_no_response(&error) => Ok(None),
         Err(error) => Err(ControlError::new(format!(
             "failed to read EdgeMouse status: {error}"
         ))),
@@ -181,7 +181,7 @@ fn serve(socket: UdpSocket, stopping: &AtomicBool, closing: &AtomicBool) {
                     stopping.store(true, Ordering::Release);
                 }
             }
-            Err(error) if is_timeout(&error) => {}
+            Err(error) if is_no_response(&error) => {}
             Err(_) => break,
         }
     }
@@ -257,10 +257,13 @@ fn decode_response(
     })
 }
 
-fn is_timeout(error: &io::Error) -> bool {
+fn is_no_response(error: &io::Error) -> bool {
     matches!(
         error.kind(),
-        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        io::ErrorKind::WouldBlock
+            | io::ErrorKind::TimedOut
+            | io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionReset
     )
 }
 
@@ -283,12 +286,27 @@ mod tests {
 
         let status = RunningStatus {
             process_id: 42,
-            version: "0.1.15".to_owned(),
+            version: "test-version".to_owned(),
         };
         let response = encode_response(Command::Status, &status);
         assert_eq!(decode_response(&response, Command::Status).unwrap(), status);
         assert!(decode_response(&response, Command::Stop).is_err());
         assert!(decode_response(&response[..response.len() - 1], Command::Status).is_err());
+    }
+
+    #[test]
+    fn a_closed_local_udp_port_means_the_agent_is_not_running() {
+        for kind in [
+            io::ErrorKind::WouldBlock,
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::ConnectionRefused,
+            io::ErrorKind::ConnectionReset,
+        ] {
+            assert!(is_no_response(&io::Error::from(kind)));
+        }
+        assert!(!is_no_response(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
     }
 
     #[test]

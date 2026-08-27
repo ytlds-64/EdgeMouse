@@ -105,8 +105,10 @@ unexpected-node announcements. The advertised data is an untrusted locator, not
 an authentication mechanism: the IP comes from the datagram source and the
 subsequent QUIC connection still requires the configured peer certificate and
 mutual TLS. Discovery runs again on reconnect so a DHCP address change does not
-require editing the configuration. A static `host:port` remains available for
-networks that block IPv4 broadcast.
+require editing the configuration. Initial discovery and connection failures
+also remain in the retry loop, allowing a login agent to start before Wi-Fi or
+the peer is ready without capturing the local mouse. A static `host:port` remains
+available for networks that block IPv4 broadcast.
 
 Initial trust can be installed through the short-code pairing protocol. A host
 broadcasts a bounded offer on UDP 43892 containing a random 128-bit offer ID,
