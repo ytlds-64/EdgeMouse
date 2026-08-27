@@ -88,3 +88,4 @@ echo "3. Stop any running EdgeMouse agent, then enter the Windows code with: ${b
 echo "4. Grant EdgeMouse Accessibility access in macOS System Settings."
 echo "5. Run: ${binary_path} check-config ${config_path}"
 echo "6. Run: ${binary_path} run ${config_path}"
+echo "7. After manual testing, enable login startup with: ${project_root}/scripts/manage-autostart-macos.sh install ${config_path}"

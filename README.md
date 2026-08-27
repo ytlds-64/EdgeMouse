@@ -29,6 +29,8 @@ tray UI, installers, and elevated Windows desktops.
   mouse control kept available while the peer or network is offline.
 - Automatic IPv4 LAN discovery of the configured certificate-pinned peer, both
   at startup and during reconnection; static peer addresses remain supported.
+- Single-instance protection plus local `status` and graceful `stop` commands.
+- Optional per-user login startup on macOS and Windows, with persistent logs.
 - Identity generation, configuration validation, diagnostics, and simulation
   commands.
 
@@ -184,11 +186,42 @@ permission.
    It writes the newest run to `windows-current.log` and preserves timestamped
    copies under `logs/`, so restarting the agent does not destroy the prior log.
 
+## Run automatically after login
+
+After manual operation has been verified, install the per-user login agent. This
+does not require a system service or administrator privileges.
+
+On macOS:
+
+```sh
+./scripts/manage-autostart-macos.sh install ./edgemouse.toml
+```
+
+On Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\manage-autostart-windows.ps1 Install .\edgemouse.toml
+```
+
+Replace `install`/`Install` with `status`, `start`, `stop`, or `uninstall` as
+needed. The commands are case-insensitive on macOS and PowerShell accepts the
+capitalized forms shown above. `stop` asks the running agent to release captured
+input and injected buttons before it exits. Starting a second agent is refused,
+so a manual launcher cannot accidentally compete with the login agent.
+
+The macOS login agent writes `logs/mac-autostart.out.log` and
+`logs/mac-autostart.err.log`. The Windows login shortcut uses the normal logging
+launcher and writes `windows-current.log` plus timestamped files under `logs/`.
+The local status/stop channel binds only `127.0.0.1:43894`; it is not reachable
+from the LAN and needs no firewall rule.
+
 The certificate with the lower derived node ID initiates the connection; the
 other side accepts it. Either process may be started first. After a successful
 connection, a temporary network loss or peer restart restores local mouse control
 and makes both agents retry automatically. Press Ctrl+C to release input and shut
-down cleanly.
+down cleanly. `edgemouse status` reports the local process and version;
+`edgemouse stop` performs the same safe shutdown when the agent is running in the
+background.
 
 Discovery packets contain only the node ID, device name, and QUIC port. Their IP
 address is taken from the UDP source and they are treated only as connection
@@ -221,7 +254,7 @@ and merged updates. Windows requests 1 ms timer resolution while EdgeMouse is
 running so the 4–12 ms movement schedule does not collapse to the default
 roughly 15.6 ms system timer period.
 
-Both computers must use protocol v2. Versions 0.1.5 through 0.1.14 use protocol
+Both computers must use protocol v2. Versions 0.1.5 through 0.1.15 use protocol
 v2 and will intentionally refuse a connection to a 0.1.4 executable. For the
 best movement behavior, install the latest version on both computers.
 

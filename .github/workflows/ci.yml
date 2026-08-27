@@ -38,7 +38,7 @@ jobs:
 
       - name: Check macOS launcher syntax
         if: runner.os == 'macOS'
-        run: bash -n scripts/run-macos-with-log.sh
+        run: bash -n scripts/run-macos-with-log.sh scripts/manage-autostart-macos.sh
 
       - name: Check Windows launcher syntax
         if: runner.os == 'Windows'
@@ -46,7 +46,8 @@ jobs:
         run: |
           $scriptPaths = @(
             'scripts/run-windows-with-log.ps1',
-            'scripts/update-build-run-windows.ps1'
+            'scripts/update-build-run-windows.ps1',
+            'scripts/manage-autostart-windows.ps1'
           )
           foreach ($scriptPath in $scriptPaths) {
             $tokens = $null
@@ -86,4 +87,6 @@ jobs:
             scripts/run-macos-with-log.sh
             scripts/run-windows-with-log.ps1
             scripts/update-build-run-windows.ps1
+            scripts/manage-autostart-macos.sh
+            scripts/manage-autostart-windows.ps1
             README.md

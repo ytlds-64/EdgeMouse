@@ -1,4 +1,5 @@
 use crate::config::{LoadedConfig, PeerAddress};
+use crate::control::ControlServer;
 use crate::discovery::{DISCOVERY_PORT, DiscoveryRequest, discover_trusted_peer};
 use crate::network::{Network, NetworkEvent};
 use crate::platform;
@@ -60,6 +61,7 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         edgemouse_transport::format_node_id(config.peer_node)
     );
     let stopping = install_shutdown_handler()?;
+    let _control_server = ControlServer::start(Arc::clone(&stopping))?;
     let mut reconnecting = false;
     let mut backoff = ReconnectBackoff::default();
 

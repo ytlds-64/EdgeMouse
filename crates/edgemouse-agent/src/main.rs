@@ -1,4 +1,5 @@
 mod config;
+mod control;
 mod discovery;
 mod network;
 mod pairing;
@@ -60,6 +61,14 @@ fn run() -> Result<(), Box<dyn Error>> {
             ensure_no_extra_arguments(arguments)?;
             run_agent(Path::new(&config))
         }
+        Some("status") => {
+            ensure_no_extra_arguments(arguments)?;
+            status()
+        }
+        Some("stop") => {
+            ensure_no_extra_arguments(arguments)?;
+            stop()
+        }
         Some("version" | "--version" | "-V") => {
             println!("edgemouse {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -74,8 +83,41 @@ fn run() -> Result<(), Box<dyn Error>> {
 
 fn usage() {
     println!(
-        "EdgeMouse MVP\n\nUSAGE:\n    edgemouse <COMMAND>\n\nCOMMANDS:\n    doctor                                Check platform APIs and permissions\n    identity <DIRECTORY>                  Generate this node's certificate and private key\n    pair host <CONFIG>                    Show a one-time code and offer secure pairing\n    pair join <CONFIG> <CODE> [HOST]      Pair by discovery or a direct host IP\n    check-config <CONFIG>                 Validate configuration and certificate pairing\n    discover <CONFIG>                     Find the configured trusted peer on the LAN\n    run <CONFIG>                          Connect to the trusted peer and enable edge switching\n    demo                                  Simulate a Windows-to-macOS edge transition\n    version                               Print the build version\n    help                                  Show this help"
+        "EdgeMouse MVP\n\nUSAGE:\n    edgemouse <COMMAND>\n\nCOMMANDS:\n    doctor                                Check platform APIs and permissions\n    identity <DIRECTORY>                  Generate this node's certificate and private key\n    pair host <CONFIG>                    Show a one-time code and offer secure pairing\n    pair join <CONFIG> <CODE> [HOST]      Pair by discovery or a direct host IP\n    check-config <CONFIG>                 Validate configuration and certificate pairing\n    discover <CONFIG>                     Find the configured trusted peer on the LAN\n    run <CONFIG>                          Connect to the trusted peer and enable edge switching\n    status                                Show whether the local agent is running\n    stop                                  Safely stop the local agent\n    demo                                  Simulate a Windows-to-macOS edge transition\n    version                               Print the build version\n    help                                  Show this help"
     );
+}
+
+fn status() -> Result<(), Box<dyn Error>> {
+    match control::query_status()? {
+        Some(status) => {
+            println!("EdgeMouse is running");
+            println!("Version : {}", status.version);
+            println!("Process : {}", status.process_id);
+        }
+        None => println!("EdgeMouse is not running"),
+    }
+    Ok(())
+}
+
+fn stop() -> Result<(), Box<dyn Error>> {
+    let Some(status) = control::request_stop()? else {
+        println!("EdgeMouse is not running");
+        return Ok(());
+    };
+    println!(
+        "Stopping EdgeMouse {} (process {})…",
+        status.version, status.process_id
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if control::query_status()?.is_none() {
+            println!("EdgeMouse stopped safely");
+            return Ok(());
+        }
+    }
+    println!("Stop requested; shutdown is still in progress");
+    Ok(())
 }
 
 fn pair(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {

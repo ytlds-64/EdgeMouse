@@ -15,7 +15,7 @@ are outside this milestone.
 Each machine runs the same per-user agent. Input APIs and permissions belong to
 the interactive session, so the MVP does not run capture inside a system service.
 
-The process has three execution contexts:
+The process has four execution contexts:
 
 1. A native OS callback thread captures physical input and only normalizes and
    enqueues events. It never performs network or UI work.
@@ -23,6 +23,9 @@ The process has three execution contexts:
    `edgemouse-core` state machine, and applies capture/injection effects.
 3. A Tokio worker owns the QUIC endpoint, the reliable bidirectional stream,
    unreliable movement datagrams, and heartbeat scheduling.
+4. A loopback-only UDP control thread enforces a single running agent and handles
+   bounded `status` and `stop` requests. It never accepts packets from a non-local
+   address.
 
 The native queues and the network command queue are bounded by failure behavior.
 Absolute movement uses latest-value slots on both sender and receiver and is
@@ -63,7 +66,14 @@ Safety invariants:
   before injection and recovery, so a boundary mismatch cannot terminate the
   agent or prevent reconnection.
 - Protocol numbers must be finite and frames are capped at 64 KiB.
-- Ctrl+C restores local capture, releases injected buttons, and sends `Goodbye`.
+- Ctrl+C, SIGTERM/window-close, or the local `stop` command restores local
+  capture, releases injected buttons, and sends `Goodbye`.
+
+Only the active per-user session runs input capture. The optional macOS
+LaunchAgent and Windows Startup-folder shortcut launch that same agent after
+sign-in; neither installs a privileged system service. The control socket binds
+only `127.0.0.1:43894`, so it needs no LAN firewall rule. The macOS job restarts
+after an unexpected failure but stays stopped after a successful requested exit.
 
 ## Transport and trust
 
@@ -154,5 +164,6 @@ restored during transitions and teardown.
    automatic recovery path during Wi-Fi loss.
 2. Add Windows Raw Input based on latency measurements.
 3. Put the short-code pairing flow into a tray/settings UI.
-4. Add signed installers, launch-at-login, and diagnostics export.
+4. Add signed installers and diagnostics export around the existing per-user
+   launch-at-login scripts.
 5. Only then consider keyboard and clipboard channels.

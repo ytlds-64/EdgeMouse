@@ -86,3 +86,4 @@ Write-Host "3. Stop any running EdgeMouse agent, then run: `"$BinaryPath`" pair 
 Write-Host "4. Enter the displayed code on the Mac with: ./target/release/edgemouse pair join ./edgemouse.toml CODE [WINDOWS-IP]"
 Write-Host "5. Run: `"$BinaryPath`" check-config `"$ConfigPath`""
 Write-Host "6. Run: `"$BinaryPath`" run `"$ConfigPath`""
+Write-Host "7. After manual testing, enable login startup with: powershell -ExecutionPolicy Bypass -File .\scripts\manage-autostart-windows.ps1 Install .\edgemouse.toml"
