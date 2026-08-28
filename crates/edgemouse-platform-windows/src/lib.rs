@@ -5,7 +5,7 @@
 use edgemouse_core::{
     ButtonState, CaptureMode, KeyCode, KeyState, KeyboardCaptureBackend, KeyboardEvent,
     KeyboardInjectionBackend, MouseButton, MouseCaptureBackend, MouseInjectionBackend,
-    PermissionState, PhysicalMouseEvent, PlatformError, Point, RemoteMouseEvent, Vector,
+    PermissionState, PhysicalMouseEvent, PlatformError, Point, Rect, RemoteMouseEvent, Vector,
 };
 use std::collections::{BTreeSet, VecDeque};
 use std::ffi::c_void;
@@ -72,6 +72,8 @@ const SM_XVIRTUALSCREEN: i32 = 76;
 const SM_YVIRTUALSCREEN: i32 = 77;
 const SM_CXVIRTUALSCREEN: i32 = 78;
 const SM_CYVIRTUALSCREEN: i32 = 79;
+const SM_CMONITORS: i32 = 80;
+const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: isize = -4;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +178,8 @@ unsafe extern "system" {
     fn ShowCursor(show: i32) -> i32;
     fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
     fn GetSystemMetrics(index: i32) -> i32;
+    fn GetDpiForSystem() -> u32;
+    fn SetProcessDpiAwarenessContext(value: isize) -> i32;
 }
 
 #[link(name = "Kernel32")]
@@ -221,6 +225,45 @@ pub fn current_pointer() -> Result<Point, PlatformError> {
     } else {
         Ok(Point::new(f64::from(point.x), f64::from(point.y)))
     }
+}
+
+/// Returns the Windows virtual desktop in per-monitor-aware physical coordinates.
+/// This includes rotated and secondary displays and avoids DPI virtualization in
+/// the low-level hook coordinate stream.
+pub fn desktop_geometry() -> Result<(Rect, f64, u32), PlatformError> {
+    // SAFETY: this changes process coordinate interpretation and retains no Rust memory.
+    // A zero result is also expected when an embedding manifest already selected DPI mode.
+    unsafe {
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+    // SAFETY: GetSystemMetrics and GetDpiForSystem have no pointer parameters.
+    let (left, top, width, height, count, dpi) = unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            GetSystemMetrics(SM_CMONITORS),
+            GetDpiForSystem(),
+        )
+    };
+    if width <= 0 || height <= 0 || count <= 0 {
+        return Err(PlatformError::new(
+            "Windows reported invalid virtual desktop geometry",
+        ));
+    }
+    let bounds = Rect::new(
+        Point::new(f64::from(left), f64::from(top)),
+        f64::from(width),
+        f64::from(height),
+    )
+    .map_err(|error| PlatformError::new(format!("invalid Windows desktop bounds: {error}")))?;
+    let scale_factor = (f64::from(dpi) / 96.0).max(1.0);
+    Ok((
+        bounds,
+        scale_factor,
+        u32::try_from(count).map_err(|_| PlatformError::new("invalid Windows display count"))?,
+    ))
 }
 
 /// A low-level mouse hook hosted on a dedicated Win32 message-loop thread.

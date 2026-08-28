@@ -6,9 +6,9 @@ The MVP connects one Windows user session and one macOS user session on the
 same LAN. Moving through a configured edge transfers the physical mouse to the
 paired logical screen; moving back through the opposite edge restores it.
 
-Keyboard, clipboard, file transfer, relay servers, multi-monitor
-topologies, tray UI, installers, lock screens, and Windows UAC secure desktops
-are outside this milestone.
+Clipboard, file transfer, relay servers, per-monitor portal editing, tray UI,
+installers, lock screens, and Windows UAC secure desktops are outside this
+milestone. Windows keyboard input follows the mouse to macOS.
 
 ## Runtime
 
@@ -88,8 +88,11 @@ bypass.
 
 Both agents bind a QUIC UDP endpoint. The lower node ID initiates and retries;
 the higher node ID accepts, eliminating duplicate-connection races. TLS uses
-ALPN `edgemouse/2`. After TLS, both sides exchange and validate a protocol
-`Hello`. Enter/leave, buttons, wheels, final positions, releases, and heartbeats
+ALPN `edgemouse/4`. After TLS, both sides exchange and validate a protocol
+`Hello`, including the sender's current screen ID, desktop bounds, orientation,
+and scale. Each side builds the two-node topology from its freshly detected local
+desktop and the authenticated peer announcement rather than duplicating remote
+geometry in TOML. Enter/leave, buttons, wheels, final positions, releases, and heartbeats
 use one reliable bidirectional stream. Ordinary absolute movement uses QUIC
 Datagram frames, which are encrypted and authenticated but intentionally
 unreliable and unordered. Each movement carries a reliable-event watermark, so
@@ -144,11 +147,11 @@ double-decrement queued payload bytes when the drop-oldest path is exercised.
 
 ### Windows
 
-Capture runs a `WH_MOUSE_LL` hook on a dedicated message-loop thread. Local
-movement uses consecutive hook coordinates. The hook's per-monitor-aware
-coordinates are divided by the configured display scale as floating-point
-values before they enter the logical screen topology, preserving half-point
-motion at 200% scaling. During remote control, movement is calculated against a
+Capture runs a `WH_MOUSE_LL` hook on a dedicated message-loop thread. Automatic
+mode selects per-monitor-v2 DPI awareness before reading the full Windows virtual
+desktop, so hook, cursor, and `SendInput` positions share physical global
+coordinates across scaled and rotated monitors. Legacy manual mode still divides
+hook coordinates by its configured scale. During remote control, movement is calculated against a
 fixed anchor at the local screen center because suppressed input does not
 advance the real cursor. Mode changes temporarily ignore warp-generated mouse
 moves and discard queued pre-transition movement, so an edge handoff cannot
@@ -163,7 +166,10 @@ responsible for suppression.
 An active session `CGEventTap` captures and suppresses mouse events on a
 dedicated `CFRunLoop`. `CGEventPost` injects absolute movement, drag variants,
 buttons, and pixel scrolling with a dedicated event-source marker. Startup
-checks Accessibility permission. During remote send or receive,
+checks Accessibility permission. Automatic mode unions all active
+`CGDisplayBounds` rectangles in the same global point coordinate space used by
+input events, so Retina scale and display rotation require no manual conversion.
+During remote send or receive,
 `CGAssociateMouseAndMouseCursorPosition` prevents local hardware movement from
 dragging the OS cursor; association, cursor hide/show, and warp calls are
 restored during transitions and teardown.
@@ -174,7 +180,8 @@ restored during transitions and teardown.
    long mixed Ethernet/Wi-Fi sessions, horizontal scroll, sleep/wake, and the
    automatic recovery path during Wi-Fi loss.
 2. Add Windows Raw Input based on latency measurements.
-3. Put the short-code pairing flow into a tray/settings UI.
+3. Put pairing, display selection, edge layout, diagnostics, and tunable session
+   settings into a tray/settings UI.
 4. Add signed installers and diagnostics export around the existing per-user
    launch-at-login scripts.
 5. Make the current Windows-style modifier mapping configurable, add

@@ -9,6 +9,26 @@ pub struct PlatformStatus {
     pub permission_granted: Option<bool>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DesktopGeometry {
+    pub bounds: edgemouse_core::Rect,
+    pub scale_factor: f64,
+    pub display_count: u32,
+}
+
+pub fn desktop_geometry() -> Result<DesktopGeometry, edgemouse_core::PlatformError> {
+    #[cfg(target_os = "macos")]
+    let (bounds, scale_factor, display_count) = edgemouse_platform_macos::desktop_geometry()?;
+    #[cfg(target_os = "windows")]
+    let (bounds, scale_factor, display_count) = edgemouse_platform_windows::desktop_geometry()?;
+
+    Ok(DesktopGeometry {
+        bounds,
+        scale_factor,
+        display_count,
+    })
+}
+
 #[must_use]
 pub fn current_status() -> PlatformStatus {
     #[cfg(target_os = "macos")]

@@ -1,4 +1,5 @@
 use edgemouse_core::{Edge, NodeId, Point, Rect, Screen, ScreenId, SessionConfig, Topology};
+use edgemouse_protocol::ScreenInfo;
 use edgemouse_transport::{Identity, PeerConfig, TrustedPeer};
 use serde::Deserialize;
 use std::error::Error;
@@ -17,13 +18,29 @@ pub enum PeerAddress {
 pub struct LoadedConfig {
     pub transport: PeerConfig,
     pub peer_address: PeerAddress,
-    pub topology: Topology,
     pub local_node: NodeId,
     pub peer_node: NodeId,
-    pub local_screen: ScreenId,
-    pub local_bounds: Rect,
-    pub local_scale: f64,
+    pub local_screen: ScreenConfig,
+    pub peer_screen: ScreenId,
+    pub peer_on: Edge,
     pub session: SessionConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScreenConfig {
+    pub id: ScreenId,
+    pub name: String,
+    pub automatic: bool,
+    manual_bounds: Option<Rect>,
+    manual_scale: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedScreen {
+    pub screen: Screen,
+    /// Converts per-monitor-aware Windows hook coordinates into topology coordinates.
+    /// Automatic desktop detection uses the OS global coordinate space directly.
+    pub coordinate_scale: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -110,13 +127,14 @@ struct RawScreen {
     id: u64,
     name: String,
     #[serde(default)]
+    auto: bool,
+    #[serde(default)]
     origin_x: f64,
     #[serde(default)]
     origin_y: f64,
-    width: f64,
-    height: f64,
-    #[serde(default = "default_scale")]
-    scale: f64,
+    width: Option<f64>,
+    height: Option<f64>,
+    scale: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -152,19 +170,13 @@ impl RawConfig {
         let peer = TrustedPeer::from_der(peer_certificate)?;
         let local_node = identity.node_id();
         let peer_node = peer.node_id();
-        let local_screen = ScreenId(self.local.screen.id);
+        let local_screen = self.local.screen.into_config()?;
         let peer_screen = ScreenId(self.peer.screen.id);
-        let local_bounds = self.local.screen.bounds()?;
-        let local_scale = self.local.screen.scale;
-
-        let mut topology = Topology::default();
-        topology.add_screen(self.local.screen.build(local_node)?)?;
-        topology.add_screen(self.peer.screen.build(peer_node)?)?;
-        topology.connect_bidirectional(
-            local_screen,
-            parse_edge(&self.layout.peer_on)?,
-            peer_screen,
-        )?;
+        if local_screen.id == peer_screen {
+            return Err("local and peer screen ids must be different".into());
+        }
+        validate_screen_name(&self.peer.screen.name, "peer.screen.name")?;
+        let peer_on = parse_edge(&self.layout.peer_on)?;
 
         let bind_address = parse_address(&self.local.listen, "local listen address")?;
         let peer_address = parse_peer_address(&self.peer.address)?;
@@ -191,35 +203,110 @@ impl RawConfig {
         Ok(LoadedConfig {
             transport,
             peer_address,
-            topology,
             local_node,
             peer_node,
             local_screen,
-            local_bounds,
-            local_scale,
+            peer_screen,
+            peer_on,
             session,
         })
     }
 }
 
 impl RawScreen {
-    fn bounds(&self) -> Result<Rect, Box<dyn Error>> {
-        Ok(Rect::new(
-            Point::new(self.origin_x, self.origin_y),
-            self.width,
-            self.height,
-        )?)
+    fn into_config(self) -> Result<ScreenConfig, Box<dyn Error>> {
+        validate_screen_name(&self.name, "local.screen.name")?;
+        let manual_bounds = if self.auto {
+            None
+        } else {
+            let width = self
+                .width
+                .ok_or("local.screen.width is required unless local.screen.auto = true")?;
+            let height = self
+                .height
+                .ok_or("local.screen.height is required unless local.screen.auto = true")?;
+            Some(Rect::new(
+                Point::new(self.origin_x, self.origin_y),
+                width,
+                height,
+            )?)
+        };
+        let manual_scale = self.scale.unwrap_or_else(default_scale);
+        if !manual_scale.is_finite() || manual_scale <= 0.0 {
+            return Err("local.screen.scale must be finite and greater than zero".into());
+        }
+        Ok(ScreenConfig {
+            id: ScreenId(self.id),
+            name: self.name,
+            automatic: self.auto,
+            manual_bounds,
+            manual_scale,
+        })
+    }
+}
+
+impl LoadedConfig {
+    pub fn resolve_local_screen(
+        &self,
+        detected: Option<(Rect, f64)>,
+    ) -> Result<ResolvedScreen, Box<dyn Error>> {
+        let (bounds, scale_factor, coordinate_scale) = if self.local_screen.automatic {
+            let (bounds, scale_factor) = detected.ok_or(
+                "automatic screen detection was requested, but no desktop geometry was supplied",
+            )?;
+            (bounds, scale_factor, 1.0)
+        } else {
+            (
+                self.local_screen
+                    .manual_bounds
+                    .ok_or("manual local screen bounds are missing")?,
+                self.local_screen.manual_scale,
+                self.local_screen.manual_scale,
+            )
+        };
+        Ok(ResolvedScreen {
+            screen: Screen::new(
+                self.local_screen.id,
+                self.local_node,
+                &self.local_screen.name,
+                bounds,
+                scale_factor,
+            )?,
+            coordinate_scale,
+        })
     }
 
-    fn build(&self, node: NodeId) -> Result<Screen, Box<dyn Error>> {
-        Ok(Screen::new(
-            ScreenId(self.id),
-            node,
-            &self.name,
-            self.bounds()?,
-            self.scale,
-        )?)
+    pub fn topology(&self, local: Screen, peer: &ScreenInfo) -> Result<Topology, Box<dyn Error>> {
+        if peer.id != self.peer_screen {
+            return Err(format!(
+                "trusted peer announced screen {}, but configuration expects {}",
+                peer.id.0, self.peer_screen.0
+            )
+            .into());
+        }
+        let remote = Screen::new(
+            peer.id,
+            self.peer_node,
+            &peer.name,
+            peer.bounds,
+            peer.scale_factor,
+        )?;
+        let mut topology = Topology::default();
+        topology.add_screen(local)?;
+        topology.add_screen(remote)?;
+        topology.connect_bidirectional(self.local_screen.id, self.peer_on, self.peer_screen)?;
+        Ok(topology)
     }
+}
+
+fn validate_screen_name(name: &str, label: &str) -> Result<(), Box<dyn Error>> {
+    if name.is_empty() || name.chars().any(char::is_control) {
+        return Err(format!("{label} must be non-empty and contain no control characters").into());
+    }
+    if name.len() > 63 {
+        return Err(format!("{label} cannot exceed 63 UTF-8 bytes").into());
+    }
+    Ok(())
 }
 
 fn read_relative(base: &Path, path: &Path, label: &str) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -301,6 +388,40 @@ mod tests {
             PeerAddress::Static("192.168.8.202:43891".parse().unwrap())
         );
         assert!(parse_peer_address("automatic").is_err());
+    }
+
+    #[test]
+    fn automatic_screen_does_not_require_fixed_geometry() {
+        let screen = RawScreen {
+            id: 7,
+            name: "Automatic desktop".to_owned(),
+            auto: true,
+            origin_x: 0.0,
+            origin_y: 0.0,
+            width: None,
+            height: None,
+            scale: None,
+        }
+        .into_config()
+        .unwrap();
+        assert!(screen.automatic);
+        assert_eq!(screen.id, ScreenId(7));
+        assert!(screen.manual_bounds.is_none());
+    }
+
+    #[test]
+    fn manual_screen_still_requires_width_and_height() {
+        let screen = RawScreen {
+            id: 7,
+            name: "Manual display".to_owned(),
+            auto: false,
+            origin_x: 0.0,
+            origin_y: 0.0,
+            width: None,
+            height: Some(1080.0),
+            scale: Some(2.0),
+        };
+        assert!(screen.into_config().is_err());
     }
 
     #[test]

@@ -200,7 +200,35 @@ fn check_config(path: &Path) -> Result<(), Box<dyn Error>> {
             println!("Peer       : auto (UDP {})", discovery::DISCOVERY_PORT)
         }
     }
-    println!("Local screen: {}", config.local_screen.0);
+    println!(
+        "Local screen: {} ({})",
+        config.local_screen.id.0,
+        if config.local_screen.automatic {
+            "automatic desktop detection"
+        } else {
+            "manual geometry"
+        }
+    );
+    println!(
+        "Peer screen : {} (geometry supplied by trusted peer)",
+        config.peer_screen.0
+    );
+    if config.local_screen.automatic {
+        match platform::desktop_geometry() {
+            Ok(desktop) => println!(
+                "Desktop    : {:.0}x{:.0} at ({:.0}, {:.0}), {} display(s), scale {:.2}",
+                desktop.bounds.width,
+                desktop.bounds.height,
+                desktop.bounds.origin.x,
+                desktop.bounds.origin.y,
+                desktop.display_count,
+                desktop.scale_factor
+            ),
+            Err(error) => println!(
+                "Desktop    : automatic detection will run in the signed interactive session ({error})"
+            ),
+        }
+    }
     Ok(())
 }
 

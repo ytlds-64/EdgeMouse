@@ -7,17 +7,25 @@
 #![forbid(unsafe_code)]
 
 use edgemouse_core::{
-    ButtonState, KeyCode, KeyState, KeyboardEvent, MouseButton, NodeId, Point, RemoteMouseEvent,
-    RoutedEvent, RoutedKeyboardEvent, ScreenId,
+    ButtonState, KeyCode, KeyState, KeyboardEvent, MouseButton, NodeId, Point, Rect,
+    RemoteMouseEvent, RoutedEvent, RoutedKeyboardEvent, ScreenId,
 };
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 pub const HEADER_LEN: usize = 12;
 pub const MAX_FRAME_LEN: usize = 64 * 1024;
 pub const MOUSE_DATAGRAM_FRAME_LEN: usize = HEADER_LEN + 6 * std::mem::size_of::<u64>();
 const MAGIC: [u8; 4] = *b"EMOU";
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenInfo {
+    pub id: ScreenId,
+    pub name: String,
+    pub bounds: Rect,
+    pub scale_factor: f64,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum WireMessage {
@@ -25,6 +33,7 @@ pub enum WireMessage {
         node: NodeId,
         name: String,
         capabilities: u32,
+        screen: ScreenInfo,
     },
     Mouse {
         session_id: u64,
@@ -116,13 +125,34 @@ pub fn encode_frame(message: &WireMessage) -> Result<Vec<u8>, EncodeError> {
             node,
             name,
             capabilities,
+            screen,
         } => {
             let name = name.as_bytes();
             let name_len = u16::try_from(name.len()).map_err(|_| EncodeError::NameTooLong)?;
+            let screen_name = screen.name.as_bytes();
+            let screen_name_len =
+                u16::try_from(screen_name.len()).map_err(|_| EncodeError::NameTooLong)?;
             put_u128(&mut payload, node.0);
             put_u32(&mut payload, *capabilities);
+            put_u64(&mut payload, screen.id.0);
+            for value in [
+                screen.bounds.origin.x,
+                screen.bounds.origin.y,
+                screen.bounds.width,
+                screen.bounds.height,
+                screen.scale_factor,
+            ] {
+                require_finite(value)?;
+            }
+            put_f64(&mut payload, screen.bounds.origin.x);
+            put_f64(&mut payload, screen.bounds.origin.y);
+            put_f64(&mut payload, screen.bounds.width);
+            put_f64(&mut payload, screen.bounds.height);
+            put_f64(&mut payload, screen.scale_factor);
             put_u16(&mut payload, name_len);
+            put_u16(&mut payload, screen_name_len);
             payload.extend_from_slice(name);
+            payload.extend_from_slice(screen_name);
         }
         WireMessage::Mouse { session_id, event } => {
             put_u64(&mut payload, *session_id);
@@ -301,14 +331,34 @@ fn encode_mouse_payload(payload: &mut Vec<u8>, event: RemoteMouseEvent) -> Resul
 fn decode_hello(payload: &mut Reader<'_>) -> Result<WireMessage, DecodeError> {
     let node = NodeId(payload.u128()?);
     let capabilities = payload.u32()?;
+    let screen_id = ScreenId(payload.u64()?);
+    let screen_origin = payload.point()?;
+    let screen_width = payload.f64()?;
+    let screen_height = payload.f64()?;
+    let scale_factor = payload.f64()?;
     let name_len = usize::from(payload.u16()?);
+    let screen_name_len = usize::from(payload.u16()?);
     let name = std::str::from_utf8(payload.take(name_len)?)
         .map_err(|_| DecodeError::InvalidUtf8)?
         .to_owned();
+    let screen_name = std::str::from_utf8(payload.take(screen_name_len)?)
+        .map_err(|_| DecodeError::InvalidUtf8)?
+        .to_owned();
+    let bounds = Rect::new(screen_origin, screen_width, screen_height)
+        .map_err(|_| DecodeError::InvalidEnum)?;
+    if scale_factor <= 0.0 || screen_name.is_empty() {
+        return Err(DecodeError::InvalidEnum);
+    }
     Ok(WireMessage::Hello {
         node,
         name,
         capabilities,
+        screen: ScreenInfo {
+            id: screen_id,
+            name: screen_name,
+            bounds,
+            scale_factor,
+        },
     })
 }
 
@@ -515,6 +565,12 @@ mod tests {
             node: NodeId(0xfeed_beef),
             name: "MacBook Pro".to_owned(),
             capabilities: 0b111,
+            screen: ScreenInfo {
+                id: ScreenId(7),
+                name: "Automatic desktop".to_owned(),
+                bounds: Rect::new(Point::new(-1080.0, 0.0), 4920.0, 2160.0).unwrap(),
+                scale_factor: 2.0,
+            },
         });
         for event in [
             RemoteMouseEvent::Enter {

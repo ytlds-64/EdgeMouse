@@ -296,6 +296,30 @@ mod tests {
     }
 
     #[test]
+    fn maps_a_landscape_edge_onto_a_rotated_portrait_screen() {
+        let mut topology = Topology::default();
+        topology.add_screen(screen(1, 1, 1920.0, 1080.0)).unwrap();
+        topology.add_screen(screen(2, 2, 1080.0, 1920.0)).unwrap();
+        topology
+            .connect_bidirectional(ScreenId(1), Edge::Right, ScreenId(2))
+            .unwrap();
+
+        let Advance::Crossed(transition) = topology
+            .advance(
+                ScreenId(1),
+                Point::new(1919.0, 270.0),
+                Vector::new(4.0, 0.0),
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("expected a transition");
+        };
+        assert_eq!(transition.to, ScreenId(2));
+        assert!((transition.position.y - 480.0).abs() < 0.01);
+    }
+
+    #[test]
     fn a_blocked_entry_edge_prevents_immediate_bounce() {
         let mut topology = Topology::default();
         topology.add_screen(screen(1, 1, 100.0, 100.0)).unwrap();

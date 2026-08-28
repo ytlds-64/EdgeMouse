@@ -4,7 +4,7 @@
 
 use edgemouse_core::NodeId;
 use edgemouse_protocol::{
-    HEADER_LEN, MOUSE_DATAGRAM_FRAME_LEN, WireMessage, decode_frame, encode_frame,
+    HEADER_LEN, MOUSE_DATAGRAM_FRAME_LEN, ScreenInfo, WireMessage, decode_frame, encode_frame,
     expected_frame_len,
 };
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const TLS_SERVER_NAME: &str = "edgemouse.local";
-const ALPN: &[u8] = b"edgemouse/2";
+const ALPN: &[u8] = b"edgemouse/4";
 const RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const DATAGRAM_RECEIVE_BUFFER_BYTES: usize = 4 * 1024;
 // One fixed-size movement frame: congestion drops positions at the application latest-value slot.
@@ -145,10 +145,14 @@ pub struct PeerLink {
     read_state: FrameReadState,
     peer_node: NodeId,
     peer_name: String,
+    peer_screen: ScreenInfo,
 }
 
 impl PeerLink {
-    pub async fn connect(config: PeerConfig) -> Result<Self, TransportError> {
+    pub async fn connect(
+        config: PeerConfig,
+        local_screen: ScreenInfo,
+    ) -> Result<Self, TransportError> {
         config.validate()?;
         let server_config = make_server_config(&config.identity, &config.peer)?;
         let client_config = make_client_config(&config.identity, &config.peer)?;
@@ -191,13 +195,15 @@ impl PeerLink {
             read_state: FrameReadState::default(),
             peer_node,
             peer_name: String::new(),
+            peer_screen: local_screen.clone(),
         };
         if link.guard.connection.max_datagram_size().is_none() {
             return Err(TransportError::new(
                 "trusted peer did not negotiate QUIC Datagram support",
             ));
         }
-        link.exchange_hello(local_node, &config.local_name).await?;
+        link.exchange_hello(local_node, &config.local_name, local_screen)
+            .await?;
         Ok(link)
     }
 
@@ -209,6 +215,11 @@ impl PeerLink {
     #[must_use]
     pub fn peer_name(&self) -> &str {
         &self.peer_name
+    }
+
+    #[must_use]
+    pub fn peer_screen(&self) -> &ScreenInfo {
+        &self.peer_screen
     }
 
     pub fn local_address(&self) -> Result<SocketAddr, TransportError> {
@@ -256,11 +267,13 @@ impl PeerLink {
         &mut self,
         local_node: NodeId,
         local_name: &str,
+        local_screen: ScreenInfo,
     ) -> Result<(), TransportError> {
         self.send(&WireMessage::Hello {
             node: local_node,
             name: local_name.to_owned(),
             capabilities: REQUIRED_CAPABILITIES,
+            screen: local_screen,
         })
         .await?;
         match self.receive().await? {
@@ -268,10 +281,12 @@ impl PeerLink {
                 node,
                 name,
                 capabilities,
+                screen,
             } if node == self.peer_node
                 && capabilities & REQUIRED_CAPABILITIES == REQUIRED_CAPABILITIES =>
             {
                 self.peer_name = name;
+                self.peer_screen = screen;
                 Ok(())
             }
             WireMessage::Hello {
@@ -627,13 +642,15 @@ mod tests {
         };
 
         let (first_link, second_link) = tokio::join!(
-            PeerLink::connect(first_config),
-            PeerLink::connect(second_config)
+            PeerLink::connect(first_config, test_screen(1)),
+            PeerLink::connect(second_config, test_screen(2))
         );
         let mut first_link = first_link.unwrap();
         let mut second_link = second_link.unwrap();
         assert_eq!(first_link.peer_name(), "second");
         assert_eq!(second_link.peer_name(), "first");
+        assert_eq!(first_link.peer_screen(), &test_screen(2));
+        assert_eq!(second_link.peer_screen(), &test_screen(1));
 
         let heartbeat = WireMessage::Heartbeat {
             session_id: 42,
@@ -700,8 +717,8 @@ mod tests {
         };
 
         let (first_link, second_link) = tokio::join!(
-            PeerLink::connect(first_config),
-            PeerLink::connect(second_config)
+            PeerLink::connect(first_config, test_screen(1)),
+            PeerLink::connect(second_config, test_screen(2))
         );
         let mut first_link = first_link.unwrap();
         let mut second_link = second_link.unwrap();
@@ -727,5 +744,15 @@ mod tests {
     fn unused_udp_address() -> SocketAddr {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         socket.local_addr().unwrap()
+    }
+
+    fn test_screen(id: u64) -> ScreenInfo {
+        ScreenInfo {
+            id: edgemouse_core::ScreenId(id),
+            name: format!("screen-{id}"),
+            bounds: edgemouse_core::Rect::new(edgemouse_core::Point::new(0.0, 0.0), 1920.0, 1080.0)
+                .unwrap(),
+            scale_factor: 1.0,
+        }
     }
 }

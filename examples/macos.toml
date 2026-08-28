@@ -9,11 +9,8 @@ private_key = "mac-identity/private-key.der"
 [local.screen]
 id = 2
 name = "Mac display"
-origin_x = 0
-origin_y = 0
-width = 1512
-height = 982
-scale = 2.0
+# Detect the complete active desktop at startup and after every reconnect.
+auto = true
 
 [peer]
 address = "auto"
@@ -22,11 +19,8 @@ certificate = "windows-certificate.der"
 [peer.screen]
 id = 1
 name = "Windows display"
-origin_x = 0
-origin_y = 0
-width = 1920
-height = 1080
-scale = 1.0
+# The trusted Windows peer supplies its current desktop geometry.
+auto = true
 
 [layout]
 peer_on = "left"

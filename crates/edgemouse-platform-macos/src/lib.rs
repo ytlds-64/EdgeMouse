@@ -5,7 +5,7 @@
 use edgemouse_core::{
     ButtonState, CaptureMode, KeyCode, KeyState, KeyboardEvent, KeyboardInjectionBackend,
     MouseButton, MouseCaptureBackend, MouseInjectionBackend, PermissionState, PhysicalMouseEvent,
-    PlatformError, Point, RemoteMouseEvent, Vector,
+    PlatformError, Point, Rect, RemoteMouseEvent, Vector,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
@@ -64,6 +64,20 @@ struct CGPoint {
     y: f64,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct CGSize {
+    width: f64,
+    height: f64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct CGRect {
+    origin: CGPoint,
+    size: CGSize,
+}
+
 type EventTapCallback = unsafe extern "C" fn(
     proxy: *mut c_void,
     event_type: u32,
@@ -115,6 +129,13 @@ unsafe extern "C" {
     fn CGEventPost(tap: u32, event: *mut c_void);
     fn CGWarpMouseCursorPosition(position: CGPoint) -> i32;
     fn CGMainDisplayID() -> u32;
+    fn CGGetActiveDisplayList(
+        max_displays: u32,
+        active_displays: *mut u32,
+        display_count: *mut u32,
+    ) -> i32;
+    fn CGDisplayBounds(display: u32) -> CGRect;
+    fn CGDisplayPixelsWide(display: u32) -> usize;
     fn CGDisplayHideCursor(display: u32) -> i32;
     fn CGDisplayShowCursor(display: u32) -> i32;
     fn CGAssociateMouseAndMouseCursorPosition(connected: u32) -> i32;
@@ -162,6 +183,63 @@ pub fn current_pointer() -> Result<Point, PlatformError> {
             "CoreGraphics returned a non-finite cursor position",
         ))
     }
+}
+
+/// Returns the union of all active displays in CoreGraphics global point coordinates.
+/// Rotation and scaled display modes are already reflected in each display's bounds.
+pub fn desktop_geometry() -> Result<(Rect, f64, u32), PlatformError> {
+    const MAX_DISPLAYS: usize = 32;
+    let mut displays = [0_u32; MAX_DISPLAYS];
+    let mut count = 0_u32;
+    // SAFETY: `displays` and `count` are writable for the documented number of entries.
+    let result = unsafe {
+        CGGetActiveDisplayList(
+            u32::try_from(MAX_DISPLAYS).unwrap(),
+            displays.as_mut_ptr(),
+            &raw mut count,
+        )
+    };
+    if result != 0 {
+        return Err(PlatformError::new(format!(
+            "CGGetActiveDisplayList failed with code {result}"
+        )));
+    }
+    if count == 0 {
+        // Background launch contexts can briefly expose no active list while the
+        // WindowServer is settling. The main display remains the safe fallback.
+        displays[0] = unsafe { CGMainDisplayID() };
+        count = 1;
+    }
+
+    let mut left = f64::INFINITY;
+    let mut top = f64::INFINITY;
+    let mut right = f64::NEG_INFINITY;
+    let mut bottom = f64::NEG_INFINITY;
+    for display in displays
+        .iter()
+        .take(usize::try_from(count).unwrap_or(MAX_DISPLAYS))
+    {
+        // SAFETY: display identifiers were returned by CoreGraphics in this call.
+        let bounds = unsafe { CGDisplayBounds(*display) };
+        left = left.min(bounds.origin.x);
+        top = top.min(bounds.origin.y);
+        right = right.max(bounds.origin.x + bounds.size.width);
+        bottom = bottom.max(bounds.origin.y + bounds.size.height);
+    }
+    let bounds = Rect::new(Point::new(left, top), right - left, bottom - top)
+        .map_err(|error| PlatformError::new(format!("invalid macOS desktop bounds: {error}")))?;
+
+    // CoreGraphics input coordinates are points. The backing scale is advertised
+    // for diagnostics and future UI rendering, not for pointer coordinate conversion.
+    let main_display = unsafe { CGMainDisplayID() };
+    // SAFETY: the main display identifier is owned by CoreGraphics.
+    let main_bounds = unsafe { CGDisplayBounds(main_display) };
+    let scale_factor = if main_bounds.size.width > 0.0 {
+        (unsafe { CGDisplayPixelsWide(main_display) } as f64 / main_bounds.size.width).max(1.0)
+    } else {
+        1.0
+    };
+    Ok((bounds, scale_factor, count))
 }
 
 struct CallbackState {

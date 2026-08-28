@@ -1,5 +1,5 @@
 use edgemouse_core::{NodeId, RemoteMouseEvent, RoutedEvent};
-use edgemouse_protocol::WireMessage;
+use edgemouse_protocol::{ScreenInfo, WireMessage};
 use edgemouse_transport::{PeerConfig, PeerLink};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
@@ -82,6 +82,7 @@ pub struct Network {
     thread: Option<JoinHandle<()>>,
     pub peer_node: NodeId,
     pub peer_name: String,
+    pub peer_screen: ScreenInfo,
 }
 
 #[derive(Default)]
@@ -151,6 +152,7 @@ impl IncomingMoveCoalescer {
 impl Network {
     pub fn connect(
         config: PeerConfig,
+        local_screen: ScreenInfo,
         session_id: u64,
         stopping: Arc<AtomicBool>,
     ) -> Result<Self, String> {
@@ -187,7 +189,7 @@ impl Network {
                 };
                 runtime.block_on(async move {
                     let link = tokio::select! {
-                        result = PeerLink::connect(config) => match result {
+                        result = PeerLink::connect(config, local_screen) => match result {
                             Ok(link) => link,
                             Err(error) => {
                                 drop(startup_sender.send(Err(error.to_string())));
@@ -201,7 +203,11 @@ impl Network {
                     };
                     let peer_node = link.peer_node();
                     let peer_name = link.peer_name().to_owned();
-                    if startup_sender.send(Ok((peer_node, peer_name))).is_err() {
+                    let peer_screen = link.peer_screen().clone();
+                    if startup_sender
+                        .send(Ok((peer_node, peer_name, peer_screen)))
+                        .is_err()
+                    {
                         return;
                     }
                     run_network(
@@ -218,7 +224,7 @@ impl Network {
             .map_err(|error| format!("failed to start network thread: {error}"))?;
 
         match startup_receiver.recv() {
-            Ok(Ok((peer_node, peer_name))) => Ok(Self {
+            Ok(Ok((peer_node, peer_name, peer_screen))) => Ok(Self {
                 commands: commands_sender,
                 events: event_receiver,
                 pending_move,
@@ -226,6 +232,7 @@ impl Network {
                 thread: Some(thread),
                 peer_node,
                 peer_name,
+                peer_screen,
             }),
             Ok(Err(error)) => {
                 drop(thread.join());

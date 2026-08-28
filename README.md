@@ -5,9 +5,9 @@ Windows user session and one macOS user session over a LAN. Crossing a configure
 screen edge transfers mouse movement, buttons, scrolling, and the Windows
 keyboard to macOS; crossing back restores local control.
 
-This repository contains a functional mouse MVP plus the first Windows-to-macOS
-keyboard MVP. It intentionally excludes clipboard sync, relay servers,
-automatic multi-monitor setup, tray UI, installers, and elevated Windows desktops.
+This repository contains a functional mouse MVP, Windows-to-macOS keyboard
+forwarding, and automatic desktop geometry exchange. It intentionally excludes
+clipboard sync, relay servers, tray UI, installers, and elevated Windows desktops.
 
 ## Implemented
 
@@ -21,6 +21,10 @@ automatic multi-monitor setup, tray UI, installers, and elevated Windows desktop
 - Ordered keyboard delivery, forced key release on handback/disconnect, held-key
   transition safety, and `Ctrl+Alt+Shift+Esc` emergency local recovery.
 - Coordinate mapping between differently sized Windows and macOS displays.
+- Automatic resolution, scaling, rotation, and active multi-display desktop
+  bounds detection at startup and after reconnecting.
+- Authenticated desktop-geometry exchange, so neither configuration duplicates
+  the peer's current width, height, origin, orientation, or scale.
 - Native macOS `CGEventTap` capture and marked `CGEventPost` injection.
 - Native Windows `WH_MOUSE_LL` capture and marked `SendInput` injection.
 - Mutually authenticated QUIC/TLS with one explicitly trusted peer certificate.
@@ -102,10 +106,10 @@ GitHub Actions repeats the formatting, static-analysis, test, and release-build
 steps on both macOS and Windows after every push to `main`. A successful run also
 publishes downloadable platform packages under the run's **Artifacts** section.
 
-The scripts deliberately leave these machine-specific decisions to the user:
-enter the real screen geometry, allow inbound UDP ports `43891` and `43892` plus
-TCP port `43893` through Windows Firewall, and grant macOS Accessibility
-permission.
+The scripts deliberately leave firewall and permission decisions to the user:
+allow inbound UDP ports `43891` and `43892` plus TCP port `43893` through Windows
+Firewall, and grant macOS Accessibility permission. Screen geometry is detected
+automatically when `[local.screen]` contains `auto = true`.
 
 ## Pair the two machines
 
@@ -123,9 +127,11 @@ permission.
    ```
 
 2. Edit [the Windows example](examples/windows.toml) and
-   [the macOS example](examples/macos.toml). The two files must use the same
-   screen IDs and geometry, with opposite `layout.peer_on` values. The peer
-   certificate named in each config does not need to exist before pairing.
+   [the macOS example](examples/macos.toml). The two files must use matching
+   screen IDs with opposite `layout.peer_on` values. Keep `auto = true` under
+   each local screen; the peer sends its current desktop geometry after the
+   authenticated connection. The peer certificate named in each config does not
+   need to exist before pairing.
 3. Keep `peer.address = "auto"` on both computers to follow DHCP address changes
    automatically; no IP edit or re-pairing is needed after a reboot. Alternatively,
    set it to the other machine's static LAN address, such as
@@ -258,11 +264,13 @@ before either certificate is saved. Certificates are public; private keys never
 leave their machine. The saved certificate remains the trust anchor for normal
 mutual TLS connections after pairing.
 
-Screen coordinates must match the operating system's logical desktop coordinate
-space. For the single-screen MVP the origin is normally `(0, 0)`. On a Retina
-Mac use the logical resolution shown by macOS, not the doubled backing-pixel
-resolution. Set each screen's `scale` to its OS display scale: for example,
-Windows 200% scaling is `2.0`, while Windows 100% scaling is `1.0`.
+With `local.screen.auto = true`, Windows reads the complete per-monitor-aware
+virtual desktop and macOS reads the union of active CoreGraphics displays.
+Rotation, negative secondary-display origins, Retina/Windows scaling, and
+resolution changes are therefore reflected automatically on startup and after a
+reconnect. The authenticated `Hello` exchange supplies that result to the peer.
+Older manual `origin_x`, `origin_y`, `width`, `height`, and `scale` fields remain
+supported when `auto` is omitted or set to `false`.
 
 Remote absolute movement is emitted every 4–12 ms according to current RTT,
 always using the newest position. Stale movement is discarded during network
@@ -274,9 +282,9 @@ and merged updates. Windows requests 1 ms timer resolution while EdgeMouse is
 running so the 4–12 ms movement schedule does not collapse to the default
 roughly 15.6 ms system timer period.
 
-Both computers must use protocol v2. Versions 0.1.5 through 0.1.16 use protocol
-v2 and will intentionally refuse a connection to a 0.1.4 executable. For the
-best movement behavior, install the latest version on both computers.
+Automatic geometry exchange uses protocol v4, introduced in EdgeMouse 0.3.0.
+Both computers must run 0.3.0 or newer; earlier builds intentionally refuse this
+connection instead of silently using mismatched screen bounds.
 
 ## Verify the source tree
 

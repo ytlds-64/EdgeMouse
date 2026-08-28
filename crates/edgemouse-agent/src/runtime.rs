@@ -1,4 +1,4 @@
-use crate::config::{LoadedConfig, PeerAddress};
+use crate::config::{LoadedConfig, PeerAddress, ResolvedScreen};
 use crate::control::ControlServer;
 use crate::discovery::{
     DISCOVERY_PORT, DiscoveryRequest, discover_trusted_peer, respond_to_trusted_peer,
@@ -10,6 +10,7 @@ use edgemouse_core::{
     MouseCaptureBackend, MouseInjectionBackend, Point, Rect, RemoteMouseEvent, RoutedEvent,
     RoutedKeyboardEvent, ScreenId, Session,
 };
+use edgemouse_protocol::ScreenInfo;
 use edgemouse_protocol::WireMessage;
 use std::error::Error;
 use std::path::Path;
@@ -74,7 +75,24 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         if stopping.load(Ordering::Acquire) {
             return Ok(());
         }
-        let initial_pointer = normalize_initial_pointer(&config, platform::current_pointer()?)?;
+        let detected = if config.local_screen.automatic {
+            let desktop = platform::desktop_geometry()?;
+            println!(
+                "Detected desktop: {:.0}x{:.0} at ({:.0}, {:.0}), {} display(s), scale {:.2}",
+                desktop.bounds.width,
+                desktop.bounds.height,
+                desktop.bounds.origin.x,
+                desktop.bounds.origin.y,
+                desktop.display_count,
+                desktop.scale_factor
+            );
+            Some((desktop.bounds, desktop.scale_factor))
+        } else {
+            None
+        };
+        let local = config.resolve_local_screen(detected)?;
+        let initial_pointer =
+            normalize_initial_pointer(local.screen.bounds, platform::current_pointer()?)?;
         let session_id = new_session_id(config.local_node.0);
         if reconnecting {
             println!("Reconnecting to the trusted peer…");
@@ -122,7 +140,18 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
                 discovery_responder = Some(start_discovery_responder(request)?);
             }
         }
-        let network_result = Network::connect(transport, session_id, Arc::clone(&stopping));
+        let local_screen_info = ScreenInfo {
+            id: local.screen.id,
+            name: local.screen.name.clone(),
+            bounds: local.screen.bounds,
+            scale_factor: local.screen.scale_factor,
+        };
+        let network_result = Network::connect(
+            transport,
+            local_screen_info,
+            session_id,
+            Arc::clone(&stopping),
+        );
         finish_discovery_responder(discovery_responder)?;
         let network = match network_result {
             Ok(network) => network,
@@ -150,7 +179,25 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         }
         backoff.reset();
 
-        match run_connected(&config, network, initial_pointer, session_id, &stopping)? {
+        let topology = config.topology(local.screen.clone(), &network.peer_screen)?;
+        println!(
+            "Peer desktop : {:.0}x{:.0} at ({:.0}, {:.0}), scale {:.2}",
+            network.peer_screen.bounds.width,
+            network.peer_screen.bounds.height,
+            network.peer_screen.bounds.origin.x,
+            network.peer_screen.bounds.origin.y,
+            network.peer_screen.scale_factor
+        );
+
+        match run_connected(
+            &config,
+            &local,
+            topology,
+            network,
+            initial_pointer,
+            session_id,
+            &stopping,
+        )? {
             ConnectionEnd::Stopped => return Ok(()),
             ConnectionEnd::Disconnected(reason) => {
                 reconnecting = true;
@@ -195,25 +242,27 @@ fn finish_discovery_responder(responder: Option<DiscoveryResponder>) -> Result<(
 
 fn run_connected(
     config: &LoadedConfig,
+    local: &ResolvedScreen,
+    topology: edgemouse_core::Topology,
     network: Network,
     initial_pointer: Point,
     session_id: u64,
     stopping: &AtomicBool,
 ) -> Result<ConnectionEnd, Box<dyn Error>> {
-    let mut capture = platform::start_capture(config.local_bounds, config.local_scale)?;
+    let mut capture = platform::start_capture(local.screen.bounds, local.coordinate_scale)?;
     let mut injector = platform::injector(initial_pointer);
     let mut keyboard_capture = platform::start_keyboard_capture()?;
     let mut keyboard_injector = platform::keyboard_injector();
     let mut session = Session::new(
         config.local_node,
-        config.topology.clone(),
-        config.local_screen,
+        topology,
+        local.screen.id,
         initial_pointer,
         config.session,
     )?;
     let mut remote = RemoteReceiver::new(
-        config.local_screen,
-        config.local_bounds,
+        local.screen.id,
+        local.screen.bounds,
         config.session.peer_timeout_ms,
     );
     let clock = Instant::now();
@@ -256,10 +305,10 @@ fn run_connected(
 }
 
 fn normalize_initial_pointer(
-    config: &LoadedConfig,
+    local_bounds: Rect,
     initial_pointer: Point,
 ) -> Result<Point, Box<dyn Error>> {
-    let Some(normalized) = normalize_pointer_to_bounds(config.local_bounds, initial_pointer) else {
+    let Some(normalized) = normalize_pointer_to_bounds(local_bounds, initial_pointer) else {
         return Err(format!(
             "current pointer ({:.1}, {:.1}) is outside configured local screen bounds; check origin_x, origin_y, width, and height",
             initial_pointer.x, initial_pointer.y
