@@ -33,6 +33,19 @@ plist_path="${HOME}/Library/LaunchAgents/${label}.plist"
 log_dir="${project_root}/logs"
 stdout_log="${log_dir}/mac-autostart.out.log"
 stderr_log="${log_dir}/mac-autostart.err.log"
+preferred_signing_identity="${EDGEMOUSE_SIGNING_IDENTITY:-EdgeMouse Local Code Signing}"
+
+resolve_signing_identity() {
+    local identity_line
+    identity_line="$(/usr/bin/security find-identity -v -p codesigning 2>/dev/null | \
+        /usr/bin/grep -F "\"${preferred_signing_identity}\"" | \
+        /usr/bin/head -n 1 || true)"
+    if [[ -n "${identity_line}" ]]; then
+        printf '%s\n' "${identity_line}" | /usr/bin/awk '{print $2}'
+    else
+        printf '%s\n' '-'
+    fi
+}
 
 xml_escape() {
     printf '%s' "$1" | sed \
@@ -66,7 +79,7 @@ validate_installation() {
 }
 
 prepare_app_bundle() {
-    local version
+    local version signing_identity
     version="$("${binary_path}" version | awk '{print $2}')"
     if [[ "${1:-}" != "force" && -x "${app_binary}" ]] && \
         [[ "$("${app_binary}" version)" == "edgemouse ${version}" ]]; then
@@ -76,17 +89,25 @@ prepare_app_bundle() {
     cp "${binary_path}" "${app_binary}"
     chmod 755 "${app_binary}"
     sed "s/@EDGEMOUSE_VERSION@/${version}/g" "${plist_template}" >"${app_plist}"
+    signing_identity="$(resolve_signing_identity)"
+    if [[ "${signing_identity}" == '-' ]]; then
+        echo "Warning: fixed EdgeMouse signing identity was not found; using a temporary ad-hoc signature." >&2
+        echo "Run ./scripts/setup-macos-local-signing.sh install once to preserve Privacy & Security permissions across upgrades." >&2
+    else
+        echo "Signing EdgeMouse with fixed local identity: ${preferred_signing_identity}"
+    fi
     /usr/bin/codesign \
         --force \
-        --sign - \
+        --sign "${signing_identity}" \
         --identifier "${associated_bundle_identifier}" \
         "${app_binary}" >/dev/null
     /usr/bin/codesign \
         --force \
         --deep \
-        --sign - \
+        --sign "${signing_identity}" \
         --identifier "${associated_bundle_identifier}" \
         "${app_bundle}" >/dev/null
+    /usr/bin/codesign --verify --deep --strict "${app_bundle}"
     if ! /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
         -f "${app_bundle}"; then
         echo "Warning: macOS could not refresh the EdgeMouse app registration; login startup can continue." >&2
@@ -170,6 +191,15 @@ show_status() {
     echo "Output log : ${stdout_log}"
     echo "Error log  : ${stderr_log}"
     echo "Application: ${app_bundle}"
+    if [[ -d "${app_bundle}" ]]; then
+        local signing_identity
+        signing_identity="$(resolve_signing_identity)"
+        if [[ "${signing_identity}" == '-' ]]; then
+            echo "Signing    : temporary (permissions may need renewal after upgrades)"
+        else
+            echo "Signing    : ${preferred_signing_identity}"
+        fi
+    fi
 }
 
 case "${action}" in

@@ -222,6 +222,22 @@ automatically discover its trusted peer after either computer receives a new
 DHCP address; Accessibility permits mouse capture and injection. These
 permissions are attributed to EdgeMouse instead of Terminal.
 
+For repeated local development builds, create a fixed signing identity once
+before installing the login agent:
+
+```sh
+./scripts/setup-macos-local-signing.sh install
+./scripts/manage-autostart-macos.sh install ./edgemouse.toml
+```
+
+The signing certificate and private key remain in the current user's login
+keychain and are used only for code signing. The certificate is valid for ten
+years. Switching from an older ad-hoc build to this fixed identity requires one
+final removal and re-addition of EdgeMouse under Accessibility. Later EdgeMouse
+upgrades signed with the same identity retain that permission. Without the
+fixed identity, the installer still works but warns that an ad-hoc signature
+may require Accessibility permission to be renewed after an upgrade.
+
 On Windows PowerShell:
 
 ```powershell
