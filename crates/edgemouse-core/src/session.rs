@@ -1,6 +1,7 @@
 use crate::{
-    Advance, ButtonState, Edge, Effect, InputResult, MouseButton, NodeId, PhysicalMouseEvent,
-    Point, RemoteMouseEvent, RoutedEvent, ScreenId, Topology, TopologyError,
+    Advance, ButtonState, Edge, Effect, InputResult, KeyboardEvent, MouseButton, NodeId,
+    PhysicalMouseEvent, Point, RemoteMouseEvent, RoutedEvent, RoutedKeyboardEvent, ScreenId,
+    Topology, TopologyError,
 };
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -146,6 +147,20 @@ impl Session {
                 horizontal,
                 vertical,
             } => self.handle_wheel(horizontal, vertical),
+        }
+    }
+
+    #[must_use]
+    pub fn handle_keyboard(&mut self, event: KeyboardEvent) -> InputResult {
+        match self.state {
+            ControlState::Local | ControlState::Recovering { .. } => InputResult::pass_through(),
+            ControlState::Remote { peer } => {
+                let sequence = self.next_sequence();
+                InputResult::suppress(vec![Effect::SendKeyboard {
+                    peer,
+                    event: RoutedKeyboardEvent { sequence, event },
+                }])
+            }
         }
     }
 
@@ -400,9 +415,14 @@ impl Session {
     }
 
     fn next_remote_event(&mut self, event: RemoteMouseEvent) -> RoutedEvent {
+        let sequence = self.next_sequence();
+        RoutedEvent { sequence, event }
+    }
+
+    fn next_sequence(&mut self) -> u64 {
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.wrapping_add(1).max(1);
-        RoutedEvent { sequence, event }
+        sequence
     }
 
     fn begin_recovery(&mut self, peer: NodeId) -> Vec<Effect> {
@@ -489,7 +509,7 @@ impl From<TopologyError> for SessionError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{InputDisposition, Rect, Screen, Vector};
+    use crate::{InputDisposition, KeyCode, KeyState, KeyboardEvent, Rect, Screen, Vector};
 
     const LOCAL: NodeId = NodeId(10);
     const REMOTE: NodeId = NodeId(20);
@@ -566,6 +586,46 @@ mod tests {
                     ..
                 }
             }
+        ));
+    }
+
+    #[test]
+    fn keyboard_follows_remote_mouse_control() {
+        let mut session = session();
+        let local = session.handle_keyboard(KeyboardEvent {
+            key: KeyCode::A,
+            state: KeyState::Pressed,
+            repeat: false,
+        });
+        assert_eq!(local.disposition, InputDisposition::PassThrough);
+
+        session
+            .handle_input(
+                PhysicalMouseEvent::Move {
+                    movement: Vector::new(5.0, 0.0),
+                },
+                100,
+            )
+            .unwrap();
+        let remote = session.handle_keyboard(KeyboardEvent {
+            key: KeyCode::A,
+            state: KeyState::Pressed,
+            repeat: true,
+        });
+        assert_eq!(remote.disposition, InputDisposition::Suppress);
+        assert!(matches!(
+            remote.effects.as_slice(),
+            [Effect::SendKeyboard {
+                peer: REMOTE,
+                event: RoutedKeyboardEvent {
+                    event: KeyboardEvent {
+                        key: KeyCode::A,
+                        state: KeyState::Pressed,
+                        repeat: true,
+                    },
+                    ..
+                }
+            }]
         ));
     }
 

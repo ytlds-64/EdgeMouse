@@ -389,6 +389,19 @@ fn print_effect(effect: Effect) -> Result<(), Box<dyn Error>> {
                 event.event
             );
         }
+        Effect::SendKeyboard { peer, event } => {
+            let frame = encode_frame(&WireMessage::Keyboard {
+                session_id: 1,
+                event,
+            })?;
+            println!(
+                "  keyboard => peer={}, sequence={}, encoded={} bytes, event={:?}",
+                peer.0,
+                event.sequence,
+                frame.len(),
+                event.event
+            );
+        }
         other => println!("  platform => {other:?}"),
     }
     Ok(())

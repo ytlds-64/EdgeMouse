@@ -14,11 +14,12 @@ mod topology;
 
 pub use geometry::{Edge, GeometryError, Point, Rect, Vector};
 pub use input::{
-    ButtonState, Effect, InputDisposition, InputResult, MouseButton, PhysicalMouseEvent,
-    RemoteMouseEvent, RoutedEvent,
+    ButtonState, Effect, InputDisposition, InputResult, KeyCode, KeyState, KeyboardEvent,
+    MouseButton, PhysicalMouseEvent, RemoteMouseEvent, RoutedEvent, RoutedKeyboardEvent,
 };
 pub use platform::{
-    CaptureMode, MouseCaptureBackend, MouseInjectionBackend, PermissionState, PlatformError,
+    CaptureMode, KeyboardCaptureBackend, KeyboardInjectionBackend, MouseCaptureBackend,
+    MouseInjectionBackend, PermissionState, PlatformError,
 };
 pub use session::{ControlState, Session, SessionConfig, SessionError};
 pub use topology::{

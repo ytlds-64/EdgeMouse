@@ -7,12 +7,13 @@
 #![forbid(unsafe_code)]
 
 use edgemouse_core::{
-    ButtonState, MouseButton, NodeId, Point, RemoteMouseEvent, RoutedEvent, ScreenId,
+    ButtonState, KeyCode, KeyState, KeyboardEvent, MouseButton, NodeId, Point, RemoteMouseEvent,
+    RoutedEvent, RoutedKeyboardEvent, ScreenId,
 };
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 pub const HEADER_LEN: usize = 12;
 pub const MAX_FRAME_LEN: usize = 64 * 1024;
 pub const MOUSE_DATAGRAM_FRAME_LEN: usize = HEADER_LEN + 6 * std::mem::size_of::<u64>();
@@ -28,6 +29,10 @@ pub enum WireMessage {
     Mouse {
         session_id: u64,
         event: RoutedEvent,
+    },
+    Keyboard {
+        session_id: u64,
+        event: RoutedKeyboardEvent,
     },
     /// An unreliable absolute movement update. `after_sequence` identifies the
     /// newest reliable mouse event that must be applied before this position.
@@ -124,6 +129,16 @@ pub fn encode_frame(message: &WireMessage) -> Result<Vec<u8>, EncodeError> {
             put_u64(&mut payload, event.sequence);
             encode_mouse_payload(&mut payload, event.event)?;
         }
+        WireMessage::Keyboard { session_id, event } => {
+            put_u64(&mut payload, *session_id);
+            put_u64(&mut payload, event.sequence);
+            put_u16(&mut payload, event.event.key.usage());
+            payload.push(match event.event.state {
+                KeyState::Pressed => 1,
+                KeyState::Released => 0,
+            });
+            payload.push(u8::from(event.event.repeat));
+        }
         WireMessage::MouseDatagram {
             session_id,
             after_sequence,
@@ -206,6 +221,7 @@ pub fn decode_frame(frame: &[u8]) -> Result<WireMessage, DecodeError> {
             session_id: payload.u64()?,
         },
         10 => decode_mouse_datagram(&mut payload)?,
+        11 => decode_keyboard(&mut payload)?,
         other => return Err(DecodeError::InvalidTag(other)),
     };
     if !payload.is_empty() {
@@ -245,6 +261,7 @@ fn tag_for(message: &WireMessage) -> u8 {
             RemoteMouseEvent::ReleaseAll => 7,
         },
         WireMessage::MouseDatagram { .. } => 10,
+        WireMessage::Keyboard { .. } => 11,
         WireMessage::Heartbeat { .. } => 8,
         WireMessage::Goodbye { .. } => 9,
     }
@@ -341,6 +358,32 @@ fn decode_mouse_datagram(payload: &mut Reader<'_>) -> Result<WireMessage, Decode
         sequence,
         screen,
         position,
+    })
+}
+
+fn decode_keyboard(payload: &mut Reader<'_>) -> Result<WireMessage, DecodeError> {
+    let session_id = payload.u64()?;
+    let sequence = payload.u64()?;
+    let key = KeyCode::from_usage(payload.u16()?).ok_or(DecodeError::InvalidEnum)?;
+    let state = match payload.u8()? {
+        0 => KeyState::Released,
+        1 => KeyState::Pressed,
+        _ => return Err(DecodeError::InvalidEnum),
+    };
+    let repeat = match payload.u8()? {
+        0 => false,
+        1 => true,
+        _ => return Err(DecodeError::InvalidEnum),
+    };
+    if state == KeyState::Released && repeat {
+        return Err(DecodeError::InvalidEnum);
+    }
+    Ok(WireMessage::Keyboard {
+        session_id,
+        event: RoutedKeyboardEvent {
+            sequence,
+            event: KeyboardEvent { key, state, repeat },
+        },
     })
 }
 
@@ -511,6 +554,17 @@ mod tests {
             sequence: 123,
             screen: ScreenId(7),
             position: Point::new(100.25, 200.75),
+        });
+        round_trip(WireMessage::Keyboard {
+            session_id: 99,
+            event: RoutedKeyboardEvent {
+                sequence: 124,
+                event: KeyboardEvent {
+                    key: KeyCode::LEFT_META,
+                    state: KeyState::Pressed,
+                    repeat: false,
+                },
+            },
         });
         round_trip(WireMessage::Heartbeat {
             session_id: 99,

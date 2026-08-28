@@ -1,19 +1,23 @@
 # EdgeMouse
 
-EdgeMouse is a command-line software KVM that moves one mouse between one
+EdgeMouse is a command-line software KVM that moves input between one
 Windows user session and one macOS user session over a LAN. Crossing a configured
-screen edge transfers movement, buttons, and scrolling to the other machine;
-crossing back restores local control.
+screen edge transfers mouse movement, buttons, scrolling, and the Windows
+keyboard to macOS; crossing back restores local control.
 
-This repository contains a functional mouse-only MVP. It intentionally excludes
-keyboard input, clipboard sync, relay servers, multi-monitor setup,
-tray UI, installers, and elevated Windows desktops.
+This repository contains a functional mouse MVP plus the first Windows-to-macOS
+keyboard MVP. It intentionally excludes clipboard sync, relay servers,
+automatic multi-monitor setup, tray UI, installers, and elevated Windows desktops.
 
 ## Implemented
 
 - Left, right, top, or bottom edge switching with entry hysteresis.
 - Primary, secondary, middle, back, and forward buttons.
 - Vertical and horizontal scrolling.
+- Windows keyboard forwarding to macOS while the Windows mouse owns the Mac,
+  including modifiers, navigation, function keys, numpad keys, and key repeat.
+- Ordered keyboard delivery, forced key release on handback/disconnect, held-key
+  transition safety, and `Ctrl+Alt+Shift+Esc` emergency local recovery.
 - Coordinate mapping between differently sized Windows and macOS displays.
 - Native macOS `CGEventTap` capture and marked `CGEventPost` injection.
 - Native Windows `WH_MOUSE_LL` capture and marked `SendInput` injection.
@@ -37,7 +41,9 @@ tray UI, installers, and elevated Windows desktops.
   commands.
 
 Windows Raw Input capture remains a future high-polling-rate optimization. The
-MVP uses the low-level hook and a fixed capture anchor while control is remote.
+MVP uses low-level mouse and keyboard hooks and a fixed mouse capture anchor
+while control is remote. Keyboard capture in the reverse macOS-to-Windows
+direction is not enabled yet.
 
 ## Build
 

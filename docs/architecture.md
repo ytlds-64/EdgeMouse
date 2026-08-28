@@ -175,4 +175,5 @@ restored during transitions and teardown.
 3. Put the short-code pairing flow into a tray/settings UI.
 4. Add signed installers and diagnostics export around the existing per-user
    launch-at-login scripts.
-5. Only then consider keyboard and clipboard channels.
+5. Extend the current Windows-to-macOS keyboard MVP with optional semantic
+   modifier mapping and macOS-to-Windows capture, then consider clipboard sync.

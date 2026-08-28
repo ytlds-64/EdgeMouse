@@ -6,8 +6,9 @@ use crate::discovery::{
 use crate::network::{Network, NetworkEvent};
 use crate::platform;
 use edgemouse_core::{
-    CaptureMode, ControlState, Effect, MouseCaptureBackend, MouseInjectionBackend, Point, Rect,
-    RemoteMouseEvent, RoutedEvent, ScreenId, Session,
+    CaptureMode, ControlState, Effect, KeyboardCaptureBackend, KeyboardInjectionBackend,
+    MouseCaptureBackend, MouseInjectionBackend, Point, Rect, RemoteMouseEvent, RoutedEvent,
+    RoutedKeyboardEvent, ScreenId, Session,
 };
 use edgemouse_protocol::WireMessage;
 use std::error::Error;
@@ -201,6 +202,8 @@ fn run_connected(
 ) -> Result<ConnectionEnd, Box<dyn Error>> {
     let mut capture = platform::start_capture(config.local_bounds, config.local_scale)?;
     let mut injector = platform::injector(initial_pointer);
+    let mut keyboard_capture = platform::start_keyboard_capture()?;
+    let mut keyboard_injector = platform::keyboard_injector();
     let mut session = Session::new(
         config.local_node,
         config.topology.clone(),
@@ -220,6 +223,8 @@ fn run_connected(
         &network,
         &mut capture,
         &mut injector,
+        &mut keyboard_capture,
+        &mut keyboard_injector,
         &mut session,
         &mut remote,
         session_id,
@@ -232,6 +237,7 @@ fn run_connected(
         effects,
         &network,
         &mut capture,
+        &mut keyboard_capture,
         &mut session,
         session_id,
     ));
@@ -239,7 +245,9 @@ fn run_connected(
         drop(session.complete_recovery());
     }
     drop(capture.set_mode(CaptureMode::Local { restore: None }));
+    drop(keyboard_capture.set_remote(false));
     drop(injector.release_all());
+    drop(keyboard_injector.release_all());
     let _ = remote.reset(&mut injector);
 
     result
@@ -293,6 +301,8 @@ fn run_loop(
     network: &Network,
     capture: &mut platform::NativeMouseCapture,
     injector: &mut platform::NativeMouseInjector,
+    keyboard_capture: &mut platform::NativeKeyboardCapture,
+    keyboard_injector: &mut platform::NativeKeyboardInjector,
     session: &mut Session,
     remote: &mut RemoteReceiver,
     session_id: u64,
@@ -314,8 +324,24 @@ fn run_loop(
                     session_id: remote_session,
                     event,
                 }) => {
+                    if matches!(
+                        event.event,
+                        RemoteMouseEvent::Enter { .. }
+                            | RemoteMouseEvent::Leave
+                            | RemoteMouseEvent::ReleaseAll
+                    ) {
+                        keyboard_injector.release_all()?;
+                    }
                     let transition = remote.handle(remote_session, event, injector, now_ms)?;
                     apply_remote_transition(transition, remote.local_screen, capture, session)?;
+                    let transition = remote.take_ready_datagram(injector, now_ms)?;
+                    apply_remote_transition(transition, remote.local_screen, capture, session)?;
+                }
+                NetworkEvent::Message(WireMessage::Keyboard {
+                    session_id: remote_session,
+                    event,
+                }) => {
+                    remote.handle_keyboard(remote_session, event, keyboard_injector, now_ms)?;
                     let transition = remote.take_ready_datagram(injector, now_ms)?;
                     apply_remote_transition(transition, remote.local_screen, capture, session)?;
                 }
@@ -356,6 +382,7 @@ fn run_loop(
                     );
                 }
                 NetworkEvent::Disconnected(reason) => {
+                    drop(keyboard_injector.release_all());
                     if let Some(position) = remote.reset(injector) {
                         restore_incoming_control(remote.local_screen, position, capture, session)?;
                     }
@@ -365,6 +392,7 @@ fn run_loop(
         }
 
         if let Some(position) = remote.poll_timeout(injector, now_ms)? {
+            keyboard_injector.release_all()?;
             restore_incoming_control(remote.local_screen, position, capture, session)?;
             return Ok(ConnectionEnd::Disconnected(
                 "incoming remote control timed out".to_owned(),
@@ -375,7 +403,14 @@ fn run_loop(
         let peer_timed_out = timeout_effects
             .iter()
             .any(|effect| matches!(effect, Effect::PeerTimedOut { .. }));
-        apply_effects(timeout_effects, network, capture, session, session_id)?;
+        apply_effects(
+            timeout_effects,
+            network,
+            capture,
+            keyboard_capture,
+            session,
+            session_id,
+        )?;
         if peer_timed_out {
             return Ok(ConnectionEnd::Disconnected(
                 "trusted peer heartbeat timed out".to_owned(),
@@ -383,13 +418,46 @@ fn run_loop(
         }
 
         let mut handled_input = false;
+        if keyboard_capture.take_emergency_release() {
+            let effects = session.disconnect_peer(network.peer_node);
+            apply_effects(
+                effects,
+                network,
+                capture,
+                keyboard_capture,
+                session,
+                session_id,
+            )?;
+            return Ok(ConnectionEnd::Disconnected(
+                "emergency keyboard release requested".to_owned(),
+            ));
+        }
         while let Some(event) = capture.try_next_event()? {
             handled_input = true;
             if remote.is_active() {
                 continue;
             }
             let result = session.handle_input(event, now_ms)?;
-            apply_effects(result.effects, network, capture, session, session_id)?;
+            apply_effects(
+                result.effects,
+                network,
+                capture,
+                keyboard_capture,
+                session,
+                session_id,
+            )?;
+        }
+        while let Some(event) = keyboard_capture.try_next_event()? {
+            handled_input = true;
+            let result = session.handle_keyboard(event);
+            apply_effects(
+                result.effects,
+                network,
+                capture,
+                keyboard_capture,
+                session,
+                session_id,
+            )?;
         }
         if !handled_input {
             std::thread::sleep(IDLE_POLL_INTERVAL);
@@ -446,18 +514,21 @@ fn apply_effects(
     effects: Vec<Effect>,
     network: &Network,
     capture: &mut platform::NativeMouseCapture,
+    keyboard_capture: &mut platform::NativeKeyboardCapture,
     session: &mut Session,
     session_id: u64,
 ) -> Result<(), Box<dyn Error>> {
     for effect in effects {
         match effect {
             Effect::CapturePointer { anchor } => {
+                keyboard_capture.set_remote(true)?;
                 capture.set_mode(CaptureMode::Remote { anchor })?;
-                println!("Mouse control handed to peer");
+                println!("Mouse and keyboard control handed to peer");
             }
             Effect::ReleasePointer {
                 restore_position, ..
             } => {
+                keyboard_capture.set_remote(false)?;
                 capture.set_mode(CaptureMode::Local {
                     restore: Some(restore_position),
                 })?;
@@ -471,6 +542,12 @@ fn apply_effects(
                     return Err("routing requested an unknown peer".into());
                 }
                 network.send(WireMessage::Mouse { session_id, event })?;
+            }
+            Effect::SendKeyboard { peer, event } => {
+                if peer != network.peer_node {
+                    return Err("keyboard routing requested an unknown peer".into());
+                }
+                network.send(WireMessage::Keyboard { session_id, event })?;
             }
             Effect::PeerTimedOut { peer } => {
                 eprintln!(
@@ -606,6 +683,29 @@ impl RemoteReceiver {
             }
             _ => Ok(RemoteTransition::None),
         }
+    }
+
+    fn handle_keyboard(
+        &mut self,
+        session_id: u64,
+        routed: RoutedKeyboardEvent,
+        injector: &mut impl KeyboardInjectionBackend,
+        now_ms: u64,
+    ) -> Result<(), Box<dyn Error>> {
+        if session_id == 0 || routed.sequence == 0 {
+            return Err("peer sent a zero keyboard session or sequence number".into());
+        }
+        if self.active_session != Some(session_id) {
+            return Err("peer sent keyboard input before entering the local screen".into());
+        }
+        if routed.sequence <= self.last_sequence {
+            return Ok(());
+        }
+        injector.inject(routed.event)?;
+        self.last_sequence = routed.sequence;
+        self.last_reliable_sequence = routed.sequence;
+        self.last_activity_ms = Some(now_ms);
+        Ok(())
     }
 
     fn handle_datagram(
@@ -812,7 +912,10 @@ fn new_session_id(node: u128) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use edgemouse_core::{ButtonState, MouseButton, PermissionState, PlatformError, Point};
+    use edgemouse_core::{
+        ButtonState, KeyCode, KeyState, KeyboardEvent, MouseButton, PermissionState, PlatformError,
+        Point,
+    };
 
     #[derive(Default)]
     struct FakeInjector {
@@ -826,6 +929,28 @@ mod tests {
         }
 
         fn inject(&mut self, event: RemoteMouseEvent) -> Result<(), PlatformError> {
+            self.events.push(event);
+            Ok(())
+        }
+
+        fn release_all(&mut self) -> Result<(), PlatformError> {
+            self.releases += 1;
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeKeyboardInjector {
+        events: Vec<KeyboardEvent>,
+        releases: usize,
+    }
+
+    impl KeyboardInjectionBackend for FakeKeyboardInjector {
+        fn permission_state(&self) -> PermissionState {
+            PermissionState::NotRequired
+        }
+
+        fn inject(&mut self, event: KeyboardEvent) -> Result<(), PlatformError> {
             self.events.push(event);
             Ok(())
         }
@@ -930,6 +1055,41 @@ mod tests {
             Some(Point::new(5.0, 5.0))
         );
         assert!(injector.releases >= 2);
+    }
+
+    #[test]
+    fn keyboard_requires_an_active_mouse_handoff_and_shares_ordering() {
+        let mut receiver = remote_receiver(1_500);
+        let mut mouse = FakeInjector::default();
+        let mut keyboard = FakeKeyboardInjector::default();
+        let key = RoutedKeyboardEvent {
+            sequence: 2,
+            event: KeyboardEvent {
+                key: KeyCode::A,
+                state: KeyState::Pressed,
+                repeat: false,
+            },
+        };
+        assert!(receiver.handle_keyboard(9, key, &mut keyboard, 5).is_err());
+        receiver
+            .handle(
+                9,
+                RoutedEvent {
+                    sequence: 1,
+                    event: RemoteMouseEvent::Enter {
+                        screen: ScreenId(7),
+                        position: Point::new(5.0, 5.0),
+                    },
+                },
+                &mut mouse,
+                10,
+            )
+            .unwrap();
+        receiver.handle_keyboard(9, key, &mut keyboard, 20).unwrap();
+        receiver.handle_keyboard(9, key, &mut keyboard, 21).unwrap();
+        assert_eq!(keyboard.events, vec![key.event]);
+        assert_eq!(receiver.last_sequence, 2);
+        assert_eq!(receiver.last_reliable_sequence, 2);
     }
 
     #[test]

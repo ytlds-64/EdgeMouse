@@ -511,6 +511,7 @@ fn into_mouse_datagram(message: WireMessage, after_sequence: u64) -> Result<Wire
 fn reliable_mouse_sequence(message: &WireMessage) -> Option<u64> {
     match message {
         WireMessage::Mouse { event, .. } => Some(event.sequence),
+        WireMessage::Keyboard { event, .. } => Some(event.sequence),
         _ => None,
     }
 }

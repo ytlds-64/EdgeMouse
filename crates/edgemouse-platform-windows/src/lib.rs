@@ -3,7 +3,8 @@
 #![cfg(target_os = "windows")]
 
 use edgemouse_core::{
-    ButtonState, CaptureMode, MouseButton, MouseCaptureBackend, MouseInjectionBackend,
+    ButtonState, CaptureMode, KeyCode, KeyState, KeyboardCaptureBackend, KeyboardEvent,
+    KeyboardInjectionBackend, MouseButton, MouseCaptureBackend, MouseInjectionBackend,
     PermissionState, PhysicalMouseEvent, PlatformError, Point, RemoteMouseEvent, Vector,
 };
 use std::collections::{BTreeSet, VecDeque};
@@ -15,6 +16,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 
 const WH_MOUSE_LL: i32 = 14;
+const WH_KEYBOARD_LL: i32 = 13;
 const HC_ACTION: i32 = 0;
 const WM_QUIT: u32 = 0x0012;
 const WM_MOUSEMOVE: u32 = 0x0200;
@@ -28,9 +30,15 @@ const WM_MOUSEWHEEL: u32 = 0x020a;
 const WM_XBUTTONDOWN: u32 = 0x020b;
 const WM_XBUTTONUP: u32 = 0x020c;
 const WM_MOUSEHWHEEL: u32 = 0x020e;
+const WM_KEYDOWN: u32 = 0x0100;
+const WM_KEYUP: u32 = 0x0101;
+const WM_SYSKEYDOWN: u32 = 0x0104;
+const WM_SYSKEYUP: u32 = 0x0105;
 const PM_NOREMOVE: u32 = 0;
 
 const LLMHF_INJECTED: u32 = 0x0000_0001;
+const LLKHF_EXTENDED: u32 = 0x0000_0001;
+const LLKHF_INJECTED: u32 = 0x0000_0010;
 const XBUTTON1: u16 = 1;
 const XBUTTON2: u16 = 2;
 const WHEEL_DELTA: f64 = 120.0;
@@ -38,6 +46,9 @@ const EVENT_MARKER: usize = 0x4544_4745;
 const CAPTURE_QUEUE_CAPACITY: usize = 4_096;
 
 const INPUT_MOUSE: u32 = 0;
+const INPUT_KEYBOARD: u32 = 1;
+const KEYEVENTF_EXTENDEDKEY: u32 = 0x0001;
+const KEYEVENTF_KEYUP: u32 = 0x0002;
 const MOUSEEVENTF_MOVE: u32 = 0x0001;
 const MOUSEEVENTF_LEFTDOWN: u32 = 0x0002;
 const MOUSEEVENTF_LEFTUP: u32 = 0x0004;
@@ -74,6 +85,15 @@ struct MouseHookData {
 }
 
 #[repr(C)]
+struct KeyboardHookData {
+    virtual_key: u32,
+    scan_code: u32,
+    flags: u32,
+    time: u32,
+    extra_info: usize,
+}
+
+#[repr(C)]
 struct Message {
     window: *mut c_void,
     message: u32,
@@ -96,8 +116,19 @@ struct MouseInput {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
+struct KeyboardInput {
+    virtual_key: u16,
+    scan_code: u16,
+    flags: u32,
+    time: u32,
+    extra_info: usize,
+}
+
+#[repr(C)]
 union InputValue {
     mouse: MouseInput,
+    keyboard: KeyboardInput,
 }
 
 #[repr(C)]
@@ -156,6 +187,22 @@ struct CallbackState {
 }
 
 static CALLBACK_STATE: AtomicPtr<CallbackState> = AtomicPtr::new(ptr::null_mut());
+static KEYBOARD_CALLBACK_STATE: AtomicPtr<KeyboardCallbackState> = AtomicPtr::new(ptr::null_mut());
+
+#[derive(Default)]
+struct KeyboardRoutingState {
+    remote: bool,
+    local_pressed: BTreeSet<KeyCode>,
+    captured_pressed: BTreeSet<KeyCode>,
+    passthrough_pressed: BTreeSet<KeyCode>,
+}
+
+struct KeyboardCallbackState {
+    sender: mpsc::SyncSender<KeyboardEvent>,
+    routing: Arc<Mutex<KeyboardRoutingState>>,
+    overflowed: Arc<AtomicBool>,
+    emergency_release: Arc<AtomicBool>,
+}
 
 pub fn current_pointer() -> Result<Point, PlatformError> {
     let mut point = PointI32 { x: 0, y: 0 };
@@ -374,6 +421,127 @@ impl Drop for WindowsMouseCapture {
     }
 }
 
+/// A low-level keyboard hook that only suppresses keys while this computer's
+/// pointer is controlled by the peer. Keys already held during a handoff keep
+/// passing through until released, preventing stuck local modifiers.
+pub struct WindowsKeyboardCapture {
+    receiver: mpsc::Receiver<KeyboardEvent>,
+    routing: Arc<Mutex<KeyboardRoutingState>>,
+    overflowed: Arc<AtomicBool>,
+    emergency_release: Arc<AtomicBool>,
+    thread_id: u32,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl WindowsKeyboardCapture {
+    pub fn start() -> Result<Self, PlatformError> {
+        if !KEYBOARD_CALLBACK_STATE.load(Ordering::Acquire).is_null() {
+            return Err(PlatformError::new(
+                "only one Windows keyboard capture instance is supported",
+            ));
+        }
+        let (event_sender, event_receiver) = mpsc::sync_channel(CAPTURE_QUEUE_CAPACITY);
+        let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
+        let routing = Arc::new(Mutex::new(KeyboardRoutingState::default()));
+        let overflowed = Arc::new(AtomicBool::new(false));
+        let emergency_release = Arc::new(AtomicBool::new(false));
+        let thread_routing = Arc::clone(&routing);
+        let thread_overflowed = Arc::clone(&overflowed);
+        let thread_emergency = Arc::clone(&emergency_release);
+        let thread = std::thread::Builder::new()
+            .name("edgemouse-win32-keyboard-hook".to_owned())
+            .spawn(move || {
+                run_keyboard_hook_thread(
+                    event_sender,
+                    thread_routing,
+                    thread_overflowed,
+                    thread_emergency,
+                    |result| drop(startup_sender.send(result)),
+                );
+            })
+            .map_err(|error| {
+                PlatformError::new(format!("failed to start keyboard hook: {error}"))
+            })?;
+        let thread_id = startup_receiver
+            .recv()
+            .map_err(|_| PlatformError::new("keyboard hook exited during startup"))??;
+        Ok(Self {
+            receiver: event_receiver,
+            routing,
+            overflowed,
+            emergency_release,
+            thread_id,
+            thread: Some(thread),
+        })
+    }
+
+    fn discard_queue(&mut self) -> Result<(), PlatformError> {
+        loop {
+            match self.receiver.try_recv() {
+                Ok(_) => {}
+                Err(mpsc::TryRecvError::Empty) => return Ok(()),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(PlatformError::new("Windows keyboard hook stopped"));
+                }
+            }
+        }
+    }
+}
+
+impl KeyboardCaptureBackend for WindowsKeyboardCapture {
+    fn permission_state(&self) -> PermissionState {
+        PermissionState::NotRequired
+    }
+
+    fn set_remote(&mut self, remote: bool) -> Result<(), PlatformError> {
+        self.discard_queue()?;
+        let mut routing = self
+            .routing
+            .lock()
+            .map_err(|_| PlatformError::new("Windows keyboard routing lock was poisoned"))?;
+        if remote && !routing.remote {
+            let local_pressed = std::mem::take(&mut routing.local_pressed);
+            routing.passthrough_pressed.extend(local_pressed);
+        }
+        routing.remote = remote;
+        Ok(())
+    }
+
+    fn try_next_event(&mut self) -> Result<Option<KeyboardEvent>, PlatformError> {
+        if self.overflowed.swap(false, Ordering::AcqRel) {
+            return Err(PlatformError::new(
+                "Windows keyboard capture queue overflowed; local input was released",
+            ));
+        }
+        match self.receiver.try_recv() {
+            Ok(event) => Ok(Some(event)),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err(PlatformError::new("Windows keyboard hook stopped"))
+            }
+        }
+    }
+
+    fn take_emergency_release(&self) -> bool {
+        self.emergency_release.swap(false, Ordering::AcqRel)
+    }
+}
+
+impl Drop for WindowsKeyboardCapture {
+    fn drop(&mut self) {
+        if let Ok(mut routing) = self.routing.lock() {
+            routing.remote = false;
+        }
+        if self.thread_id != 0 {
+            // SAFETY: thread_id belongs to the live message-loop thread.
+            unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0) };
+        }
+        if let Some(thread) = self.thread.take() {
+            drop(thread.join());
+        }
+    }
+}
+
 /// Injects marked absolute pointer, button, and wheel events with `SendInput`.
 pub struct WindowsMouseInjector {
     position: Point,
@@ -501,6 +669,91 @@ impl MouseInjectionBackend for WindowsMouseInjector {
                 first_error.get_or_insert(error);
             }
         }
+        if let Some(error) = first_error {
+            Err(error)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct WindowsKeyboardInjector {
+    pressed: BTreeSet<KeyCode>,
+}
+
+impl WindowsKeyboardInjector {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            pressed: BTreeSet::new(),
+        }
+    }
+
+    fn send(&mut self, event: KeyboardEvent) -> Result<(), PlatformError> {
+        let (virtual_key, extended) = windows_virtual_key(event.key).ok_or_else(|| {
+            PlatformError::new(format!(
+                "Windows has no mapping for keyboard usage {:#06x}",
+                event.key.usage()
+            ))
+        })?;
+        let mut flags = if extended { KEYEVENTF_EXTENDEDKEY } else { 0 };
+        if event.state == KeyState::Released {
+            flags |= KEYEVENTF_KEYUP;
+        }
+        let input = Input {
+            input_type: INPUT_KEYBOARD,
+            value: InputValue {
+                keyboard: KeyboardInput {
+                    virtual_key,
+                    scan_code: 0,
+                    flags,
+                    time: 0,
+                    extra_info: EVENT_MARKER,
+                },
+            },
+        };
+        // SAFETY: input points to one initialized INPUT value for the call.
+        let sent = unsafe { SendInput(1, &raw const input, size_of::<Input>() as i32) };
+        if sent != 1 {
+            return Err(PlatformError::new(
+                "SendInput keyboard injection failed; UIPI may be blocking the target",
+            ));
+        }
+        match event.state {
+            KeyState::Pressed => {
+                self.pressed.insert(event.key);
+            }
+            KeyState::Released => {
+                self.pressed.remove(&event.key);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl KeyboardInjectionBackend for WindowsKeyboardInjector {
+    fn permission_state(&self) -> PermissionState {
+        PermissionState::NotRequired
+    }
+
+    fn inject(&mut self, event: KeyboardEvent) -> Result<(), PlatformError> {
+        self.send(event)
+    }
+
+    fn release_all(&mut self) -> Result<(), PlatformError> {
+        let pressed: Vec<_> = self.pressed.iter().copied().collect();
+        let mut first_error = None;
+        for key in pressed {
+            if let Err(error) = self.send(KeyboardEvent {
+                key,
+                state: KeyState::Released,
+                repeat: false,
+            }) {
+                first_error.get_or_insert(error);
+            }
+        }
+        self.pressed.clear();
         if let Some(error) = first_error {
             Err(error)
         } else {
@@ -700,6 +953,332 @@ fn hook_event(
     }
 }
 
+fn run_keyboard_hook_thread(
+    sender: mpsc::SyncSender<KeyboardEvent>,
+    routing: Arc<Mutex<KeyboardRoutingState>>,
+    overflowed: Arc<AtomicBool>,
+    emergency_release: Arc<AtomicBool>,
+    report_startup: impl FnOnce(Result<u32, PlatformError>),
+) {
+    let state = Box::new(KeyboardCallbackState {
+        sender,
+        routing,
+        overflowed,
+        emergency_release,
+    });
+    let state_ptr = Box::into_raw(state);
+    if KEYBOARD_CALLBACK_STATE
+        .compare_exchange(
+            ptr::null_mut(),
+            state_ptr,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_err()
+    {
+        report_startup(Err(PlatformError::new(
+            "another Windows keyboard hook is already active",
+        )));
+        // SAFETY: The pointer was never published by this thread.
+        drop(unsafe { Box::from_raw(state_ptr) });
+        return;
+    }
+    // SAFETY: The callback has static lifetime and low-level hooks accept a null module handle.
+    let hook = unsafe {
+        SetWindowsHookExW(
+            WH_KEYBOARD_LL,
+            Some(keyboard_hook_callback),
+            ptr::null_mut(),
+            0,
+        )
+    };
+    if hook.is_null() {
+        KEYBOARD_CALLBACK_STATE.store(ptr::null_mut(), Ordering::Release);
+        report_startup(Err(PlatformError::new(
+            "SetWindowsHookExW failed for keyboard capture",
+        )));
+        // SAFETY: No callback can run because hook creation failed.
+        drop(unsafe { Box::from_raw(state_ptr) });
+        return;
+    }
+    let mut message = Message {
+        window: ptr::null_mut(),
+        message: 0,
+        w_param: 0,
+        l_param: 0,
+        time: 0,
+        point: PointI32 { x: 0, y: 0 },
+        private: 0,
+    };
+    // SAFETY: PeekMessage creates this thread's message queue without removing a message.
+    unsafe { PeekMessageW(&raw mut message, ptr::null_mut(), 0, 0, PM_NOREMOVE) };
+    // SAFETY: Returns the ID of this live thread.
+    report_startup(Ok(unsafe { GetCurrentThreadId() }));
+    loop {
+        // SAFETY: message is writable storage owned by this message loop.
+        let result = unsafe { GetMessageW(&raw mut message, ptr::null_mut(), 0, 0) };
+        if result <= 0 {
+            break;
+        }
+        // SAFETY: message was initialized by GetMessageW.
+        unsafe {
+            TranslateMessage(&raw const message);
+            DispatchMessageW(&raw const message);
+        }
+    }
+    KEYBOARD_CALLBACK_STATE.store(ptr::null_mut(), Ordering::Release);
+    // SAFETY: The message loop has stopped and this thread owns hook and state.
+    unsafe {
+        UnhookWindowsHookEx(hook);
+        drop(Box::from_raw(state_ptr));
+    }
+}
+
+unsafe extern "system" fn keyboard_hook_callback(
+    code: i32,
+    w_param: usize,
+    l_param: isize,
+) -> isize {
+    if code != HC_ACTION || l_param == 0 {
+        // SAFETY: Forwarding unknown/non-action callbacks is required by the hook contract.
+        return unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) };
+    }
+    let state_ptr = KEYBOARD_CALLBACK_STATE.load(Ordering::Acquire);
+    if state_ptr.is_null() {
+        // SAFETY: No local state exists, so forward the callback unchanged.
+        return unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) };
+    }
+    // SAFETY: The hook thread keeps both pointers alive throughout callback execution.
+    let state = unsafe { &*state_ptr };
+    let data = unsafe { &*(l_param as *const KeyboardHookData) };
+    if data.extra_info == EVENT_MARKER || data.flags & LLKHF_INJECTED != 0 {
+        // SAFETY: Synthetic input must remain visible to other hooks and applications.
+        return unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) };
+    }
+    let key_state = match w_param as u32 {
+        WM_KEYDOWN | WM_SYSKEYDOWN => KeyState::Pressed,
+        WM_KEYUP | WM_SYSKEYUP => KeyState::Released,
+        _ => {
+            return unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) };
+        }
+    };
+    let Some(key) = windows_key_code(data) else {
+        return unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) };
+    };
+    let Ok(mut routing) = state.routing.try_lock() else {
+        // The callback always fails open instead of blocking the system hook thread.
+        return unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) };
+    };
+
+    let (send, suppress, repeat) = route_keyboard_event(&mut routing, key, key_state);
+    let emergency = suppress
+        && key == KeyCode::ESCAPE
+        && key_state == KeyState::Pressed
+        && has_emergency_modifiers(&routing.captured_pressed);
+    if emergency {
+        routing.remote = false;
+        state.emergency_release.store(true, Ordering::Release);
+    }
+    drop(routing);
+
+    if send && !emergency {
+        let event = KeyboardEvent {
+            key,
+            state: key_state,
+            repeat,
+        };
+        match state.sender.try_send(event) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                state.overflowed.store(true, Ordering::Release);
+                if let Ok(mut routing) = state.routing.try_lock() {
+                    routing.remote = false;
+                }
+                return unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) };
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                return unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) };
+            }
+        }
+    }
+    if suppress {
+        1
+    } else {
+        unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) }
+    }
+}
+
+fn route_keyboard_event(
+    routing: &mut KeyboardRoutingState,
+    key: KeyCode,
+    state: KeyState,
+) -> (bool, bool, bool) {
+    if routing.passthrough_pressed.contains(&key) {
+        if state == KeyState::Released {
+            routing.passthrough_pressed.remove(&key);
+        }
+        return (false, false, false);
+    }
+    if routing.remote {
+        return match state {
+            KeyState::Pressed => {
+                let repeat = !routing.captured_pressed.insert(key);
+                (true, true, repeat)
+            }
+            KeyState::Released if routing.captured_pressed.remove(&key) => (true, true, false),
+            KeyState::Released => (false, false, false),
+        };
+    }
+    if routing.captured_pressed.contains(&key) {
+        if state == KeyState::Released {
+            routing.captured_pressed.remove(&key);
+        }
+        return (false, true, false);
+    }
+    match state {
+        KeyState::Pressed => {
+            routing.local_pressed.insert(key);
+        }
+        KeyState::Released => {
+            routing.local_pressed.remove(&key);
+        }
+    }
+    (false, false, false)
+}
+
+fn has_emergency_modifiers(pressed: &BTreeSet<KeyCode>) -> bool {
+    (pressed.contains(&KeyCode::LEFT_CONTROL) || pressed.contains(&KeyCode::RIGHT_CONTROL))
+        && (pressed.contains(&KeyCode::LEFT_ALT) || pressed.contains(&KeyCode::RIGHT_ALT))
+        && (pressed.contains(&KeyCode::LEFT_SHIFT) || pressed.contains(&KeyCode::RIGHT_SHIFT))
+}
+
+fn windows_key_code(data: &KeyboardHookData) -> Option<KeyCode> {
+    let vk = data.virtual_key;
+    let extended = data.flags & LLKHF_EXTENDED != 0;
+    let usage = match vk {
+        0x41..=0x5a => 0x04 + u16::try_from(vk - 0x41).ok()?,
+        0x31..=0x39 => 0x1e + u16::try_from(vk - 0x31).ok()?,
+        0x30 => 0x27,
+        0x0d if extended => 0x58,
+        0x0d => 0x28,
+        0x1b => 0x29,
+        0x08 => 0x2a,
+        0x09 => 0x2b,
+        0x20 => 0x2c,
+        0xbd => 0x2d,
+        0xbb => 0x2e,
+        0xdb => 0x2f,
+        0xdd => 0x30,
+        0xdc => 0x31,
+        0xba => 0x33,
+        0xde => 0x34,
+        0xc0 => 0x35,
+        0xbc => 0x36,
+        0xbe => 0x37,
+        0xbf => 0x38,
+        0x14 => 0x39,
+        0x70..=0x7b => 0x3a + u16::try_from(vk - 0x70).ok()?,
+        0x2c => 0x46,
+        0x91 => 0x47,
+        0x13 => 0x48,
+        0x2d => 0x49,
+        0x24 => 0x4a,
+        0x21 => 0x4b,
+        0x2e => 0x4c,
+        0x23 => 0x4d,
+        0x22 => 0x4e,
+        0x27 => 0x4f,
+        0x25 => 0x50,
+        0x28 => 0x51,
+        0x26 => 0x52,
+        0x90 => 0x53,
+        0x6f => 0x54,
+        0x6a => 0x55,
+        0x6d => 0x56,
+        0x6b => 0x57,
+        0x61..=0x69 => 0x59 + u16::try_from(vk - 0x61).ok()?,
+        0x60 => 0x62,
+        0x6e => 0x63,
+        0x5d => 0x65,
+        0x7c..=0x83 => 0x68 + u16::try_from(vk - 0x7c).ok()?,
+        0xa0 => 0xe1,
+        0xa1 => 0xe5,
+        0xa2 => 0xe0,
+        0xa3 => 0xe4,
+        0xa4 => 0xe2,
+        0xa5 => 0xe6,
+        0x5b => 0xe3,
+        0x5c => 0xe7,
+        0x10 if data.scan_code == 0x36 => 0xe5,
+        0x10 => 0xe1,
+        0x11 if extended => 0xe4,
+        0x11 => 0xe0,
+        0x12 if extended => 0xe6,
+        0x12 => 0xe2,
+        _ => return None,
+    };
+    KeyCode::from_usage(usage)
+}
+
+fn windows_virtual_key(key: KeyCode) -> Option<(u16, bool)> {
+    Some(match key.usage() {
+        0x04..=0x1d => (0x41 + key.usage() - 0x04, false),
+        0x1e..=0x26 => (0x31 + key.usage() - 0x1e, false),
+        0x27 => (0x30, false),
+        0x28 => (0x0d, false),
+        0x29 => (0x1b, false),
+        0x2a => (0x08, false),
+        0x2b => (0x09, false),
+        0x2c => (0x20, false),
+        0x2d => (0xbd, false),
+        0x2e => (0xbb, false),
+        0x2f => (0xdb, false),
+        0x30 => (0xdd, false),
+        0x31 => (0xdc, false),
+        0x33 => (0xba, false),
+        0x34 => (0xde, false),
+        0x35 => (0xc0, false),
+        0x36 => (0xbc, false),
+        0x37 => (0xbe, false),
+        0x38 => (0xbf, false),
+        0x39 => (0x14, false),
+        0x3a..=0x45 => (0x70 + key.usage() - 0x3a, false),
+        0x46 => (0x2c, true),
+        0x47 => (0x91, false),
+        0x48 => (0x13, false),
+        0x49 => (0x2d, true),
+        0x4a => (0x24, true),
+        0x4b => (0x21, true),
+        0x4c => (0x2e, true),
+        0x4d => (0x23, true),
+        0x4e => (0x22, true),
+        0x4f => (0x27, true),
+        0x50 => (0x25, true),
+        0x51 => (0x28, true),
+        0x52 => (0x26, true),
+        0x53 => (0x90, true),
+        0x54 => (0x6f, true),
+        0x55 => (0x6a, false),
+        0x56 => (0x6d, false),
+        0x57 => (0x6b, false),
+        0x58 => (0x0d, true),
+        0x59..=0x61 => (0x61 + key.usage() - 0x59, false),
+        0x62 => (0x60, false),
+        0x63 => (0x6e, false),
+        0x65 => (0x5d, true),
+        0x68..=0x6f => (0x7c + key.usage() - 0x68, false),
+        0xe0 => (0xa2, false),
+        0xe1 => (0xa0, false),
+        0xe2 => (0xa4, false),
+        0xe3 => (0x5b, true),
+        0xe4 => (0xa3, true),
+        0xe5 => (0xa1, false),
+        0xe6 => (0xa5, true),
+        0xe7 => (0x5c, true),
+        _ => return None,
+    })
+}
+
 fn logical_hook_point(point: PointI32, coordinate_scale: f64) -> Point {
     Point::new(
         f64::from(point.x) / coordinate_scale,
@@ -791,5 +1370,64 @@ mod tests {
             logical_hook_point(PointI32 { x: 101, y: 203 }, 2.0),
             Point::new(50.5, 101.5)
         );
+    }
+
+    #[test]
+    fn maps_common_virtual_keys_to_hid_usages() {
+        let data = |virtual_key, scan_code, flags| KeyboardHookData {
+            virtual_key,
+            scan_code,
+            flags,
+            time: 0,
+            extra_info: 0,
+        };
+        assert_eq!(windows_key_code(&data(0x41, 0, 0)), Some(KeyCode::A));
+        assert_eq!(
+            windows_key_code(&data(0x11, 0, LLKHF_EXTENDED)),
+            Some(KeyCode::RIGHT_CONTROL)
+        );
+        assert_eq!(
+            windows_key_code(&data(0x0d, 0, LLKHF_EXTENDED)),
+            Some(KeyCode::NUMPAD_ENTER)
+        );
+    }
+
+    #[test]
+    fn keys_held_before_handoff_are_not_captured() {
+        let mut routing = KeyboardRoutingState::default();
+        assert_eq!(
+            route_keyboard_event(&mut routing, KeyCode::LEFT_CONTROL, KeyState::Pressed),
+            (false, false, false)
+        );
+        let local_pressed = std::mem::take(&mut routing.local_pressed);
+        routing.passthrough_pressed.extend(local_pressed);
+        routing.remote = true;
+        assert_eq!(
+            route_keyboard_event(&mut routing, KeyCode::LEFT_CONTROL, KeyState::Released),
+            (false, false, false)
+        );
+        assert!(routing.passthrough_pressed.is_empty());
+    }
+
+    #[test]
+    fn remote_keys_stay_suppressed_until_physically_released() {
+        let mut routing = KeyboardRoutingState {
+            remote: true,
+            ..KeyboardRoutingState::default()
+        };
+        assert_eq!(
+            route_keyboard_event(&mut routing, KeyCode::A, KeyState::Pressed),
+            (true, true, false)
+        );
+        routing.remote = false;
+        assert_eq!(
+            route_keyboard_event(&mut routing, KeyCode::A, KeyState::Pressed),
+            (false, true, false)
+        );
+        assert_eq!(
+            route_keyboard_event(&mut routing, KeyCode::A, KeyState::Released),
+            (false, true, false)
+        );
+        assert!(routing.captured_pressed.is_empty());
     }
 }

@@ -3,8 +3,9 @@
 #![cfg(target_os = "macos")]
 
 use edgemouse_core::{
-    ButtonState, CaptureMode, MouseButton, MouseCaptureBackend, MouseInjectionBackend,
-    PermissionState, PhysicalMouseEvent, PlatformError, Point, RemoteMouseEvent, Vector,
+    ButtonState, CaptureMode, KeyCode, KeyState, KeyboardEvent, KeyboardInjectionBackend,
+    MouseButton, MouseCaptureBackend, MouseInjectionBackend, PermissionState, PhysicalMouseEvent,
+    PlatformError, Point, RemoteMouseEvent, Vector,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
@@ -47,6 +48,14 @@ const FIELD_SCROLL_FIXED_VERTICAL: u32 = 93;
 const FIELD_SCROLL_FIXED_HORIZONTAL: u32 = 94;
 const FIELD_SCROLL_POINT_VERTICAL: u32 = 96;
 const FIELD_SCROLL_POINT_HORIZONTAL: u32 = 97;
+const FIELD_KEYBOARD_AUTOREPEAT: u32 = 8;
+
+const FLAG_ALPHA_SHIFT: u64 = 1 << 16;
+const FLAG_SHIFT: u64 = 1 << 17;
+const FLAG_CONTROL: u64 = 1 << 18;
+const FLAG_ALTERNATE: u64 = 1 << 19;
+const FLAG_COMMAND: u64 = 1 << 20;
+const FLAG_NUMERIC_PAD: u64 = 1 << 21;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -96,7 +105,13 @@ unsafe extern "C" {
         wheel_2: i32,
         wheel_3: i32,
     ) -> *mut c_void;
+    fn CGEventCreateKeyboardEvent(
+        source: *mut c_void,
+        virtual_key: u16,
+        key_down: bool,
+    ) -> *mut c_void;
     fn CGEventSetIntegerValueField(event: *mut c_void, field: u32, value: i64);
+    fn CGEventSetFlags(event: *mut c_void, flags: u64);
     fn CGEventPost(tap: u32, event: *mut c_void);
     fn CGWarpMouseCursorPosition(position: CGPoint) -> i32;
     fn CGMainDisplayID() -> u32;
@@ -604,6 +619,239 @@ impl MouseInjectionBackend for MacMouseInjector {
     }
 }
 
+/// Posts marked synthetic keyboard events into the macOS session event stream.
+#[derive(Default)]
+pub struct MacKeyboardInjector {
+    pressed: BTreeSet<KeyCode>,
+}
+
+impl MacKeyboardInjector {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            pressed: BTreeSet::new(),
+        }
+    }
+
+    fn post(&mut self, input: KeyboardEvent) -> Result<(), PlatformError> {
+        let virtual_key = mac_virtual_key(input.key).ok_or_else(|| {
+            PlatformError::new(format!(
+                "macOS has no mapping for keyboard usage {:#06x}",
+                input.key.usage()
+            ))
+        })?;
+        match input.state {
+            KeyState::Pressed => {
+                self.pressed.insert(input.key);
+            }
+            KeyState::Released => {
+                self.pressed.remove(&input.key);
+            }
+        }
+        // SAFETY: A null source requests the default event source. The create-rule
+        // object is checked, marked, posted synchronously, and then released.
+        let event = unsafe {
+            CGEventCreateKeyboardEvent(
+                ptr::null_mut(),
+                virtual_key,
+                input.state == KeyState::Pressed,
+            )
+        };
+        if event.is_null() {
+            return Err(PlatformError::new("CGEventCreateKeyboardEvent failed"));
+        }
+        let flags = mac_modifier_flags(&self.pressed);
+        // SAFETY: `event` is a live CGEventRef owned by this function.
+        unsafe {
+            CGEventSetIntegerValueField(event, EVENT_SOURCE_USER_DATA, EVENT_MARKER);
+            CGEventSetIntegerValueField(event, FIELD_KEYBOARD_AUTOREPEAT, i64::from(input.repeat));
+            CGEventSetFlags(event, flags);
+            CGEventPost(EVENT_TAP_SESSION, event);
+            CFRelease(event);
+        }
+        Ok(())
+    }
+}
+
+impl KeyboardInjectionBackend for MacKeyboardInjector {
+    fn permission_state(&self) -> PermissionState {
+        if accessibility_trusted() {
+            PermissionState::Granted
+        } else {
+            PermissionState::Denied
+        }
+    }
+
+    fn inject(&mut self, event: KeyboardEvent) -> Result<(), PlatformError> {
+        self.post(event)
+    }
+
+    fn release_all(&mut self) -> Result<(), PlatformError> {
+        let pressed: Vec<_> = self.pressed.iter().copied().collect();
+        let mut first_error = None;
+        for key in pressed {
+            if let Err(error) = self.post(KeyboardEvent {
+                key,
+                state: KeyState::Released,
+                repeat: false,
+            }) {
+                first_error.get_or_insert(error);
+            }
+        }
+        self.pressed.clear();
+        if let Some(error) = first_error {
+            Err(error)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn mac_modifier_flags(pressed: &BTreeSet<KeyCode>) -> u64 {
+    let has = |left, right| pressed.contains(&left) || pressed.contains(&right);
+    let mut flags = 0;
+    if has(KeyCode::LEFT_SHIFT, KeyCode::RIGHT_SHIFT) {
+        flags |= FLAG_SHIFT;
+    }
+    if has(KeyCode::LEFT_CONTROL, KeyCode::RIGHT_CONTROL) {
+        flags |= FLAG_CONTROL;
+    }
+    if has(KeyCode::LEFT_ALT, KeyCode::RIGHT_ALT) {
+        flags |= FLAG_ALTERNATE;
+    }
+    if has(KeyCode::LEFT_META, KeyCode::RIGHT_META) {
+        flags |= FLAG_COMMAND;
+    }
+    if pressed.contains(&KeyCode::CAPS_LOCK) {
+        flags |= FLAG_ALPHA_SHIFT;
+    }
+    if pressed
+        .iter()
+        .any(|key| matches!(key.usage(), 0x53..=0x63 | 0x67))
+    {
+        flags |= FLAG_NUMERIC_PAD;
+    }
+    flags
+}
+
+fn mac_virtual_key(key: KeyCode) -> Option<u16> {
+    Some(match key.usage() {
+        0x04 => 0,
+        0x05 => 11,
+        0x06 => 8,
+        0x07 => 2,
+        0x08 => 14,
+        0x09 => 3,
+        0x0a => 5,
+        0x0b => 4,
+        0x0c => 34,
+        0x0d => 38,
+        0x0e => 40,
+        0x0f => 37,
+        0x10 => 46,
+        0x11 => 45,
+        0x12 => 31,
+        0x13 => 35,
+        0x14 => 12,
+        0x15 => 15,
+        0x16 => 1,
+        0x17 => 17,
+        0x18 => 32,
+        0x19 => 9,
+        0x1a => 13,
+        0x1b => 7,
+        0x1c => 16,
+        0x1d => 6,
+        0x1e => 18,
+        0x1f => 19,
+        0x20 => 20,
+        0x21 => 21,
+        0x22 => 23,
+        0x23 => 22,
+        0x24 => 26,
+        0x25 => 28,
+        0x26 => 25,
+        0x27 => 29,
+        0x28 => 36,
+        0x29 => 53,
+        0x2a => 51,
+        0x2b => 48,
+        0x2c => 49,
+        0x2d => 27,
+        0x2e => 24,
+        0x2f => 33,
+        0x30 => 30,
+        0x31 => 42,
+        0x33 => 41,
+        0x34 => 39,
+        0x35 => 50,
+        0x36 => 43,
+        0x37 => 47,
+        0x38 => 44,
+        0x39 => 57,
+        0x3a => 122,
+        0x3b => 120,
+        0x3c => 99,
+        0x3d => 118,
+        0x3e => 96,
+        0x3f => 97,
+        0x40 => 98,
+        0x41 => 100,
+        0x42 => 101,
+        0x43 => 109,
+        0x44 => 103,
+        0x45 => 111,
+        0x46 => 105,
+        0x47 => 107,
+        0x48 => 113,
+        0x49 => 114,
+        0x4a => 115,
+        0x4b => 116,
+        0x4c => 117,
+        0x4d => 119,
+        0x4e => 121,
+        0x4f => 124,
+        0x50 => 123,
+        0x51 => 125,
+        0x52 => 126,
+        0x53 => 71,
+        0x54 => 75,
+        0x55 => 67,
+        0x56 => 78,
+        0x57 => 69,
+        0x58 => 76,
+        0x59 => 83,
+        0x5a => 84,
+        0x5b => 85,
+        0x5c => 86,
+        0x5d => 87,
+        0x5e => 88,
+        0x5f => 89,
+        0x60 => 91,
+        0x61 => 92,
+        0x62 => 82,
+        0x63 => 65,
+        0x67 => 81,
+        0x68 => 105,
+        0x69 => 107,
+        0x6a => 113,
+        0x6b => 106,
+        0x6c => 64,
+        0x6d => 79,
+        0x6e => 80,
+        0x6f => 90,
+        0xe0 => 59,
+        0xe1 => 56,
+        0xe2 => 58,
+        0xe3 => 55,
+        0xe4 => 62,
+        0xe5 => 60,
+        0xe6 => 61,
+        0xe7 => 54,
+        _ => return None,
+    })
+}
+
 fn run_event_tap(
     sender: mpsc::SyncSender<PhysicalMouseEvent>,
     suppress: Arc<AtomicBool>,
@@ -828,6 +1076,24 @@ mod tests {
         assert_eq!(mouse_button_from_number(3), MouseButton::Back);
         assert_eq!(mouse_button_from_number(4), MouseButton::Forward);
         assert_eq!(mouse_button_from_number(9), MouseButton::Other(9));
+    }
+
+    #[test]
+    fn maps_common_windows_keys_to_mac_virtual_keys() {
+        assert_eq!(mac_virtual_key(KeyCode::A), Some(0));
+        assert_eq!(mac_virtual_key(KeyCode::ENTER), Some(36));
+        assert_eq!(mac_virtual_key(KeyCode::LEFT_META), Some(55));
+        assert_eq!(mac_virtual_key(KeyCode::RIGHT_ALT), Some(61));
+        assert_eq!(mac_virtual_key(KeyCode::ARROW_LEFT), Some(123));
+    }
+
+    #[test]
+    fn modifier_flags_follow_pressed_keys() {
+        let pressed = BTreeSet::from([KeyCode::LEFT_SHIFT, KeyCode::LEFT_META, KeyCode::NUMPAD_1]);
+        assert_eq!(
+            mac_modifier_flags(&pressed),
+            FLAG_SHIFT | FLAG_COMMAND | FLAG_NUMERIC_PAD
+        );
     }
 
     #[test]
