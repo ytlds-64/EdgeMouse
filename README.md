@@ -16,6 +16,8 @@ automatic multi-monitor setup, tray UI, installers, and elevated Windows desktop
 - Vertical and horizontal scrolling.
 - Windows keyboard forwarding to macOS while the Windows mouse owns the Mac,
   including modifiers, navigation, function keys, numpad keys, and key repeat.
+- Windows-style shortcut mapping on macOS: Windows `Ctrl` becomes Mac `Command`,
+  the Windows key becomes Mac `Control`, and `Alt` remains Mac `Option`.
 - Ordered keyboard delivery, forced key release on handback/disconnect, held-key
   transition safety, and `Ctrl+Alt+Shift+Esc` emergency local recovery.
 - Coordinate mapping between differently sized Windows and macOS displays.
@@ -235,8 +237,9 @@ from the LAN and needs no firewall rule.
 The certificate with the lower derived node ID initiates the connection; the
 other side accepts it. Either process may be started first. After a successful
 connection, a temporary network loss or peer restart restores local mouse control
-and makes both agents retry automatically. Press Ctrl+C to release input and shut
-down cleanly. `edgemouse status` reports the local process and version;
+and makes both agents retry automatically. Press Ctrl+C while input is still
+local to shut down cleanly; while Windows input belongs to macOS, Ctrl+C is
+forwarded as Command+C. `edgemouse status` reports the local process and version;
 `edgemouse stop` performs the same safe shutdown when the agent is running in the
 background.
 

@@ -66,8 +66,10 @@ Safety invariants:
   before injection and recovery, so a boundary mismatch cannot terminate the
   agent or prevent reconnection.
 - Protocol numbers must be finite and frames are capped at 64 KiB.
-- Ctrl+C, SIGTERM/window-close, or the local `stop` command restores local
-  capture, releases injected buttons, and sends `Goodbye`.
+- Ctrl+C while the keyboard is local, SIGTERM/window-close, or the local `stop`
+  command restores local capture, releases injected input, and sends `Goodbye`.
+  On Windows, Ctrl+C is not treated as shutdown while the keyboard belongs to
+  macOS; it is forwarded as Command+C so shortcuts cannot strand a modifier.
 
 Only the active per-user session runs input capture. The optional macOS
 LaunchAgent and Windows Startup-folder shortcut launch that same agent after
@@ -175,5 +177,5 @@ restored during transitions and teardown.
 3. Put the short-code pairing flow into a tray/settings UI.
 4. Add signed installers and diagnostics export around the existing per-user
    launch-at-login scripts.
-5. Extend the current Windows-to-macOS keyboard MVP with optional semantic
-   modifier mapping and macOS-to-Windows capture, then consider clipboard sync.
+5. Make the current Windows-style modifier mapping configurable, add
+   macOS-to-Windows capture, then consider clipboard sync.

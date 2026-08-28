@@ -218,7 +218,9 @@ fn run_connected(
     );
     let clock = Instant::now();
 
-    println!("Edge switching active; press Ctrl+C to stop");
+    println!(
+        "Edge switching active; press Ctrl+C while input is local, or run `edgemouse stop`, to stop"
+    );
     let result = run_loop(
         &network,
         &mut capture,
@@ -890,8 +892,13 @@ impl RemoteReceiver {
 
 fn install_shutdown_handler() -> Result<Arc<AtomicBool>, Box<dyn Error>> {
     let stopping = Arc::new(AtomicBool::new(false));
-    let handler_state = Arc::clone(&stopping);
-    ctrlc::set_handler(move || handler_state.store(true, Ordering::Release))?;
+    #[cfg(target_os = "windows")]
+    platform::install_shutdown_handler(Arc::clone(&stopping))?;
+    #[cfg(not(target_os = "windows"))]
+    {
+        let handler_state = Arc::clone(&stopping);
+        ctrlc::set_handler(move || handler_state.store(true, Ordering::Release))?;
+    }
     Ok(stopping)
 }
 

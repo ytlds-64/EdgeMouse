@@ -122,6 +122,13 @@ pub fn start_keyboard_capture() -> Result<NativeKeyboardCapture, edgemouse_core:
     NativeKeyboardCapture::start()
 }
 
+#[cfg(target_os = "windows")]
+pub fn install_shutdown_handler(
+    stopping: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(), edgemouse_core::PlatformError> {
+    edgemouse_platform_windows::install_shutdown_handler(stopping)
+}
+
 #[cfg(target_os = "macos")]
 #[must_use]
 pub const fn keyboard_injector() -> NativeKeyboardInjector {

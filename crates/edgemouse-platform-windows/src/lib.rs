@@ -12,7 +12,7 @@ use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::JoinHandle;
 
 const WH_MOUSE_LL: i32 = 14;
@@ -30,6 +30,11 @@ const WM_MOUSEWHEEL: u32 = 0x020a;
 const WM_XBUTTONDOWN: u32 = 0x020b;
 const WM_XBUTTONUP: u32 = 0x020c;
 const WM_MOUSEHWHEEL: u32 = 0x020e;
+const CTRL_C_EVENT: u32 = 0;
+const CTRL_BREAK_EVENT: u32 = 1;
+const CTRL_CLOSE_EVENT: u32 = 2;
+const CTRL_LOGOFF_EVENT: u32 = 5;
+const CTRL_SHUTDOWN_EVENT: u32 = 6;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_KEYUP: u32 = 0x0101;
 const WM_SYSKEYDOWN: u32 = 0x0104;
@@ -138,6 +143,7 @@ struct Input {
 }
 
 type HookProc = unsafe extern "system" fn(code: i32, w_param: usize, l_param: isize) -> isize;
+type ConsoleCtrlHandler = unsafe extern "system" fn(control_type: u32) -> i32;
 
 #[link(name = "User32")]
 unsafe extern "system" {
@@ -175,6 +181,7 @@ unsafe extern "system" {
 #[link(name = "Kernel32")]
 unsafe extern "system" {
     fn GetCurrentThreadId() -> u32;
+    fn SetConsoleCtrlHandler(handler: Option<ConsoleCtrlHandler>, add: i32) -> i32;
 }
 
 struct CallbackState {
@@ -188,6 +195,8 @@ struct CallbackState {
 
 static CALLBACK_STATE: AtomicPtr<CallbackState> = AtomicPtr::new(ptr::null_mut());
 static KEYBOARD_CALLBACK_STATE: AtomicPtr<KeyboardCallbackState> = AtomicPtr::new(ptr::null_mut());
+static KEYBOARD_REMOTE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static SHUTDOWN_STATE: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
 #[derive(Default)]
 struct KeyboardRoutingState {
@@ -504,6 +513,7 @@ impl KeyboardCaptureBackend for WindowsKeyboardCapture {
             routing.passthrough_pressed.extend(local_pressed);
         }
         routing.remote = remote;
+        KEYBOARD_REMOTE_ACTIVE.store(remote, Ordering::Release);
         Ok(())
     }
 
@@ -529,6 +539,7 @@ impl KeyboardCaptureBackend for WindowsKeyboardCapture {
 
 impl Drop for WindowsKeyboardCapture {
     fn drop(&mut self) {
+        KEYBOARD_REMOTE_ACTIVE.store(false, Ordering::Release);
         if let Ok(mut routing) = self.routing.lock() {
             routing.remote = false;
         }
@@ -538,6 +549,57 @@ impl Drop for WindowsKeyboardCapture {
         }
         if let Some(thread) = self.thread.take() {
             drop(thread.join());
+        }
+    }
+}
+
+/// Returns whether physical Windows keyboard input currently belongs to the
+/// remote computer. The console shutdown handler uses this to avoid treating a
+/// forwarded Ctrl+C shortcut as a request to stop EdgeMouse.
+#[must_use]
+pub fn keyboard_capture_is_remote() -> bool {
+    KEYBOARD_REMOTE_ACTIVE.load(Ordering::Acquire)
+}
+
+/// Installs a console handler that preserves Ctrl+C as a forwarded shortcut
+/// while remote input is active, without ignoring close/logoff/shutdown events.
+pub fn install_shutdown_handler(stopping: Arc<AtomicBool>) -> Result<(), PlatformError> {
+    SHUTDOWN_STATE
+        .set(stopping)
+        .map_err(|_| PlatformError::new("Windows shutdown handler is already installed"))?;
+    // SAFETY: The callback has system ABI and its state is process-lifetime storage.
+    if unsafe { SetConsoleCtrlHandler(Some(console_control_handler), 1) } == 0 {
+        return Err(PlatformError::new("SetConsoleCtrlHandler failed"));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsoleControlAction {
+    PassThrough,
+    IgnoreForwardedShortcut,
+    Stop,
+}
+
+const fn console_control_action(control_type: u32, keyboard_remote: bool) -> ConsoleControlAction {
+    match control_type {
+        CTRL_C_EVENT if keyboard_remote => ConsoleControlAction::IgnoreForwardedShortcut,
+        CTRL_C_EVENT | CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT
+        | CTRL_SHUTDOWN_EVENT => ConsoleControlAction::Stop,
+        _ => ConsoleControlAction::PassThrough,
+    }
+}
+
+unsafe extern "system" fn console_control_handler(control_type: u32) -> i32 {
+    match console_control_action(control_type, keyboard_capture_is_remote()) {
+        ConsoleControlAction::PassThrough => 0,
+        ConsoleControlAction::IgnoreForwardedShortcut => 1,
+        ConsoleControlAction::Stop => {
+            let Some(stopping) = SHUTDOWN_STATE.get() else {
+                return 0;
+            };
+            stopping.store(true, Ordering::Release);
+            1
         }
     }
 }
@@ -1077,13 +1139,14 @@ unsafe extern "system" fn keyboard_hook_callback(
         && has_emergency_modifiers(&routing.captured_pressed);
     if emergency {
         routing.remote = false;
+        KEYBOARD_REMOTE_ACTIVE.store(false, Ordering::Release);
         state.emergency_release.store(true, Ordering::Release);
     }
     drop(routing);
 
     if send && !emergency {
         let event = KeyboardEvent {
-            key,
+            key: remote_key_code(key),
             state: key_state,
             repeat,
         };
@@ -1091,12 +1154,17 @@ unsafe extern "system" fn keyboard_hook_callback(
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(_)) => {
                 state.overflowed.store(true, Ordering::Release);
+                KEYBOARD_REMOTE_ACTIVE.store(false, Ordering::Release);
                 if let Ok(mut routing) = state.routing.try_lock() {
                     routing.remote = false;
                 }
                 return unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) };
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
+                KEYBOARD_REMOTE_ACTIVE.store(false, Ordering::Release);
+                if let Ok(mut routing) = state.routing.try_lock() {
+                    routing.remote = false;
+                }
                 return unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) };
             }
         }
@@ -1144,6 +1212,19 @@ fn route_keyboard_event(
         }
     }
     (false, false, false)
+}
+
+/// Preserve Windows shortcut muscle memory on macOS by swapping the physical
+/// Control and Windows-key usages on the wire. Ctrl+C/V/A therefore becomes
+/// Command+C/V/A, while the Windows key remains available as macOS Control.
+fn remote_key_code(key: KeyCode) -> KeyCode {
+    match key {
+        KeyCode::LEFT_CONTROL => KeyCode::LEFT_META,
+        KeyCode::RIGHT_CONTROL => KeyCode::RIGHT_META,
+        KeyCode::LEFT_META => KeyCode::LEFT_CONTROL,
+        KeyCode::RIGHT_META => KeyCode::RIGHT_CONTROL,
+        _ => key,
+    }
 }
 
 fn has_emergency_modifiers(pressed: &BTreeSet<KeyCode>) -> bool {
@@ -1389,6 +1470,36 @@ mod tests {
         assert_eq!(
             windows_key_code(&data(0x0d, 0, LLKHF_EXTENDED)),
             Some(KeyCode::NUMPAD_ENTER)
+        );
+    }
+
+    #[test]
+    fn swaps_control_and_meta_for_mac_shortcut_semantics() {
+        assert_eq!(remote_key_code(KeyCode::LEFT_CONTROL), KeyCode::LEFT_META);
+        assert_eq!(remote_key_code(KeyCode::RIGHT_CONTROL), KeyCode::RIGHT_META);
+        assert_eq!(remote_key_code(KeyCode::LEFT_META), KeyCode::LEFT_CONTROL);
+        assert_eq!(remote_key_code(KeyCode::RIGHT_META), KeyCode::RIGHT_CONTROL);
+        assert_eq!(remote_key_code(KeyCode::LEFT_ALT), KeyCode::LEFT_ALT);
+        assert_eq!(remote_key_code(KeyCode::A), KeyCode::A);
+    }
+
+    #[test]
+    fn only_remote_ctrl_c_is_ignored_as_a_console_shutdown_signal() {
+        assert_eq!(
+            console_control_action(CTRL_C_EVENT, true),
+            ConsoleControlAction::IgnoreForwardedShortcut
+        );
+        assert_eq!(
+            console_control_action(CTRL_C_EVENT, false),
+            ConsoleControlAction::Stop
+        );
+        assert_eq!(
+            console_control_action(CTRL_CLOSE_EVENT, true),
+            ConsoleControlAction::Stop
+        );
+        assert_eq!(
+            console_control_action(u32::MAX, true),
+            ConsoleControlAction::PassThrough
         );
     }
 
