@@ -126,7 +126,7 @@ struct RawPeer {
 struct RawScreen {
     id: u64,
     name: String,
-    #[serde(default)]
+    #[serde(default = "default_auto")]
     auto: bool,
     #[serde(default)]
     origin_x: f64,
@@ -353,6 +353,10 @@ const fn default_scale() -> f64 {
     1.0
 }
 
+const fn default_auto() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,6 +411,22 @@ mod tests {
         assert!(screen.automatic);
         assert_eq!(screen.id, ScreenId(7));
         assert!(screen.manual_bounds.is_none());
+    }
+
+    #[test]
+    fn existing_screen_config_defaults_to_automatic_detection() {
+        let screen: RawScreen = toml::from_str(
+            r#"
+id = 1
+name = "Existing Windows display"
+width = 1920
+height = 1080
+scale = 2.0
+"#,
+        )
+        .unwrap();
+        assert!(screen.auto);
+        assert!(screen.into_config().unwrap().automatic);
     }
 
     #[test]

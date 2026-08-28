@@ -270,7 +270,9 @@ Rotation, negative secondary-display origins, Retina/Windows scaling, and
 resolution changes are therefore reflected automatically on startup and after a
 reconnect. The authenticated `Hello` exchange supplies that result to the peer.
 Older manual `origin_x`, `origin_y`, `width`, `height`, and `scale` fields remain
-supported when `auto` is omitted or set to `false`.
+supported when `auto = false` is set explicitly. In 0.3.0, omitting `auto`
+selects automatic detection so an existing machine configuration upgrades
+without requiring a manual geometry edit.
 
 Remote absolute movement is emitted every 4–12 ms according to current RTT,
 always using the newest position. Stale movement is discarded during network
