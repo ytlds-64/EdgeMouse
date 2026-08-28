@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 const COMMAND_CAPACITY: usize = 1_024;
@@ -13,6 +13,8 @@ const CONNECT_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
 const MOUSE_FLUSH_INTERVAL_FAST: Duration = Duration::from_millis(4);
 const METRICS_INTERVAL: Duration = Duration::from_secs(5);
+const ACTIVE_MOVEMENT_GAP_MAX: Duration = Duration::from_millis(100);
+const ARRIVAL_JITTER_WEIGHT: f64 = 1.0 / 16.0;
 #[cfg(target_os = "windows")]
 const WINDOWS_TIMER_PERIOD_MS: u32 = 1;
 
@@ -65,6 +67,8 @@ pub enum NetworkEvent {
         coalesced_moves: u64,
         received_moves: u64,
         stale_moves: u64,
+        arrival_jitter_ms: f64,
+        max_arrival_gap_ms: f64,
     },
     Disconnected(String),
 }
@@ -97,6 +101,18 @@ struct IncomingMoveCoalescer {
     last_forwarded_sequence: u64,
     received: u64,
     stale: u64,
+    last_arrival: Option<Instant>,
+    previous_gap: Option<Duration>,
+    arrival_jitter_ms: f64,
+    max_arrival_gap_ms: f64,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+struct IncomingMoveMetrics {
+    received: u64,
+    stale: u64,
+    arrival_jitter_ms: f64,
+    max_arrival_gap_ms: f64,
 }
 
 impl MoveCoalescer {
@@ -119,9 +135,14 @@ impl MoveCoalescer {
 
 impl IncomingMoveCoalescer {
     fn push(&mut self, message: WireMessage) {
+        self.push_at(message, Instant::now());
+    }
+
+    fn push_at(&mut self, message: WireMessage, now: Instant) {
         let sequence = mouse_datagram_sequence(&message)
             .expect("incoming coalescer only accepts movement datagrams");
         self.received = self.received.saturating_add(1);
+        self.note_arrival(now);
         let pending_sequence = self
             .pending
             .as_ref()
@@ -134,6 +155,26 @@ impl IncomingMoveCoalescer {
         self.pending = Some(message);
     }
 
+    fn note_arrival(&mut self, now: Instant) {
+        if let Some(last_arrival) = self.last_arrival {
+            let gap = now.saturating_duration_since(last_arrival);
+            if gap <= ACTIVE_MOVEMENT_GAP_MAX {
+                let gap_ms = gap.as_secs_f64() * 1_000.0;
+                self.max_arrival_gap_ms = self.max_arrival_gap_ms.max(gap_ms);
+                if let Some(previous_gap) = self.previous_gap {
+                    let previous_ms = previous_gap.as_secs_f64() * 1_000.0;
+                    let variation = (gap_ms - previous_ms).abs();
+                    self.arrival_jitter_ms +=
+                        (variation - self.arrival_jitter_ms) * ARRIVAL_JITTER_WEIGHT;
+                }
+                self.previous_gap = Some(gap);
+            } else {
+                self.previous_gap = None;
+            }
+        }
+        self.last_arrival = Some(now);
+    }
+
     fn take(&mut self) -> Option<WireMessage> {
         let message = self.pending.take()?;
         self.last_forwarded_sequence = mouse_datagram_sequence(&message)
@@ -141,10 +182,17 @@ impl IncomingMoveCoalescer {
         Some(message)
     }
 
-    fn take_metrics(&mut self) -> (u64, u64) {
-        let metrics = (self.received, self.stale);
+    fn take_metrics(&mut self) -> IncomingMoveMetrics {
+        let metrics = IncomingMoveMetrics {
+            received: self.received,
+            stale: self.stale,
+            arrival_jitter_ms: self.arrival_jitter_ms,
+            max_arrival_gap_ms: self.max_arrival_gap_ms,
+        };
         self.received = 0;
         self.stale = 0;
+        self.arrival_jitter_ms = 0.0;
+        self.max_arrival_gap_ms = 0.0;
         metrics
     }
 }
@@ -418,7 +466,7 @@ async fn run_network(
                         break;
                     }
                 };
-                let (received_moves, stale_moves) = match incoming_move.lock() {
+                let incoming_metrics = match incoming_move.lock() {
                     Ok(mut pending) => pending.take_metrics(),
                     Err(_) => {
                         drop(events.send(NetworkEvent::Disconnected(
@@ -427,7 +475,11 @@ async fn run_network(
                         break;
                     }
                 };
-                if sent_moves > 0 || skipped_moves > 0 || coalesced_moves > 0 || received_moves > 0 {
+                if sent_moves > 0
+                    || skipped_moves > 0
+                    || coalesced_moves > 0
+                    || incoming_metrics.received > 0
+                {
                     let rtt_ms = sender.smoothed_rtt().as_secs_f64() * 1_000.0;
                     let send_interval_ms = u64::try_from(
                         adaptive_mouse_interval(sender.smoothed_rtt()).as_millis(),
@@ -438,8 +490,10 @@ async fn run_network(
                         sent_moves,
                         skipped_moves,
                         coalesced_moves,
-                        received_moves,
-                        stale_moves,
+                        received_moves: incoming_metrics.received,
+                        stale_moves: incoming_metrics.stale,
+                        arrival_jitter_ms: incoming_metrics.arrival_jitter_ms,
+                        max_arrival_gap_ms: incoming_metrics.max_arrival_gap_ms,
                     }).is_err() {
                         break;
                     }
@@ -628,8 +682,30 @@ mod tests {
 
         coalescer.push(movement_datagram(10, 120.0));
         assert_eq!(coalescer.take(), None);
-        assert_eq!(coalescer.take_metrics(), (4, 2));
-        assert_eq!(coalescer.take_metrics(), (0, 0));
+        let metrics = coalescer.take_metrics();
+        assert_eq!(metrics.received, 4);
+        assert_eq!(metrics.stale, 2);
+        let reset = coalescer.take_metrics();
+        assert_eq!(reset.received, 0);
+        assert_eq!(reset.stale, 0);
+        assert_eq!(reset.arrival_jitter_ms, 0.0);
+        assert_eq!(reset.max_arrival_gap_ms, 0.0);
+    }
+
+    #[test]
+    fn incoming_coalescer_reports_active_movement_jitter() {
+        let start = Instant::now();
+        let mut coalescer = IncomingMoveCoalescer::default();
+        coalescer.push_at(movement_datagram(1, 1.0), start);
+        coalescer.push_at(movement_datagram(2, 2.0), start + Duration::from_millis(4));
+        coalescer.push_at(movement_datagram(3, 3.0), start + Duration::from_millis(8));
+        coalescer.push_at(movement_datagram(4, 4.0), start + Duration::from_millis(20));
+
+        let metrics = coalescer.take_metrics();
+        assert_eq!(metrics.received, 4);
+        assert_eq!(metrics.stale, 0);
+        assert!((metrics.arrival_jitter_ms - 0.5).abs() < f64::EPSILON);
+        assert_eq!(metrics.max_arrival_gap_ms, 12.0);
     }
 
     #[test]

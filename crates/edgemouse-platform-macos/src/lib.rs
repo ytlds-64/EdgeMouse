@@ -25,6 +25,10 @@ const CAPTURE_QUEUE_CAPACITY: usize = 4_096;
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_DISTANCE: f64 = 5.0;
 const MAX_CLICK_STATE: i64 = 3;
+const MOTION_FRAME_INTERVAL: Duration = Duration::from_millis(4);
+const MOTION_TIME_CONSTANT_SECONDS: f64 = 0.006;
+const MOTION_SNAP_DISTANCE: f64 = 0.25;
+const MOTION_MAX_FRAME_DISTANCE: f64 = 240.0;
 
 const EVENT_LEFT_DOWN: u32 = 1;
 const EVENT_LEFT_UP: u32 = 2;
@@ -449,6 +453,79 @@ pub struct MacMouseInjector {
     position: Point,
     pressed: BTreeSet<MouseButton>,
     clicks: ClickTracker,
+    motion: MotionSmoother,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MotionSmoother {
+    displayed: Point,
+    target: Point,
+    last_frame: Instant,
+    next_frame: Instant,
+    pending: bool,
+}
+
+impl MotionSmoother {
+    fn new(position: Point, now: Instant) -> Self {
+        Self {
+            displayed: position,
+            target: position,
+            last_frame: now,
+            next_frame: now + MOTION_FRAME_INTERVAL,
+            pending: false,
+        }
+    }
+
+    fn jump(&mut self, position: Point, now: Instant) {
+        self.displayed = position;
+        self.target = position;
+        self.last_frame = now;
+        self.next_frame = now + MOTION_FRAME_INTERVAL;
+        self.pending = false;
+    }
+
+    fn set_target(&mut self, position: Point) {
+        self.target = position;
+        self.pending = position != self.displayed;
+    }
+
+    fn sample(&mut self, now: Instant) -> Option<Point> {
+        if !self.pending || now < self.next_frame {
+            return None;
+        }
+
+        let elapsed = now.saturating_duration_since(self.last_frame).as_secs_f64();
+        let dx = self.target.x - self.displayed.x;
+        let dy = self.target.y - self.displayed.y;
+        let distance = dx.hypot(dy);
+        let alpha = 1.0 - (-elapsed / MOTION_TIME_CONSTANT_SECONDS).exp();
+        let frame_fraction = if distance <= MOTION_SNAP_DISTANCE {
+            1.0
+        } else {
+            alpha.min(MOTION_MAX_FRAME_DISTANCE / distance).min(1.0)
+        };
+        let mut next = Point::new(
+            self.displayed.x + dx * frame_fraction,
+            self.displayed.y + dy * frame_fraction,
+        );
+        if (self.target.x - next.x).hypot(self.target.y - next.y) <= MOTION_SNAP_DISTANCE {
+            next = self.target;
+            self.pending = false;
+        }
+        self.displayed = next;
+        self.last_frame = now;
+        self.next_frame = now + MOTION_FRAME_INTERVAL;
+        Some(next)
+    }
+
+    fn finish(&mut self, now: Instant) -> Option<Point> {
+        if !self.pending {
+            return None;
+        }
+        let target = self.target;
+        self.jump(target, now);
+        Some(target)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -539,10 +616,12 @@ fn points_are_close(left: Point, right: Point) -> bool {
 impl MacMouseInjector {
     #[must_use]
     pub fn new(initial_position: Point) -> Self {
+        let now = Instant::now();
         Self {
             position: initial_position,
             pressed: BTreeSet::new(),
             clicks: ClickTracker::default(),
+            motion: MotionSmoother::new(initial_position, now),
         }
     }
 
@@ -621,7 +700,7 @@ impl MacMouseInjector {
         }
     }
 
-    fn post_movement(&mut self, position: Point) -> Result<(), PlatformError> {
+    fn post_movement_now(&mut self, position: Point) -> Result<(), PlatformError> {
         if !position.is_finite() {
             return Err(PlatformError::new("mouse position must be finite"));
         }
@@ -634,6 +713,13 @@ impl MacMouseInjector {
             .next()
             .and_then(|button| self.clicks.active_state(*button));
         self.post_mouse(event_type, button, click_state)
+    }
+
+    fn flush_movement(&mut self) -> Result<(), PlatformError> {
+        if let Some(position) = self.motion.finish(Instant::now()) {
+            self.post_movement_now(position)?;
+        }
+        Ok(())
     }
 
     fn post_button(
@@ -679,16 +765,40 @@ impl MouseInjectionBackend for MacMouseInjector {
         match event {
             RemoteMouseEvent::Enter { position, .. } => {
                 self.clicks.reset();
-                self.post_movement(position)
+                self.motion.jump(position, Instant::now());
+                self.post_movement_now(position)
             }
-            RemoteMouseEvent::MoveAbsolute { position, .. } => self.post_movement(position),
-            RemoteMouseEvent::Button { button, state } => self.post_button(button, state),
+            RemoteMouseEvent::MoveAbsolute { position, .. } => {
+                if !position.is_finite() {
+                    return Err(PlatformError::new("mouse position must be finite"));
+                }
+                self.motion.set_target(position);
+                Ok(())
+            }
+            RemoteMouseEvent::Button { button, state } => {
+                self.flush_movement()?;
+                self.post_button(button, state)
+            }
             RemoteMouseEvent::Wheel {
                 horizontal,
                 vertical,
-            } => self.post_scroll(horizontal, vertical),
-            RemoteMouseEvent::Leave | RemoteMouseEvent::ReleaseAll => self.release_all(),
+            } => {
+                self.flush_movement()?;
+                self.post_scroll(horizontal, vertical)
+            }
+            RemoteMouseEvent::Leave => {
+                self.flush_movement()?;
+                self.release_all()
+            }
+            RemoteMouseEvent::ReleaseAll => self.release_all(),
         }
+    }
+
+    fn poll(&mut self) -> Result<(), PlatformError> {
+        if let Some(position) = self.motion.sample(Instant::now()) {
+            self.post_movement_now(position)?;
+        }
+        Ok(())
     }
 
     fn release_all(&mut self) -> Result<(), PlatformError> {
@@ -1236,6 +1346,44 @@ mod tests {
                 start + DOUBLE_CLICK_INTERVAL + Duration::from_millis(100),
             ),
             1
+        );
+    }
+
+    #[test]
+    fn motion_smoother_waits_for_a_frame_and_converges_without_jumping() {
+        let start = Instant::now();
+        let mut motion = MotionSmoother::new(Point::new(0.0, 0.0), start);
+        motion.set_target(Point::new(100.0, 0.0));
+
+        assert_eq!(motion.sample(start + Duration::from_millis(3)), None);
+        let first = motion
+            .sample(start + MOTION_FRAME_INTERVAL)
+            .expect("the first frame should be ready");
+        assert!(first.x > 0.0 && first.x < 100.0);
+        assert_eq!(first.y, 0.0);
+
+        let mut latest = first;
+        for frame in 2..=12 {
+            if let Some(position) = motion.sample(start + MOTION_FRAME_INTERVAL * frame) {
+                latest = position;
+            }
+        }
+        assert!((100.0 - latest.x).abs() <= MOTION_SNAP_DISTANCE);
+    }
+
+    #[test]
+    fn motion_smoother_caps_a_large_delayed_step() {
+        let start = Instant::now();
+        let mut motion = MotionSmoother::new(Point::new(0.0, 0.0), start);
+        motion.set_target(Point::new(1_000.0, 0.0));
+
+        let first = motion
+            .sample(start + Duration::from_millis(100))
+            .expect("a delayed frame should be ready");
+        assert_eq!(first, Point::new(MOTION_MAX_FRAME_DISTANCE, 0.0));
+        assert_eq!(
+            motion.finish(start + Duration::from_millis(101)),
+            Some(Point::new(1_000.0, 0.0))
         );
     }
 }

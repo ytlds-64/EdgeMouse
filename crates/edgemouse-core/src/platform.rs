@@ -28,6 +28,16 @@ pub trait MouseCaptureBackend {
 pub trait MouseInjectionBackend {
     fn permission_state(&self) -> PermissionState;
     fn inject(&mut self, event: RemoteMouseEvent) -> Result<(), PlatformError>;
+
+    /// Advances any platform-specific, low-latency movement pacing.
+    ///
+    /// Most backends inject movement immediately and need no polling. A backend
+    /// may override this to render a buffered absolute position on a stable
+    /// cadence without delaying buttons, wheels, or keyboard input.
+    fn poll(&mut self) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
     fn release_all(&mut self) -> Result<(), PlatformError>;
 }
 

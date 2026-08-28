@@ -42,6 +42,15 @@ button events. On Windows, a balanced `timeBeginPeriod(1)`/`timeEndPeriod(1)`
 request keeps the movement timer from being rounded to the default scheduler
 period while the agent is running.
 
+The macOS injector buffers only the newest received absolute position and polls
+it on a stable 4 ms render cadence. A short exponential filter adds roughly one
+input frame of steady-state lag and a per-frame distance bound breaks up large
+post-jitter jumps. Reliable control events flush the target first, preserving
+the exact position and ordering of clicks, wheels, drags, and leave events. The
+receive coalescer also records inter-arrival variation and the largest active
+movement gap in each five-second diagnostics window; idle gaps over 100 ms reset
+the estimator instead of being reported as network jitter.
+
 ## Control state and safety
 
 - `Local`: physical events pass through on this machine.

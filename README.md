@@ -294,6 +294,12 @@ Remote absolute movement is emitted every 4–12 ms according to current RTT,
 always using the newest position. Stale movement is discarded during network
 jitter instead of being replayed later. Buttons, wheels, enter, leave, and the
 last position before each control event remain reliable and strictly ordered.
+On macOS, received movement is rendered on a stable 4 ms cadence with a bounded
+low-latency filter. Normal movement adds only a few milliseconds of lag, while a
+large update after a Wi-Fi gap is spread across short frames instead of becoming
+one visible cursor jump. Buttons, wheels, leave events, and drag transitions
+flush the newest position immediately, so smoothing never changes control-event
+ordering or click accuracy.
 If the peer's physical mouse becomes unresponsive while it controls this
 computer, deliberately pushing this computer's physical mouse toward the
 configured peer edge requests an authenticated control handoff. The detector
@@ -304,9 +310,10 @@ before acknowledging; if it cannot acknowledge within 1.5 seconds, the receiver
 restores local input and reconnects instead of leaving the pointer trapped.
 While movement is active, the agent prints a five-second link summary containing
 QUIC RTT, the current movement interval, sent updates, skipped congested updates,
-and merged updates. Windows requests 1 ms timer resolution while EdgeMouse is
-running so the 4–12 ms movement schedule does not collapse to the default
-roughly 15.6 ms system timer period.
+merged updates, receive-side arrival jitter, and the largest active-movement
+arrival gap. Windows requests 1 ms timer resolution while EdgeMouse is running
+so the 4–12 ms movement schedule does not collapse to the default roughly
+15.6 ms system timer period.
 
 The authenticated physical-mouse reclaim handshake uses protocol v5 in
 EdgeMouse 0.3.1. Both computers must run 0.3.1 or newer; earlier builds
@@ -314,6 +321,9 @@ intentionally refuse this connection instead of silently using incompatible
 control messages. EdgeMouse 0.3.2 fixes physical-versus-synthetic movement
 classification during that handoff and keeps the Windows takeover reference
 synchronized with the currently injected pointer.
+EdgeMouse 0.3.3 adds low-latency macOS receive smoothing and arrival-jitter
+diagnostics without changing protocol v5, so it remains connection-compatible
+with 0.3.1 and 0.3.2 during a staged upgrade.
 
 ## Verify the source tree
 

@@ -627,9 +627,11 @@ fn run_loop(
                     coalesced_moves,
                     received_moves,
                     stale_moves,
+                    arrival_jitter_ms,
+                    max_arrival_gap_ms,
                 } => {
                     println!(
-                        "Mouse link: RTT {rtt_ms:.1} ms; interval {send_interval_ms} ms; sent {sent_moves}; skipped {skipped_moves}; merged {coalesced_moves}; received {received_moves}; stale {stale_moves}"
+                        "Mouse link: RTT {rtt_ms:.1} ms; interval {send_interval_ms} ms; sent {sent_moves}; skipped {skipped_moves}; merged {coalesced_moves}; received {received_moves}; stale {stale_moves}; arrival jitter {arrival_jitter_ms:.1} ms; max gap {max_arrival_gap_ms:.1} ms"
                     );
                 }
                 NetworkEvent::Disconnected(reason) => {
@@ -736,6 +738,7 @@ fn run_loop(
                 session_id,
             )?;
         }
+        injector.poll()?;
         if !handled_input {
             std::thread::sleep(IDLE_POLL_INTERVAL);
         }
