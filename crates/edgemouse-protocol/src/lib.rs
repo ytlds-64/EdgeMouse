@@ -13,7 +13,7 @@ use edgemouse_core::{
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 pub const HEADER_LEN: usize = 12;
 pub const MAX_FRAME_LEN: usize = 64 * 1024;
 pub const MOUSE_DATAGRAM_FRAME_LEN: usize = HEADER_LEN + 6 * std::mem::size_of::<u64>();
@@ -42,6 +42,17 @@ pub enum WireMessage {
     Keyboard {
         session_id: u64,
         event: RoutedKeyboardEvent,
+    },
+    /// The receiver's physical mouse requested that the current sender yield
+    /// its outgoing control session. The referenced session belongs to the
+    /// sender, which prevents a stale request from affecting a newer handoff.
+    ControlReclaim {
+        owner_session_id: u64,
+    },
+    /// Confirms that the original sender restored its local pointer and is
+    /// ready to accept a reverse handoff from the receiver.
+    ControlReclaimAck {
+        owner_session_id: u64,
     },
     /// An unreliable absolute movement update. `after_sequence` identifies the
     /// newest reliable mouse event that must be applied before this position.
@@ -169,6 +180,10 @@ pub fn encode_frame(message: &WireMessage) -> Result<Vec<u8>, EncodeError> {
             });
             payload.push(u8::from(event.event.repeat));
         }
+        WireMessage::ControlReclaim { owner_session_id }
+        | WireMessage::ControlReclaimAck { owner_session_id } => {
+            put_u64(&mut payload, *owner_session_id);
+        }
         WireMessage::MouseDatagram {
             session_id,
             after_sequence,
@@ -252,6 +267,12 @@ pub fn decode_frame(frame: &[u8]) -> Result<WireMessage, DecodeError> {
         },
         10 => decode_mouse_datagram(&mut payload)?,
         11 => decode_keyboard(&mut payload)?,
+        12 => WireMessage::ControlReclaim {
+            owner_session_id: payload.u64()?,
+        },
+        13 => WireMessage::ControlReclaimAck {
+            owner_session_id: payload.u64()?,
+        },
         other => return Err(DecodeError::InvalidTag(other)),
     };
     if !payload.is_empty() {
@@ -292,6 +313,8 @@ fn tag_for(message: &WireMessage) -> u8 {
         },
         WireMessage::MouseDatagram { .. } => 10,
         WireMessage::Keyboard { .. } => 11,
+        WireMessage::ControlReclaim { .. } => 12,
+        WireMessage::ControlReclaimAck { .. } => 13,
         WireMessage::Heartbeat { .. } => 8,
         WireMessage::Goodbye { .. } => 9,
     }
@@ -621,6 +644,12 @@ mod tests {
                     repeat: false,
                 },
             },
+        });
+        round_trip(WireMessage::ControlReclaim {
+            owner_session_id: 99,
+        });
+        round_trip(WireMessage::ControlReclaimAck {
+            owner_session_id: 99,
         });
         round_trip(WireMessage::Heartbeat {
             session_id: 99,

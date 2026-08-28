@@ -88,7 +88,7 @@ bypass.
 
 Both agents bind a QUIC UDP endpoint. The lower node ID initiates and retries;
 the higher node ID accepts, eliminating duplicate-connection races. TLS uses
-ALPN `edgemouse/4`. After TLS, both sides exchange and validate a protocol
+ALPN `edgemouse/5`. After TLS, both sides exchange and validate a protocol
 `Hello`, including the sender's current screen ID, desktop bounds, orientation,
 and scale. Each side builds the two-node topology from its freshly detected local
 desktop and the authenticated peer announcement rather than duplicating remote
@@ -102,6 +102,14 @@ coalescing prevents application-level backlog. A heartbeat is sent every 500 ms.
 The receive slot compares event sequence numbers rather than packet arrival
 order, so a delayed older datagram cannot overwrite a newer position when the
 pointer reverses direction.
+
+While incoming remote control is active, the receiver still observes its own
+physical mouse for a deliberate push toward the configured peer edge. That
+gesture sends a reliable `ControlReclaim` bound to the active owner session. The
+sender first releases captured buttons and keys, restores its local pointer, and
+then replies with `ControlReclaimAck`; only then does the receiver cross the
+edge and begin a new outgoing session. A missing acknowledgement restores local
+input and forces a reconnect after 1.5 seconds, preventing a trapped pointer.
 
 When `peer.address` is `auto`, the lower node ID locates the higher node on IPv4
 UDP port 43892 while the higher node immediately opens its QUIC listener and

@@ -6,9 +6,9 @@ use crate::discovery::{
 use crate::network::{Network, NetworkEvent};
 use crate::platform;
 use edgemouse_core::{
-    CaptureMode, ControlState, Effect, KeyboardCaptureBackend, KeyboardInjectionBackend,
-    MouseCaptureBackend, MouseInjectionBackend, Point, Rect, RemoteMouseEvent, RoutedEvent,
-    RoutedKeyboardEvent, ScreenId, Session,
+    CaptureMode, ControlState, Edge, Effect, KeyboardCaptureBackend, KeyboardInjectionBackend,
+    MouseCaptureBackend, MouseInjectionBackend, PhysicalMouseEvent, Point, Rect, RemoteMouseEvent,
+    RoutedEvent, RoutedKeyboardEvent, ScreenId, Session, Vector,
 };
 use edgemouse_protocol::ScreenInfo;
 use edgemouse_protocol::WireMessage;
@@ -24,6 +24,9 @@ const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(5);
 const RECONNECT_STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const POINTER_BOUNDARY_TOLERANCE: f64 = 1.0;
 const POINTER_INTERIOR_INSET: f64 = 1.0;
+const LOCAL_TAKEOVER_DISTANCE: f64 = 180.0;
+const LOCAL_TAKEOVER_MOTION_GAP_MS: u64 = 300;
+const LOCAL_TAKEOVER_ACK_TIMEOUT_MS: u64 = 1_500;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ConnectionEnd {
@@ -53,6 +56,85 @@ impl ReconnectBackoff {
 
     fn reset(&mut self) {
         self.next = RECONNECT_INITIAL_DELAY;
+    }
+}
+
+#[derive(Debug)]
+struct LocalTakeoverGesture {
+    edge: Edge,
+    progress: f64,
+    last_motion_ms: Option<u64>,
+    pending: Option<(u64, u64)>,
+}
+
+impl LocalTakeoverGesture {
+    const fn new(edge: Edge) -> Self {
+        Self {
+            edge,
+            progress: 0.0,
+            last_motion_ms: None,
+            pending: None,
+        }
+    }
+
+    fn observe(&mut self, event: PhysicalMouseEvent, now_ms: u64) -> bool {
+        if self.pending.is_some() {
+            return false;
+        }
+        let PhysicalMouseEvent::Move { movement } = event else {
+            self.progress = 0.0;
+            self.last_motion_ms = None;
+            return false;
+        };
+        if self
+            .last_motion_ms
+            .is_some_and(|last| now_ms.saturating_sub(last) > LOCAL_TAKEOVER_MOTION_GAP_MS)
+        {
+            self.progress = 0.0;
+        }
+        self.last_motion_ms = Some(now_ms);
+
+        let (toward, perpendicular) = match self.edge {
+            Edge::Left => (-movement.dx, movement.dy),
+            Edge::Right => (movement.dx, movement.dy),
+            Edge::Top => (-movement.dy, movement.dx),
+            Edge::Bottom => (movement.dy, movement.dx),
+        };
+        if toward <= 0.0 {
+            self.progress = (self.progress + toward * 2.0).max(0.0);
+            return false;
+        }
+        self.progress = (self.progress + toward - perpendicular.abs().min(toward) * 0.1).max(0.0);
+        if self.progress < LOCAL_TAKEOVER_DISTANCE {
+            return false;
+        }
+        self.progress = 0.0;
+        true
+    }
+
+    fn mark_requested(&mut self, owner_session_id: u64, now_ms: u64) {
+        self.pending = Some((owner_session_id, now_ms));
+        self.last_motion_ms = None;
+    }
+
+    fn accept_ack(&mut self, owner_session_id: u64) -> bool {
+        if !matches!(self.pending, Some((pending, _)) if pending == owner_session_id) {
+            return false;
+        }
+        self.reset();
+        true
+    }
+
+    fn timed_out(&self, now_ms: u64) -> Option<u64> {
+        let (owner_session_id, requested_at) = self.pending?;
+        (now_ms.saturating_sub(requested_at) >= LOCAL_TAKEOVER_ACK_TIMEOUT_MS)
+            .then_some(owner_session_id)
+    }
+
+    fn reset(&mut self) {
+        self.progress = 0.0;
+        self.last_motion_ms = None;
+        self.pending = None;
     }
 }
 
@@ -278,6 +360,7 @@ fn run_connected(
         &mut keyboard_injector,
         &mut session,
         &mut remote,
+        config.peer_on,
         session_id,
         stopping,
         clock,
@@ -356,10 +439,12 @@ fn run_loop(
     keyboard_injector: &mut platform::NativeKeyboardInjector,
     session: &mut Session,
     remote: &mut RemoteReceiver,
+    takeover_edge: Edge,
     session_id: u64,
     stopping: &AtomicBool,
     clock: Instant,
 ) -> Result<ConnectionEnd, Box<dyn Error>> {
+    let mut takeover = LocalTakeoverGesture::new(takeover_edge);
     while !stopping.load(Ordering::Acquire) {
         let now_ms = elapsed_ms(clock);
         while let Some(event) = network.try_receive()? {
@@ -395,6 +480,67 @@ fn run_loop(
                     remote.handle_keyboard(remote_session, event, keyboard_injector, now_ms)?;
                     let transition = remote.take_ready_datagram(injector, now_ms)?;
                     apply_remote_transition(transition, remote.local_screen, capture, session)?;
+                }
+                NetworkEvent::Message(WireMessage::ControlReclaim { owner_session_id }) => {
+                    if owner_session_id != session_id {
+                        return Err("peer requested control from a stale local session".into());
+                    }
+                    if remote.is_active() {
+                        return Err(
+                            "peer requested control during simultaneous incoming control".into(),
+                        );
+                    }
+                    if !matches!(
+                        session.state(),
+                        ControlState::Remote { peer } if peer == network.peer_node
+                    ) {
+                        return Err(
+                            "peer requested control when no outgoing session was active".into()
+                        );
+                    }
+                    let effects = session.yield_remote_control(network.peer_node);
+                    apply_effects(
+                        effects,
+                        network,
+                        capture,
+                        keyboard_capture,
+                        session,
+                        session_id,
+                    )?;
+                    network.send(WireMessage::ControlReclaimAck { owner_session_id })?;
+                    println!("Peer physical mouse reclaimed control");
+                }
+                NetworkEvent::Message(WireMessage::ControlReclaimAck { owner_session_id }) => {
+                    if !takeover.accept_ack(owner_session_id) {
+                        continue;
+                    }
+                    if remote.active_session() != Some(owner_session_id) {
+                        return Err("peer acknowledged a control session that is not active".into());
+                    }
+                    keyboard_injector.release_all()?;
+                    let position = remote
+                        .reset(injector)
+                        .ok_or("incoming control had no pointer position to reclaim")?;
+                    restore_incoming_control(remote.local_screen, position, capture, session)?;
+                    let result = session.handle_input(
+                        PhysicalMouseEvent::Move {
+                            movement: movement_across_edge(
+                                remote.local_bounds,
+                                position,
+                                takeover_edge,
+                            ),
+                        },
+                        now_ms,
+                    )?;
+                    apply_effects(
+                        result.effects,
+                        network,
+                        capture,
+                        keyboard_capture,
+                        session,
+                        session_id,
+                    )?;
+                    println!("Local physical mouse crossed {takeover_edge:?} and took control");
                 }
                 NetworkEvent::Datagram {
                     session_id: remote_session,
@@ -450,6 +596,19 @@ fn run_loop(
             ));
         }
 
+        if let Some(owner_session_id) = takeover.timed_out(now_ms) {
+            if remote.active_session() == Some(owner_session_id) {
+                keyboard_injector.release_all()?;
+                if let Some(position) = remote.reset(injector) {
+                    restore_incoming_control(remote.local_screen, position, capture, session)?;
+                }
+                return Ok(ConnectionEnd::Disconnected(
+                    "local physical mouse reclaim was not acknowledged".to_owned(),
+                ));
+            }
+            takeover.reset();
+        }
+
         let timeout_effects = session.poll_timeout(now_ms);
         let peer_timed_out = timeout_effects
             .iter()
@@ -486,8 +645,19 @@ fn run_loop(
         while let Some(event) = capture.try_next_event()? {
             handled_input = true;
             if remote.is_active() {
+                if takeover.observe(event, now_ms) {
+                    let owner_session_id = remote
+                        .active_session()
+                        .expect("remote control was checked as active");
+                    network.send(WireMessage::ControlReclaim { owner_session_id })?;
+                    takeover.mark_requested(owner_session_id, now_ms);
+                    println!(
+                        "Local physical mouse pushed toward {takeover_edge:?}; requesting control"
+                    );
+                }
                 continue;
             }
+            takeover.reset();
             let result = session.handle_input(event, now_ms)?;
             apply_effects(
                 result.effects,
@@ -515,6 +685,16 @@ fn run_loop(
         }
     }
     Ok(ConnectionEnd::Stopped)
+}
+
+fn movement_across_edge(bounds: Rect, position: Point, edge: Edge) -> Vector {
+    let margin = 2.0;
+    match edge {
+        Edge::Left => Vector::new(-(position.x - bounds.left() + margin), 0.0),
+        Edge::Right => Vector::new(bounds.right() - position.x + margin, 0.0),
+        Edge::Top => Vector::new(0.0, -(position.y - bounds.top() + margin)),
+        Edge::Bottom => Vector::new(0.0, bounds.bottom() - position.y + margin),
+    }
 }
 
 fn apply_remote_transition(
@@ -659,6 +839,10 @@ impl RemoteReceiver {
 
     const fn is_active(&self) -> bool {
         self.active_session.is_some()
+    }
+
+    const fn active_session(&self) -> Option<u64> {
+        self.active_session
     }
 
     fn handle(
@@ -1056,6 +1240,72 @@ mod tests {
             normalize_pointer_to_bounds(bounds, Point::new(2_500.0, 601.0)),
             None
         );
+    }
+
+    #[test]
+    fn local_takeover_requires_a_deliberate_push_toward_the_peer() {
+        let mut gesture = LocalTakeoverGesture::new(Edge::Left);
+        for (index, dx) in [-50.0, -50.0, -50.0].into_iter().enumerate() {
+            assert!(!gesture.observe(
+                PhysicalMouseEvent::Move {
+                    movement: Vector::new(dx, 0.0),
+                },
+                index as u64 * 50,
+            ));
+        }
+        assert!(gesture.observe(
+            PhysicalMouseEvent::Move {
+                movement: Vector::new(-40.0, 0.0),
+            },
+            150,
+        ));
+    }
+
+    #[test]
+    fn local_takeover_wrong_direction_and_long_pause_reset_progress() {
+        let mut gesture = LocalTakeoverGesture::new(Edge::Left);
+        assert!(!gesture.observe(
+            PhysicalMouseEvent::Move {
+                movement: Vector::new(-100.0, 0.0),
+            },
+            0,
+        ));
+        assert!(!gesture.observe(
+            PhysicalMouseEvent::Move {
+                movement: Vector::new(60.0, 0.0),
+            },
+            50,
+        ));
+        assert!(!gesture.observe(
+            PhysicalMouseEvent::Move {
+                movement: Vector::new(-150.0, 0.0),
+            },
+            500,
+        ));
+    }
+
+    #[test]
+    fn local_takeover_ack_is_session_bound_and_times_out_safely() {
+        let mut gesture = LocalTakeoverGesture::new(Edge::Left);
+        gesture.mark_requested(77, 100);
+
+        assert!(!gesture.accept_ack(78));
+        assert_eq!(gesture.timed_out(1_599), None);
+        assert_eq!(gesture.timed_out(1_600), Some(77));
+        assert!(gesture.accept_ack(77));
+        assert_eq!(gesture.timed_out(u64::MAX), None);
+    }
+
+    #[test]
+    fn reclaim_crossing_vector_exits_the_configured_peer_edge() {
+        let bounds = Rect::new(Point::new(-100.0, 20.0), 300.0, 200.0).unwrap();
+        let position = Point::new(75.0, 80.0);
+
+        let left = movement_across_edge(bounds, position, Edge::Left);
+        let right = movement_across_edge(bounds, position, Edge::Right);
+
+        assert!(position.x + left.dx < bounds.left());
+        assert!(position.x + right.dx > bounds.right());
     }
 
     #[test]

@@ -180,14 +180,24 @@ impl Session {
         if now_ms.saturating_sub(last_activity) < self.config.peer_timeout_ms {
             return Vec::new();
         }
-        self.begin_recovery(peer)
+        self.begin_recovery(peer, true)
     }
 
     pub fn disconnect_peer(&mut self, peer: NodeId) -> Vec<Effect> {
         if !matches!(self.state, ControlState::Remote { peer: active } if active == peer) {
             return Vec::new();
         }
-        self.begin_recovery(peer)
+        self.begin_recovery(peer, true)
+    }
+
+    /// Yields an outgoing remote-control session at the trusted peer's
+    /// request. Unlike timeout recovery, this is an orderly handoff and does
+    /// not report the peer as failed.
+    pub fn yield_remote_control(&mut self, peer: NodeId) -> Vec<Effect> {
+        if !matches!(self.state, ControlState::Remote { peer: active } if active == peer) {
+            return Vec::new();
+        }
+        self.begin_recovery(peer, false)
     }
 
     /// Confirms that the platform adapter restored and revealed the local pointer.
@@ -425,20 +435,22 @@ impl Session {
         sequence
     }
 
-    fn begin_recovery(&mut self, peer: NodeId) -> Vec<Effect> {
+    fn begin_recovery(&mut self, peer: NodeId, report_timeout: bool) -> Vec<Effect> {
+        let mut effects = Vec::with_capacity(2);
+        if report_timeout {
+            effects.push(Effect::PeerTimedOut { peer });
+        }
         let Some((screen, restore_position)) = self.local_restore else {
             self.state = ControlState::Recovering { peer };
-            return vec![Effect::PeerTimedOut { peer }];
+            return effects;
         };
         self.state = ControlState::Recovering { peer };
         self.last_peer_activity_ms = None;
-        vec![
-            Effect::PeerTimedOut { peer },
-            Effect::ReleasePointer {
-                screen,
-                restore_position,
-            },
-        ]
+        effects.push(Effect::ReleasePointer {
+            screen,
+            restore_position,
+        });
+        effects
     }
 }
 
@@ -763,6 +775,29 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn peer_requested_yield_restores_without_reporting_a_timeout() {
+        let mut session = session();
+        session
+            .handle_input(
+                PhysicalMouseEvent::Move {
+                    movement: Vector::new(5.0, 0.0),
+                },
+                100,
+            )
+            .unwrap();
+
+        let effects = session.yield_remote_control(REMOTE);
+
+        assert_eq!(session.state(), ControlState::Recovering { peer: REMOTE });
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::ReleasePointer { .. }]
+        ));
+        session.complete_recovery().unwrap();
+        assert_eq!(session.state(), ControlState::Local);
     }
 
     #[test]
