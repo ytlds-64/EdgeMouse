@@ -105,11 +105,14 @@ pointer reverses direction.
 
 While incoming remote control is active, the receiver still observes its own
 physical mouse for a deliberate push toward the configured peer edge. That
-gesture sends a reliable `ControlReclaim` bound to the active owner session. The
-sender first releases captured buttons and keys, restores its local pointer, and
-then replies with `ControlReclaimAck`; only then does the receiver cross the
-edge and begin a new outgoing session. A missing acknowledgement restores local
-input and forces a reconnect after 1.5 seconds, preventing a trapped pointer.
+gesture must cover the virtual distance from the current remote pointer to the
+edge plus a minimum overshoot. Marked synthetic movement never advances it, and
+an idle gap resets partial progress. A completed gesture sends a reliable
+`ControlReclaim` bound to the active owner session. The sender first releases
+captured buttons and keys, restores its local pointer, and then replies with
+`ControlReclaimAck`; only then does the receiver cross the edge and begin a new
+outgoing session. A missing acknowledgement restores local input and forces a
+reconnect after 1.5 seconds, preventing a trapped pointer.
 
 When `peer.address` is `auto`, the lower node ID locates the higher node on IPv4
 UDP port 43892 while the higher node immediately opens its QUIC listener and

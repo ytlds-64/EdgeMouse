@@ -127,7 +127,6 @@ unsafe extern "C" {
     fn CGEventSetIntegerValueField(event: *mut c_void, field: u32, value: i64);
     fn CGEventSetFlags(event: *mut c_void, flags: u64);
     fn CGEventPost(tap: u32, event: *mut c_void);
-    fn CGWarpMouseCursorPosition(position: CGPoint) -> i32;
     fn CGMainDisplayID() -> u32;
     fn CGGetActiveDisplayList(
         max_displays: u32,
@@ -332,20 +331,33 @@ impl MacMouseCapture {
         if !position.is_finite() {
             return Err(PlatformError::new("cursor restore position is not finite"));
         }
-        // SAFETY: CGPoint is ABI-compatible and contains finite values.
-        let result = unsafe {
-            CGWarpMouseCursorPosition(CGPoint {
-                x: position.x,
-                y: position.y,
-            })
+        // Use a marked absolute move instead of CGWarpMouseCursorPosition. A raw
+        // warp is reported back through the event tap without source metadata
+        // and can be mistaken for physical takeover input.
+        let event = unsafe {
+            CGEventCreateMouseEvent(
+                ptr::null_mut(),
+                EVENT_MOUSE_MOVED,
+                CGPoint {
+                    x: position.x,
+                    y: position.y,
+                },
+                0,
+            )
         };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(PlatformError::new(format!(
-                "CGWarpMouseCursorPosition failed with code {result}"
-            )))
+        if event.is_null() {
+            return Err(PlatformError::new(
+                "CGEventCreateMouseEvent failed while moving the cursor",
+            ));
         }
+        // SAFETY: `event` is a live create-rule reference and posting retains
+        // everything CoreGraphics needs before the reference is released.
+        unsafe {
+            CGEventSetIntegerValueField(event, EVENT_SOURCE_USER_DATA, EVENT_MARKER);
+            CGEventPost(EVENT_TAP_SESSION, event);
+            CFRelease(event);
+        }
+        Ok(())
     }
 
     fn associate_cursor(connected: bool) -> Result<(), PlatformError> {
@@ -615,7 +627,6 @@ impl MacMouseInjector {
         }
         self.position = position;
         self.clicks.note_movement(position);
-        MacMouseCapture::warp(position)?;
         let (event_type, button) = self.movement_type();
         let click_state = self
             .pressed

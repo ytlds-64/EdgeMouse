@@ -962,6 +962,12 @@ unsafe extern "system" fn mouse_hook_callback(code: i32, w_param: usize, l_param
     let state = unsafe { &*state_ptr };
     let data = unsafe { &*(l_param as *const MouseHookData) };
     if data.extra_info == EVENT_MARKER || data.flags & LLMHF_INJECTED != 0 {
+        if w_param as u32 == WM_MOUSEMOVE {
+            update_hook_reference(
+                &state.last_point,
+                logical_hook_point(data.point, state.coordinate_scale),
+            );
+        }
         // SAFETY: Synthetic input must remain visible to other hooks and applications.
         return unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) };
     }
@@ -1410,6 +1416,12 @@ fn logical_hook_point(point: PointI32, coordinate_scale: f64) -> Point {
     )
 }
 
+fn update_hook_reference(reference: &Mutex<Option<Point>>, point: Point) {
+    if let Ok(mut reference) = reference.lock() {
+        *reference = Some(point);
+    }
+}
+
 fn button_event(button: MouseButton, state: ButtonState) -> PhysicalMouseEvent {
     PhysicalMouseEvent::Button { button, state }
 }
@@ -1494,6 +1506,14 @@ mod tests {
             logical_hook_point(PointI32 { x: 101, y: 203 }, 2.0),
             Point::new(50.5, 101.5)
         );
+    }
+
+    #[test]
+    fn synthetic_remote_moves_refresh_the_physical_takeover_reference() {
+        let reference = Mutex::new(Some(Point::new(10.0, 20.0)));
+        update_hook_reference(&reference, Point::new(300.0, 400.0));
+
+        assert_eq!(*reference.lock().unwrap(), Some(Point::new(300.0, 400.0)));
     }
 
     #[test]
