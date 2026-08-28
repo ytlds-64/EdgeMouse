@@ -87,8 +87,10 @@ prepare_app_bundle() {
         --sign - \
         --identifier "${associated_bundle_identifier}" \
         "${app_bundle}" >/dev/null
-    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
-        -f "${app_bundle}"
+    if ! /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+        -f "${app_bundle}"; then
+        echo "Warning: macOS could not refresh the EdgeMouse app registration; login startup can continue." >&2
+    fi
 }
 
 write_plist() {
