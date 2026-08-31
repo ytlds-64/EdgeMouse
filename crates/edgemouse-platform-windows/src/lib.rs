@@ -7,11 +7,11 @@ use edgemouse_core::{
     KeyboardInjectionBackend, MouseButton, MouseCaptureBackend, MouseInjectionBackend,
     PermissionState, PhysicalMouseEvent, PlatformError, Point, Rect, RemoteMouseEvent, Vector,
 };
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::c_void;
-use std::mem::size_of;
+use std::mem::{MaybeUninit, size_of};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::JoinHandle;
 
@@ -19,6 +19,7 @@ const WH_MOUSE_LL: i32 = 14;
 const WH_KEYBOARD_LL: i32 = 13;
 const HC_ACTION: i32 = 0;
 const WM_QUIT: u32 = 0x0012;
+const WM_INPUT: u32 = 0x00ff;
 const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
@@ -40,6 +41,27 @@ const WM_KEYUP: u32 = 0x0101;
 const WM_SYSKEYDOWN: u32 = 0x0104;
 const WM_SYSKEYUP: u32 = 0x0105;
 const PM_NOREMOVE: u32 = 0;
+
+const HID_USAGE_PAGE_GENERIC: u16 = 0x01;
+const HID_USAGE_GENERIC_MOUSE: u16 = 0x02;
+const RIDEV_REMOVE: u32 = 0x0000_0001;
+const RIDEV_INPUTSINK: u32 = 0x0000_0100;
+const RID_INPUT: u32 = 0x1000_0003;
+const RIM_TYPEMOUSE: u32 = 0;
+const MOUSE_MOVE_ABSOLUTE: u16 = 0x0001;
+const MOUSE_VIRTUAL_DESKTOP: u16 = 0x0002;
+const RI_MOUSE_LEFT_BUTTON_DOWN: u16 = 0x0001;
+const RI_MOUSE_LEFT_BUTTON_UP: u16 = 0x0002;
+const RI_MOUSE_RIGHT_BUTTON_DOWN: u16 = 0x0004;
+const RI_MOUSE_RIGHT_BUTTON_UP: u16 = 0x0008;
+const RI_MOUSE_MIDDLE_BUTTON_DOWN: u16 = 0x0010;
+const RI_MOUSE_MIDDLE_BUTTON_UP: u16 = 0x0020;
+const RI_MOUSE_BUTTON_4_DOWN: u16 = 0x0040;
+const RI_MOUSE_BUTTON_4_UP: u16 = 0x0080;
+const RI_MOUSE_BUTTON_5_DOWN: u16 = 0x0100;
+const RI_MOUSE_BUTTON_5_UP: u16 = 0x0200;
+const RI_MOUSE_WHEEL: u16 = 0x0400;
+const RI_MOUSE_HORIZONTAL_WHEEL: u16 = 0x0800;
 
 const LLMHF_INJECTED: u32 = 0x0000_0001;
 const LLKHF_EXTENDED: u32 = 0x0000_0001;
@@ -73,7 +95,10 @@ const SM_YVIRTUALSCREEN: i32 = 77;
 const SM_CXVIRTUALSCREEN: i32 = 78;
 const SM_CYVIRTUALSCREEN: i32 = 79;
 const SM_CMONITORS: i32 = 80;
+const SM_CXSCREEN: i32 = 0;
+const SM_CYSCREEN: i32 = 1;
 const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: isize = -4;
+const HWND_MESSAGE: isize = -3;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +134,40 @@ struct Message {
     time: u32,
     point: PointI32,
     private: u32,
+}
+
+#[repr(C)]
+struct RawInputDevice {
+    usage_page: u16,
+    usage: u16,
+    flags: u32,
+    target: *mut c_void,
+}
+
+#[repr(C)]
+struct RawInputHeader {
+    input_type: u32,
+    size: u32,
+    device: *mut c_void,
+    w_param: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct RawMouse {
+    flags: u16,
+    alignment: u16,
+    buttons: u32,
+    raw_buttons: u32,
+    last_x: i32,
+    last_y: i32,
+    extra_information: u32,
+}
+
+#[repr(C)]
+struct RawMouseInput {
+    header: RawInputHeader,
+    mouse: RawMouse,
 }
 
 #[repr(C)]
@@ -173,6 +232,29 @@ unsafe extern "system" {
     fn TranslateMessage(message: *const Message) -> i32;
     fn DispatchMessageW(message: *const Message) -> isize;
     fn PostThreadMessageW(thread_id: u32, message: u32, w_param: usize, l_param: isize) -> i32;
+    fn CreateWindowExW(
+        extended_style: u32,
+        class_name: *const u16,
+        window_name: *const u16,
+        style: u32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        parent: *mut c_void,
+        menu: *mut c_void,
+        instance: *mut c_void,
+        parameter: *mut c_void,
+    ) -> *mut c_void;
+    fn DestroyWindow(window: *mut c_void) -> i32;
+    fn RegisterRawInputDevices(devices: *const RawInputDevice, count: u32, size: u32) -> i32;
+    fn GetRawInputData(
+        raw_input: *mut c_void,
+        command: u32,
+        data: *mut c_void,
+        size: *mut u32,
+        header_size: u32,
+    ) -> u32;
     fn SetCursorPos(x: i32, y: i32) -> i32;
     fn GetCursorPos(point: *mut PointI32) -> i32;
     fn ShowCursor(show: i32) -> i32;
@@ -185,6 +267,7 @@ unsafe extern "system" {
 #[link(name = "Kernel32")]
 unsafe extern "system" {
     fn GetCurrentThreadId() -> u32;
+    fn GetTickCount() -> u32;
     fn SetConsoleCtrlHandler(handler: Option<ConsoleCtrlHandler>, add: i32) -> i32;
 }
 
@@ -195,6 +278,20 @@ struct CallbackState {
     overflowed: Arc<AtomicBool>,
     last_point: Arc<Mutex<Option<Point>>>,
     coordinate_scale: f64,
+    raw_input_requested: bool,
+    raw_input_active: AtomicBool,
+    raw_cutoff_time: Arc<AtomicU32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MouseCaptureStartup {
+    thread_id: u32,
+    raw_input: bool,
+}
+
+#[derive(Default)]
+struct RawMovementState {
+    absolute_positions: BTreeMap<usize, Point>,
 }
 
 static CALLBACK_STATE: AtomicPtr<CallbackState> = AtomicPtr::new(ptr::null_mut());
@@ -274,6 +371,7 @@ pub struct WindowsMouseCapture {
     transitioning: Arc<AtomicBool>,
     overflowed: Arc<AtomicBool>,
     last_point: Arc<Mutex<Option<Point>>>,
+    raw_cutoff_time: Arc<AtomicU32>,
     capture_anchor: Point,
     thread_id: u32,
     thread: Option<JoinHandle<()>>,
@@ -285,6 +383,7 @@ impl WindowsMouseCapture {
         coordinate_scale: f64,
         capture_anchor: Point,
         initial_pointer: Point,
+        raw_input_enabled: bool,
     ) -> Result<Self, PlatformError> {
         if !coordinate_scale.is_finite() || coordinate_scale <= 0.0 {
             return Err(PlatformError::new(
@@ -315,25 +414,43 @@ impl WindowsMouseCapture {
         // program becomes ready while the cursor is already on a screen edge.
         let last_point = Arc::new(Mutex::new(Some(initial_pointer)));
         let callback_last_point = Arc::clone(&last_point);
+        // SAFETY: GetTickCount has no pointer parameters and supplies the same
+        // timestamp domain used by Win32 input messages.
+        let raw_cutoff_time = Arc::new(AtomicU32::new(unsafe { GetTickCount() }));
+        let callback_raw_cutoff_time = Arc::clone(&raw_cutoff_time);
         let thread = std::thread::Builder::new()
             .name("edgemouse-win32-hook".to_owned())
             .spawn(move || {
                 run_hook_thread(
-                    event_sender,
-                    callback_suppress,
-                    callback_transitioning,
-                    callback_overflowed,
-                    callback_last_point,
-                    coordinate_scale,
+                    CallbackState {
+                        sender: event_sender,
+                        suppress: callback_suppress,
+                        transitioning: callback_transitioning,
+                        overflowed: callback_overflowed,
+                        last_point: callback_last_point,
+                        coordinate_scale,
+                        raw_input_requested: raw_input_enabled,
+                        raw_input_active: AtomicBool::new(false),
+                        raw_cutoff_time: callback_raw_cutoff_time,
+                    },
                     |result| {
                         drop(startup_sender.send(result));
                     },
                 );
             })
             .map_err(|error| PlatformError::new(format!("failed to start mouse hook: {error}")))?;
-        let thread_id = startup_receiver
+        let startup = startup_receiver
             .recv()
             .map_err(|_| PlatformError::new("mouse hook exited during startup"))??;
+        if startup.raw_input {
+            println!("Windows mouse capture: Raw Input movement + low-level safety hook");
+        } else if raw_input_enabled {
+            eprintln!(
+                "Windows Raw Input is unavailable; using the low-level mouse hook for movement"
+            );
+        } else {
+            println!("Windows mouse capture: low-level hook (Raw Input disabled in config)");
+        }
         Ok(Self {
             receiver: event_receiver,
             deferred_events: VecDeque::new(),
@@ -341,8 +458,9 @@ impl WindowsMouseCapture {
             transitioning,
             overflowed,
             last_point,
+            raw_cutoff_time,
             capture_anchor,
-            thread_id,
+            thread_id: startup.thread_id,
             thread: Some(thread),
             cursor_hidden: false,
         })
@@ -427,6 +545,10 @@ impl WindowsMouseCapture {
             self.show_cursor();
             self.suppress.store(false, Ordering::Release);
         }
+        // SAFETY: GetTickCount has no pointer parameters. Raw events at or before
+        // this transition boundary belong to the previous pointer owner.
+        self.raw_cutoff_time
+            .store(unsafe { GetTickCount() }, Ordering::Release);
         self.transitioning.store(false, Ordering::Release);
         result
     }
@@ -878,22 +1000,11 @@ impl KeyboardInjectionBackend for WindowsKeyboardInjector {
 }
 
 fn run_hook_thread(
-    sender: mpsc::SyncSender<PhysicalMouseEvent>,
-    suppress: Arc<AtomicBool>,
-    transitioning: Arc<AtomicBool>,
-    overflowed: Arc<AtomicBool>,
-    last_point: Arc<Mutex<Option<Point>>>,
-    coordinate_scale: f64,
-    report_startup: impl FnOnce(Result<u32, PlatformError>),
+    state: CallbackState,
+    report_startup: impl FnOnce(Result<MouseCaptureStartup, PlatformError>),
 ) {
-    let state = Box::new(CallbackState {
-        sender,
-        suppress,
-        transitioning,
-        overflowed,
-        last_point,
-        coordinate_scale,
-    });
+    let raw_input_requested = state.raw_input_requested;
+    let state = Box::new(state);
     let state_ptr = Box::into_raw(state);
     if CALLBACK_STATE
         .compare_exchange(
@@ -923,6 +1034,15 @@ fn run_hook_thread(
         return;
     }
 
+    let raw_window = raw_input_requested.then(create_raw_input_window).flatten();
+    let raw_input = raw_window.is_some_and(register_raw_mouse);
+    // SAFETY: state_ptr remains owned by this thread until the message loop exits.
+    unsafe {
+        (*state_ptr)
+            .raw_input_active
+            .store(raw_input, Ordering::Release);
+    }
+
     let mut message = Message {
         window: ptr::null_mut(),
         message: 0,
@@ -935,13 +1055,36 @@ fn run_hook_thread(
     // SAFETY: PeekMessage creates this thread's message queue without removing a message.
     unsafe { PeekMessageW(&raw mut message, ptr::null_mut(), 0, 0, PM_NOREMOVE) };
     // SAFETY: Returns the ID of this live thread.
-    report_startup(Ok(unsafe { GetCurrentThreadId() }));
+    report_startup(Ok(MouseCaptureStartup {
+        thread_id: unsafe { GetCurrentThreadId() },
+        raw_input,
+    }));
+
+    let mut raw_movement = RawMovementState::default();
 
     loop {
         // SAFETY: message is valid writable storage and the thread owns this message loop.
         let result = unsafe { GetMessageW(&raw mut message, ptr::null_mut(), 0, 0) };
         if result <= 0 {
             break;
+        }
+        if message.message == WM_INPUT
+            && unsafe { (*state_ptr).raw_input_active.load(Ordering::Acquire) }
+            && process_raw_input_message(
+                message.l_param,
+                message.time,
+                unsafe { &*state_ptr },
+                &mut raw_movement,
+            )
+            .is_err()
+        {
+            // Keep the safety hook active and fail over permanently for this run.
+            unsafe {
+                (*state_ptr)
+                    .raw_input_active
+                    .store(false, Ordering::Release);
+            }
+            eprintln!("Windows Raw Input read failed; falling back to the low-level mouse hook");
         }
         // SAFETY: message was initialized by GetMessageW.
         unsafe {
@@ -951,10 +1094,282 @@ fn run_hook_thread(
     }
 
     CALLBACK_STATE.store(ptr::null_mut(), Ordering::Release);
+    if raw_input {
+        unregister_raw_mouse();
+    }
+    if let Some(window) = raw_window {
+        // SAFETY: This thread created and still owns the hidden window.
+        unsafe { DestroyWindow(window) };
+    }
     // SAFETY: The message loop has stopped and this thread owns the hook and state.
     unsafe {
         UnhookWindowsHookEx(hook);
         drop(Box::from_raw(state_ptr));
+    }
+}
+
+fn create_raw_input_window() -> Option<*mut c_void> {
+    const STATIC_CLASS: [u16; 7] = [83, 84, 65, 84, 73, 67, 0];
+    // SAFETY: STATIC_CLASS is a static nul-terminated Win32 system class name.
+    // HWND_MESSAGE creates a non-visible, message-only target owned by this thread.
+    let window = unsafe {
+        CreateWindowExW(
+            0,
+            STATIC_CLASS.as_ptr(),
+            ptr::null(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            HWND_MESSAGE as *mut c_void,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    };
+    (!window.is_null()).then_some(window)
+}
+
+fn register_raw_mouse(window: *mut c_void) -> bool {
+    let device = RawInputDevice {
+        usage_page: HID_USAGE_PAGE_GENERIC,
+        usage: HID_USAGE_GENERIC_MOUSE,
+        flags: RIDEV_INPUTSINK,
+        target: window,
+    };
+    // SAFETY: device points to one initialized registration record for this call.
+    unsafe {
+        RegisterRawInputDevices(
+            &raw const device,
+            1,
+            u32::try_from(size_of::<RawInputDevice>()).unwrap(),
+        ) != 0
+    }
+}
+
+fn unregister_raw_mouse() {
+    let device = RawInputDevice {
+        usage_page: HID_USAGE_PAGE_GENERIC,
+        usage: HID_USAGE_GENERIC_MOUSE,
+        flags: RIDEV_REMOVE,
+        target: ptr::null_mut(),
+    };
+    // SAFETY: RIDEV_REMOVE with a null target unregisters this process' mouse TLC.
+    unsafe {
+        RegisterRawInputDevices(
+            &raw const device,
+            1,
+            u32::try_from(size_of::<RawInputDevice>()).unwrap(),
+        );
+    }
+}
+
+fn process_raw_input_message(
+    raw_handle: isize,
+    message_time: u32,
+    state: &CallbackState,
+    movement_state: &mut RawMovementState,
+) -> Result<(), PlatformError> {
+    if raw_handle == 0 {
+        return Err(PlatformError::new(
+            "WM_INPUT did not contain an input handle",
+        ));
+    }
+    let mut raw = MaybeUninit::<RawMouseInput>::uninit();
+    let mut bytes = u32::try_from(size_of::<RawMouseInput>()).unwrap();
+    // SAFETY: raw is aligned writable storage for a mouse RAWINPUT record and
+    // bytes/header_size describe its exact capacity and header layout.
+    let copied = unsafe {
+        GetRawInputData(
+            raw_handle as *mut c_void,
+            RID_INPUT,
+            raw.as_mut_ptr().cast(),
+            &raw mut bytes,
+            u32::try_from(size_of::<RawInputHeader>()).unwrap(),
+        )
+    };
+    if copied == u32::MAX || usize::try_from(copied).ok() != Some(size_of::<RawMouseInput>()) {
+        return Err(PlatformError::new(format!(
+            "GetRawInputData returned {copied} bytes for a {}-byte mouse record",
+            size_of::<RawMouseInput>()
+        )));
+    }
+    // SAFETY: GetRawInputData reported that it initialized the complete record.
+    let raw = unsafe { raw.assume_init() };
+    if raw.header.input_type != RIM_TYPEMOUSE {
+        return Ok(());
+    }
+
+    let capture = state.suppress.load(Ordering::Acquire)
+        && !state.transitioning.load(Ordering::Acquire)
+        && win32_time_is_after(message_time, state.raw_cutoff_time.load(Ordering::Acquire));
+    let events = raw_mouse_events(&raw, movement_state, capture);
+    for event in events {
+        if !queue_mouse_event(state, event) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn raw_mouse_events(
+    raw: &RawMouseInput,
+    movement_state: &mut RawMovementState,
+    capture: bool,
+) -> Vec<PhysicalMouseEvent> {
+    let mut events = Vec::new();
+    let movement = raw_mouse_movement(raw, movement_state);
+    if capture {
+        match movement {
+            Some(movement) if movement.dx != 0.0 || movement.dy != 0.0 => {
+                events.push(PhysicalMouseEvent::Move { movement });
+            }
+            Some(_) | None => {}
+        }
+    }
+    if !capture {
+        return events;
+    }
+
+    let flags = low_word(raw.mouse.buttons);
+    let mappings = [
+        (
+            RI_MOUSE_LEFT_BUTTON_DOWN,
+            MouseButton::Primary,
+            ButtonState::Pressed,
+        ),
+        (
+            RI_MOUSE_LEFT_BUTTON_UP,
+            MouseButton::Primary,
+            ButtonState::Released,
+        ),
+        (
+            RI_MOUSE_RIGHT_BUTTON_DOWN,
+            MouseButton::Secondary,
+            ButtonState::Pressed,
+        ),
+        (
+            RI_MOUSE_RIGHT_BUTTON_UP,
+            MouseButton::Secondary,
+            ButtonState::Released,
+        ),
+        (
+            RI_MOUSE_MIDDLE_BUTTON_DOWN,
+            MouseButton::Middle,
+            ButtonState::Pressed,
+        ),
+        (
+            RI_MOUSE_MIDDLE_BUTTON_UP,
+            MouseButton::Middle,
+            ButtonState::Released,
+        ),
+        (
+            RI_MOUSE_BUTTON_4_DOWN,
+            MouseButton::Back,
+            ButtonState::Pressed,
+        ),
+        (
+            RI_MOUSE_BUTTON_4_UP,
+            MouseButton::Back,
+            ButtonState::Released,
+        ),
+        (
+            RI_MOUSE_BUTTON_5_DOWN,
+            MouseButton::Forward,
+            ButtonState::Pressed,
+        ),
+        (
+            RI_MOUSE_BUTTON_5_UP,
+            MouseButton::Forward,
+            ButtonState::Released,
+        ),
+    ];
+    for (flag, button, state) in mappings {
+        if flags & flag != 0 {
+            events.push(button_event(button, state));
+        }
+    }
+    let wheel = f64::from(i16::from_ne_bytes(
+        high_word(raw.mouse.buttons).to_ne_bytes(),
+    ));
+    if flags & RI_MOUSE_WHEEL != 0 {
+        events.push(PhysicalMouseEvent::Wheel {
+            horizontal: 0.0,
+            vertical: wheel,
+        });
+    }
+    if flags & RI_MOUSE_HORIZONTAL_WHEEL != 0 {
+        events.push(PhysicalMouseEvent::Wheel {
+            horizontal: wheel,
+            vertical: 0.0,
+        });
+    }
+    events
+}
+
+fn raw_mouse_movement(
+    raw: &RawMouseInput,
+    movement_state: &mut RawMovementState,
+) -> Option<Vector> {
+    if raw.mouse.flags & MOUSE_MOVE_ABSOLUTE == 0 {
+        return Some(Vector::new(
+            f64::from(raw.mouse.last_x),
+            f64::from(raw.mouse.last_y),
+        ));
+    }
+
+    let virtual_desktop = raw.mouse.flags & MOUSE_VIRTUAL_DESKTOP != 0;
+    // SAFETY: GetSystemMetrics has no pointer parameters.
+    let (left, top, width, height) = unsafe {
+        if virtual_desktop {
+            (
+                GetSystemMetrics(SM_XVIRTUALSCREEN),
+                GetSystemMetrics(SM_YVIRTUALSCREEN),
+                GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            )
+        } else {
+            (
+                0,
+                0,
+                GetSystemMetrics(SM_CXSCREEN),
+                GetSystemMetrics(SM_CYSCREEN),
+            )
+        }
+    };
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    let position = Point::new(
+        f64::from(left) + f64::from(raw.mouse.last_x) * f64::from(width) / 65_535.0,
+        f64::from(top) + f64::from(raw.mouse.last_y) * f64::from(height) / 65_535.0,
+    );
+    let previous = movement_state
+        .absolute_positions
+        .insert(raw.header.device as usize, position)?;
+    Some(Vector::new(
+        position.x - previous.x,
+        position.y - previous.y,
+    ))
+}
+
+fn win32_time_is_after(candidate: u32, boundary: u32) -> bool {
+    (candidate.wrapping_sub(boundary) as i32) > 0
+}
+
+fn queue_mouse_event(state: &CallbackState, event: PhysicalMouseEvent) -> bool {
+    match state.sender.try_send(event) {
+        Ok(()) => true,
+        Err(mpsc::TrySendError::Full(_)) => {
+            state.overflowed.store(true, Ordering::Release);
+            state.suppress.store(false, Ordering::Release);
+            false
+        }
+        Err(mpsc::TrySendError::Disconnected(_)) => {
+            state.suppress.store(false, Ordering::Release);
+            false
+        }
     }
 }
 
@@ -989,6 +1404,14 @@ unsafe extern "system" fn mouse_hook_callback(code: i32, w_param: usize, l_param
     }
 
     let suppress = state.suppress.load(Ordering::Acquire);
+    if suppress
+        && state.raw_input_active.load(Ordering::Acquire)
+        && is_captured_mouse_message(w_param as u32)
+    {
+        // Raw Input owns physical event ordering while remote. The low-level
+        // hook remains responsible for preventing the local OS from acting on it.
+        return 1;
+    }
     let event = hook_event(
         w_param as u32,
         data,
@@ -997,18 +1420,9 @@ unsafe extern "system" fn mouse_hook_callback(code: i32, w_param: usize, l_param
         state.coordinate_scale,
     );
     if let Some(event) = event {
-        match state.sender.try_send(event) {
-            Ok(()) => {}
-            Err(mpsc::TrySendError::Full(_)) => {
-                state.overflowed.store(true, Ordering::Release);
-                state.suppress.store(false, Ordering::Release);
-                // SAFETY: On overflow, fail open so user input cannot be trapped.
-                return unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) };
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => {
-                // SAFETY: The receiver is gone, so never trap user input.
-                return unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) };
-            }
+        if !queue_mouse_event(state, event) {
+            // SAFETY: On queue failure, fail open so user input cannot be trapped.
+            return unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) };
         }
         if suppress {
             return 1;
@@ -1016,6 +1430,23 @@ unsafe extern "system" fn mouse_hook_callback(code: i32, w_param: usize, l_param
     }
     // SAFETY: Forward any event that EdgeMouse is not actively suppressing.
     unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) }
+}
+
+fn is_captured_mouse_message(message: u32) -> bool {
+    matches!(
+        message,
+        WM_MOUSEMOVE
+            | WM_LBUTTONDOWN
+            | WM_LBUTTONUP
+            | WM_RBUTTONDOWN
+            | WM_RBUTTONUP
+            | WM_MBUTTONDOWN
+            | WM_MBUTTONUP
+            | WM_MOUSEWHEEL
+            | WM_XBUTTONDOWN
+            | WM_XBUTTONUP
+            | WM_MOUSEHWHEEL
+    )
 }
 
 fn hook_event(
@@ -1477,6 +1908,13 @@ fn high_word(value: u32) -> u16 {
         .unwrap()
 }
 
+fn low_word(value: u32) -> u16 {
+    value.to_ne_bytes()[0..2]
+        .try_into()
+        .map(u16::from_ne_bytes)
+        .unwrap()
+}
+
 fn rounded_i32(value: f64) -> i32 {
     value
         .round()
@@ -1486,6 +1924,33 @@ fn rounded_i32(value: f64) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn raw_mouse_input(
+        flags: u16,
+        button_flags: u16,
+        button_data: i16,
+        x: i32,
+        y: i32,
+    ) -> RawMouseInput {
+        RawMouseInput {
+            header: RawInputHeader {
+                input_type: RIM_TYPEMOUSE,
+                size: u32::try_from(size_of::<RawMouseInput>()).unwrap(),
+                device: ptr::dangling_mut::<c_void>(),
+                w_param: 0,
+            },
+            mouse: RawMouse {
+                flags,
+                alignment: 0,
+                buttons: u32::from(button_flags)
+                    | (u32::from(u16::from_ne_bytes(button_data.to_ne_bytes())) << 16),
+                raw_buttons: 0,
+                last_x: x,
+                last_y: y,
+                extra_information: 0,
+            },
+        }
+    }
 
     #[test]
     fn maps_virtual_desktop_coordinates() {
@@ -1535,6 +2000,71 @@ mod tests {
                 movement: Vector::new(1.0, 0.0),
             })
         );
+    }
+
+    #[test]
+    fn raw_input_layout_matches_the_win32_mouse_abi() {
+        assert_eq!(size_of::<RawMouse>(), 24);
+        if size_of::<usize>() == 8 {
+            assert_eq!(size_of::<RawInputHeader>(), 24);
+            assert_eq!(size_of::<RawMouseInput>(), 48);
+        } else {
+            assert_eq!(size_of::<RawInputHeader>(), 16);
+            assert_eq!(size_of::<RawMouseInput>(), 40);
+        }
+    }
+
+    #[test]
+    fn raw_mouse_keeps_movement_button_and_wheel_order() {
+        let raw = raw_mouse_input(0, RI_MOUSE_LEFT_BUTTON_DOWN | RI_MOUSE_WHEEL, 120, -7, 11);
+        let mut movement = RawMovementState::default();
+        assert_eq!(
+            raw_mouse_events(&raw, &mut movement, true),
+            vec![
+                PhysicalMouseEvent::Move {
+                    movement: Vector::new(-7.0, 11.0),
+                },
+                button_event(MouseButton::Primary, ButtonState::Pressed),
+                PhysicalMouseEvent::Wheel {
+                    horizontal: 0.0,
+                    vertical: 120.0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn raw_mouse_is_drained_but_not_emitted_while_local() {
+        let raw = raw_mouse_input(0, RI_MOUSE_RIGHT_BUTTON_DOWN, 0, 4, 5);
+        assert!(raw_mouse_events(&raw, &mut RawMovementState::default(), false).is_empty());
+    }
+
+    #[test]
+    fn transition_timestamp_rejects_old_raw_input_across_wraparound() {
+        assert!(!win32_time_is_after(100, 100));
+        assert!(!win32_time_is_after(99, 100));
+        assert!(win32_time_is_after(101, 100));
+        assert!(win32_time_is_after(2, u32::MAX - 2));
+    }
+
+    #[test]
+    fn safety_hook_recognizes_every_raw_mouse_message() {
+        for message in [
+            WM_MOUSEMOVE,
+            WM_LBUTTONDOWN,
+            WM_LBUTTONUP,
+            WM_RBUTTONDOWN,
+            WM_RBUTTONUP,
+            WM_MBUTTONDOWN,
+            WM_MBUTTONUP,
+            WM_XBUTTONDOWN,
+            WM_XBUTTONUP,
+            WM_MOUSEWHEEL,
+            WM_MOUSEHWHEEL,
+        ] {
+            assert!(is_captured_mouse_message(message));
+        }
+        assert!(!is_captured_mouse_message(WM_KEYDOWN));
     }
 
     #[test]

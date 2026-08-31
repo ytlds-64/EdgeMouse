@@ -170,19 +170,21 @@ double-decrement queued payload bytes when the drop-oldest path is exercised.
 
 ### Windows
 
-Capture runs a `WH_MOUSE_LL` hook on a dedicated message-loop thread. Automatic
+Capture runs a `WH_MOUSE_LL` hook on a dedicated message-loop thread. The same
+thread owns a message-only window registered for background Raw Input. Automatic
 mode selects per-monitor-v2 DPI awareness before reading the full Windows virtual
 desktop, so hook, cursor, and `SendInput` positions share physical global
 coordinates across scaled and rotated monitors. Legacy manual mode still divides
-hook coordinates by its configured scale. During remote control, movement is calculated against a
-fixed anchor at the local screen center because suppressed input does not
-advance the real cursor. Mode changes temporarily ignore warp-generated mouse
-moves and discard queued pre-transition movement, so an edge handoff cannot
-replace the new relative-motion reference with an old position. `SendInput`
+hook coordinates by its configured scale. Local edge detection keeps the
+accelerated hook coordinates that match the visible Windows pointer. After
+handoff, ordered `WM_INPUT` records carry high-rate physical movement, buttons,
+and wheels; the hook remains active only to suppress legacy local action. It
+automatically resumes full capture if Raw Input setup or reading fails. Mode
+changes discard events timestamped before the new owner, so an edge handoff
+cannot leak old movement into the new screen. `SendInput`
 performs absolute virtual-desktop movement, buttons, and wheel injection.
 `dwExtraInfo` plus the injected flag prevent feedback loops. Raw Input can later
-replace the movement source for high-rate devices while the hook remains
-responsible for suppression.
+be made tunable in the settings UI while the hook remains the safety layer.
 
 ### macOS
 
@@ -204,10 +206,9 @@ restored during transitions and teardown.
 1. Test on physical Windows and macOS machines, including 125–1000 Hz mice,
    long mixed Ethernet/Wi-Fi sessions, horizontal scroll, sleep/wake, and the
    automatic recovery path during Wi-Fi loss.
-2. Add Windows Raw Input based on latency measurements.
-3. Put pairing, display selection, edge layout, diagnostics, and tunable session
+2. Put pairing, display selection, edge layout, diagnostics, and tunable session
    settings into a tray/settings UI.
-4. Add signed installers and diagnostics export around the existing per-user
+3. Add signed installers and diagnostics export around the existing per-user
    launch-at-login scripts.
-5. Make the cross-platform modifier mapping configurable, then add bounded,
+4. Make the cross-platform modifier mapping configurable, then add bounded,
    opt-in text and image clipboard synchronization.

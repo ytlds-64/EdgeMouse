@@ -364,8 +364,12 @@ fn run_connected(
     session_id: u64,
     stopping: &AtomicBool,
 ) -> Result<ConnectionEnd, Box<dyn Error>> {
-    let mut capture =
-        platform::start_capture(local.screen.bounds, local.coordinate_scale, initial_pointer)?;
+    let mut capture = platform::start_capture(
+        local.screen.bounds,
+        local.coordinate_scale,
+        initial_pointer,
+        config.windows_raw_input,
+    )?;
     let mut injector = platform::injector(initial_pointer);
     let mut keyboard_capture = platform::start_keyboard_capture()?;
     let mut keyboard_injector = platform::keyboard_injector();

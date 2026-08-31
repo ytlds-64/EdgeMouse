@@ -24,6 +24,7 @@ pub struct LoadedConfig {
     pub peer_screen: ScreenId,
     pub peer_on: Edge,
     pub session: SessionConfig,
+    pub windows_raw_input: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +150,7 @@ struct RawSession {
     hysteresis: f64,
     timeout_ms: u64,
     connect_timeout_seconds: u64,
+    windows_raw_input: bool,
 }
 
 impl Default for RawSession {
@@ -157,6 +159,7 @@ impl Default for RawSession {
             hysteresis: 8.0,
             timeout_ms: 1_500,
             connect_timeout_seconds: 30,
+            windows_raw_input: true,
         }
     }
 }
@@ -209,6 +212,7 @@ impl RawConfig {
             peer_screen,
             peer_on,
             session,
+            windows_raw_input: self.session.windows_raw_input,
         })
     }
 }
@@ -377,6 +381,7 @@ mod tests {
         assert_eq!(session.hysteresis, 8.0);
         assert_eq!(session.timeout_ms, 1_500);
         assert_eq!(session.connect_timeout_seconds, 30);
+        assert!(session.windows_raw_input);
     }
 
     #[test]

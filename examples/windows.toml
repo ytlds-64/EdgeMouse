@@ -29,3 +29,5 @@ peer_on = "right"
 hysteresis = 8
 timeout_ms = 1500
 connect_timeout_seconds = 30
+# High-rate movement after handoff; set false to use the legacy safety hook only.
+windows_raw_input = true

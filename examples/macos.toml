@@ -29,3 +29,5 @@ peer_on = "left"
 hysteresis = 8
 timeout_ms = 1500
 connect_timeout_seconds = 30
+# Kept in the shared configuration schema; only the Windows agent uses this.
+windows_raw_input = true

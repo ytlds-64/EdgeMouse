@@ -28,6 +28,8 @@ clipboard sync, relay servers, tray UI, installers, and elevated Windows desktop
   the peer's current width, height, origin, orientation, or scale.
 - Native macOS `CGEventTap` capture and marked `CGEventPost` injection.
 - Native Windows `WH_MOUSE_LL` capture and marked `SendInput` injection.
+- Windows Raw Input movement capture after handoff, retaining `WH_MOUSE_LL` as
+  the fail-open suppression and automatic fallback layer.
 - Mutually authenticated QUIC/TLS with one explicitly trusted peer certificate.
 - One-time 8-digit short-code pairing that securely exchanges public certificates
   while keeping both private keys on their original machines.
@@ -47,10 +49,13 @@ clipboard sync, relay servers, tray UI, installers, and elevated Windows desktop
 - Identity generation, configuration validation, diagnostics, and simulation
   commands.
 
-Windows Raw Input capture remains a future high-polling-rate optimization. The
-MVP uses low-level mouse and keyboard hooks and a fixed mouse capture anchor
-while control is remote. Both platforms fail open if keyboard capture cannot
-keep up, and keys held before a handoff remain local until physically released.
+Windows uses a fixed mouse capture anchor while control is remote. Raw Input
+preserves high-polling-rate physical movement in that state, while the low-level
+hook continues to suppress local legacy events and takes over automatically if
+Raw Input is unavailable. Both platforms fail open if capture cannot keep up,
+and keys held before a handoff remain local until physically released.
+Set `session.windows_raw_input = false` on Windows to force the established
+low-level-hook movement path; the default is `true`.
 
 ## Build
 
@@ -341,6 +346,9 @@ before a handoff remain local, and all captured keys are released during
 handback, emergency recovery, disconnect, or shutdown. Protocol v5 remains
 unchanged, but both computers should run 0.4.0 when testing reverse keyboard
 control.
+EdgeMouse 0.5.0 adds Windows Raw Input movement and ordered raw button/wheel
+capture after handoff. The existing low-level hook remains active as the safety
+suppression and automatic fallback layer. Protocol v5 is unchanged.
 
 ## Verify the source tree
 
