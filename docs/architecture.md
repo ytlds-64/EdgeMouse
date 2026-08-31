@@ -44,15 +44,15 @@ period while the agent is running.
 
 The macOS receive coalescer retains a bounded, ordered history of absolute moves
 and their actual arrival timestamps. The injector plays that history on a stable
-4 ms render cadence through an adaptive 8–12 ms jitter buffer, interpolating
-between samples instead of stepping packet by packet. When arrival variation is
-high and the next sample is briefly late, prediction is limited to 12 ms and 24
-pixels. Reliable control events flush the newest real target first, preserving
-the exact position and ordering of clicks, wheels, drags, and leave events. The
-receive coalescer also records superseded history entries, inter-arrival
-variation, and the largest active movement gap in each five-second diagnostics
-window; idle gaps over 100 ms reset the estimator instead of being reported as
-network jitter.
+4 ms render cadence through a fixed 12 ms jitter buffer, interpolating between
+samples instead of stepping packet by packet. It never extrapolates beyond the
+newest real sample; a late packet therefore causes a short hold rather than an
+overshoot and correction after the mouse stops. Reliable control events flush
+the newest real target first, preserving the exact position and ordering of
+clicks, wheels, drags, and leave events. The receive coalescer also records
+superseded history entries, inter-arrival variation, and the largest active
+movement gap in each five-second diagnostics window; idle gaps over 100 ms reset
+the estimator instead of being reported as network jitter.
 
 ## Control state and safety
 

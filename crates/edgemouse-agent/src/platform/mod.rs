@@ -110,6 +110,7 @@ pub fn current_pointer() -> Result<edgemouse_core::Point, edgemouse_core::Platfo
 pub fn start_capture(
     _local_bounds: edgemouse_core::Rect,
     _coordinate_scale: f64,
+    _initial_pointer: edgemouse_core::Point,
 ) -> Result<NativeMouseCapture, edgemouse_core::PlatformError> {
     NativeMouseCapture::start()
 }
@@ -118,12 +119,13 @@ pub fn start_capture(
 pub fn start_capture(
     local_bounds: edgemouse_core::Rect,
     coordinate_scale: f64,
+    initial_pointer: edgemouse_core::Point,
 ) -> Result<NativeMouseCapture, edgemouse_core::PlatformError> {
     let capture_anchor = edgemouse_core::Point::new(
         local_bounds.origin.x + local_bounds.width / 2.0,
         local_bounds.origin.y + local_bounds.height / 2.0,
     );
-    NativeMouseCapture::start(coordinate_scale, capture_anchor)
+    NativeMouseCapture::start(coordinate_scale, capture_anchor, initial_pointer)
 }
 
 #[cfg(target_os = "macos")]

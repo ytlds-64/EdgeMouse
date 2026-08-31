@@ -295,13 +295,13 @@ always using the newest position. Stale movement is discarded during network
 jitter instead of being replayed later. Buttons, wheels, enter, leave, and the
 last position before each control event remain reliable and strictly ordered.
 On macOS, received movement keeps a short arrival-timestamped history and is
-rendered on a stable 4 ms cadence through an adaptive 8–12 ms jitter buffer.
+rendered on a stable 4 ms cadence through a fixed 12 ms jitter buffer.
 Positions between received samples are interpolated instead of jumping from one
-network packet to the next. When measured arrival jitter is high, a genuine
-packet gap may use at most 12 ms and 24 pixels of bounded prediction; the real
-position always replaces it as soon as a sample arrives. Buttons, wheels, leave
-events, and drag transitions flush the newest real position immediately, so
-buffering never changes control-event ordering or click accuracy.
+network packet to the next. The renderer never extrapolates beyond the newest
+real position, so stopping cannot produce prediction overshoot followed by a
+visible correction. Buttons, wheels, leave events, and drag transitions flush
+the newest real position immediately, so buffering never changes control-event
+ordering or click accuracy.
 If the peer's physical mouse becomes unresponsive while it controls this
 computer, deliberately pushing this computer's physical mouse toward the
 configured peer edge requests an authenticated control handoff. The detector
@@ -329,6 +329,11 @@ with 0.3.1 and 0.3.2 during a staged upgrade.
 EdgeMouse 0.3.4 replaces the fixed macOS receive filter with an adaptive 8–12 ms
 jitter buffer, arrival-time interpolation, and short bounded prediction. It
 still uses protocol v5 and remains connection-compatible with 0.3.1–0.3.3.
+EdgeMouse 0.3.5 removes prediction and stabilizes the receive timeline at 12 ms
+after real-world testing exposed stop-time correction jumps. It also resamples
+and seeds the Windows pointer after connection setup, so the first outward edge
+movement is preserved even when the program becomes ready with the cursor
+already at the screen boundary. Protocol v5 is unchanged.
 
 ## Verify the source tree
 

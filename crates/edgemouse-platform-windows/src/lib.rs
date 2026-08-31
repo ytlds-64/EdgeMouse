@@ -281,7 +281,11 @@ pub struct WindowsMouseCapture {
 }
 
 impl WindowsMouseCapture {
-    pub fn start(coordinate_scale: f64, capture_anchor: Point) -> Result<Self, PlatformError> {
+    pub fn start(
+        coordinate_scale: f64,
+        capture_anchor: Point,
+        initial_pointer: Point,
+    ) -> Result<Self, PlatformError> {
         if !coordinate_scale.is_finite() || coordinate_scale <= 0.0 {
             return Err(PlatformError::new(
                 "Windows coordinate scale must be finite and positive",
@@ -289,6 +293,9 @@ impl WindowsMouseCapture {
         }
         if !capture_anchor.is_finite() {
             return Err(PlatformError::new("Windows capture anchor must be finite"));
+        }
+        if !initial_pointer.is_finite() {
+            return Err(PlatformError::new("Windows initial pointer must be finite"));
         }
         if !CALLBACK_STATE.load(Ordering::Acquire).is_null() {
             return Err(PlatformError::new(
@@ -303,7 +310,10 @@ impl WindowsMouseCapture {
         let callback_transitioning = Arc::clone(&transitioning);
         let overflowed = Arc::new(AtomicBool::new(false));
         let callback_overflowed = Arc::clone(&overflowed);
-        let last_point = Arc::new(Mutex::new(None));
+        // Seed the hook reference with the same normalized position used by the
+        // routing session. This preserves the very first outward delta when the
+        // program becomes ready while the cursor is already on a screen edge.
+        let last_point = Arc::new(Mutex::new(Some(initial_pointer)));
         let callback_last_point = Arc::clone(&last_point);
         let thread = std::thread::Builder::new()
             .name("edgemouse-win32-hook".to_owned())
@@ -1505,6 +1515,25 @@ mod tests {
         assert_eq!(
             logical_hook_point(PointI32 { x: 101, y: 203 }, 2.0),
             Point::new(50.5, 101.5)
+        );
+    }
+
+    #[test]
+    fn first_hooked_move_uses_the_seeded_pointer_reference() {
+        let reference = Mutex::new(Some(Point::new(1_919.0, 500.0)));
+        let data = MouseHookData {
+            point: PointI32 { x: 1_920, y: 500 },
+            mouse_data: 0,
+            flags: 0,
+            time: 0,
+            extra_info: 0,
+        };
+
+        assert_eq!(
+            hook_event(WM_MOUSEMOVE, &data, &reference, false, 1.0),
+            Some(PhysicalMouseEvent::Move {
+                movement: Vector::new(1.0, 0.0),
+            })
         );
     }
 

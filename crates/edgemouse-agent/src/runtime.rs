@@ -203,8 +203,6 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
             None
         };
         let local = config.resolve_local_screen(detected)?;
-        let initial_pointer =
-            normalize_initial_pointer(local.screen.bounds, platform::current_pointer()?)?;
         let session_id = new_session_id(config.local_node.0);
         if reconnecting {
             println!("Reconnecting to the trusted peer…");
@@ -300,6 +298,11 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
             network.peer_screen.bounds.origin.y,
             network.peer_screen.scale_factor
         );
+        // Discovery and TLS can take long enough for the user to move the local
+        // pointer. Sample it only after the connection is ready so the first
+        // captured movement starts from the actual current edge position.
+        let initial_pointer =
+            normalize_initial_pointer(local.screen.bounds, platform::current_pointer()?)?;
 
         match run_connected(
             &config,
@@ -361,7 +364,8 @@ fn run_connected(
     session_id: u64,
     stopping: &AtomicBool,
 ) -> Result<ConnectionEnd, Box<dyn Error>> {
-    let mut capture = platform::start_capture(local.screen.bounds, local.coordinate_scale)?;
+    let mut capture =
+        platform::start_capture(local.screen.bounds, local.coordinate_scale, initial_pointer)?;
     let mut injector = platform::injector(initial_pointer);
     let mut keyboard_capture = platform::start_keyboard_capture()?;
     let mut keyboard_injector = platform::keyboard_injector();
