@@ -3,15 +3,15 @@
 #![cfg(target_os = "macos")]
 
 use edgemouse_core::{
-    ButtonState, CaptureMode, KeyCode, KeyState, KeyboardEvent, KeyboardInjectionBackend,
-    MouseButton, MouseCaptureBackend, MouseInjectionBackend, PermissionState, PhysicalMouseEvent,
-    PlatformError, Point, Rect, RemoteMouseEvent, Vector,
+    ButtonState, CaptureMode, KeyCode, KeyState, KeyboardCaptureBackend, KeyboardEvent,
+    KeyboardInjectionBackend, MouseButton, MouseCaptureBackend, MouseInjectionBackend,
+    PermissionState, PhysicalMouseEvent, PlatformError, Point, Rect, RemoteMouseEvent, Vector,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::c_void;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -41,6 +41,9 @@ const EVENT_MOUSE_MOVED: u32 = 5;
 const EVENT_LEFT_DRAGGED: u32 = 6;
 const EVENT_RIGHT_DRAGGED: u32 = 7;
 const EVENT_SCROLL_WHEEL: u32 = 22;
+const EVENT_KEY_DOWN: u32 = 10;
+const EVENT_KEY_UP: u32 = 11;
+const EVENT_FLAGS_CHANGED: u32 = 12;
 const EVENT_OTHER_DOWN: u32 = 25;
 const EVENT_OTHER_UP: u32 = 26;
 const EVENT_OTHER_DRAGGED: u32 = 27;
@@ -56,6 +59,7 @@ const FIELD_SCROLL_FIXED_HORIZONTAL: u32 = 94;
 const FIELD_SCROLL_POINT_VERTICAL: u32 = 96;
 const FIELD_SCROLL_POINT_HORIZONTAL: u32 = 97;
 const FIELD_KEYBOARD_AUTOREPEAT: u32 = 8;
+const FIELD_KEYBOARD_KEYCODE: u32 = 9;
 
 const FLAG_ALPHA_SHIFT: u64 = 1 << 16;
 const FLAG_SHIFT: u64 = 1 << 17;
@@ -110,6 +114,8 @@ unsafe extern "C" {
     fn CGEventTapEnable(tap: *mut c_void, enable: bool);
     fn CGEventGetIntegerValueField(event: *mut c_void, field: u32) -> i64;
     fn CGEventGetDoubleValueField(event: *mut c_void, field: u32) -> f64;
+    fn CGEventGetFlags(event: *mut c_void) -> u64;
+    fn CGEventSourceFlagsState(state_id: i32) -> u64;
     fn CGEventCreate(source: *mut c_void) -> *mut c_void;
     fn CGEventGetLocation(event: *mut c_void) -> CGPoint;
     fn CGEventCreateMouseEvent(
@@ -437,6 +443,166 @@ impl Drop for MacMouseCapture {
         self.suppress.store(false, Ordering::Release);
         drop(Self::associate_cursor(true));
         drop(self.show_cursor());
+        if self.run_loop != 0 {
+            let run_loop = self.run_loop as *mut c_void;
+            // SAFETY: The run loop stays alive until its owning thread exits.
+            unsafe {
+                CFRunLoopStop(run_loop);
+                CFRunLoopWakeUp(run_loop);
+            }
+        }
+        if let Some(thread) = self.thread.take() {
+            drop(thread.join());
+        }
+    }
+}
+
+#[derive(Default)]
+struct KeyboardRoutingState {
+    remote: bool,
+    local_pressed: BTreeSet<KeyCode>,
+    captured_pressed: BTreeSet<KeyCode>,
+    passthrough_pressed: BTreeSet<KeyCode>,
+    caps_lock_on: bool,
+}
+
+impl KeyboardRoutingState {
+    fn key_is_pressed(&self, key: KeyCode) -> bool {
+        self.local_pressed.contains(&key)
+            || self.captured_pressed.contains(&key)
+            || self.passthrough_pressed.contains(&key)
+    }
+}
+
+struct KeyboardCallbackState {
+    sender: mpsc::SyncSender<KeyboardEvent>,
+    routing: Arc<Mutex<KeyboardRoutingState>>,
+    overflowed: Arc<AtomicBool>,
+    emergency_release: Arc<AtomicBool>,
+    tap: AtomicUsize,
+}
+
+/// A dedicated macOS keyboard event tap. It fails open on contention or queue
+/// overflow and only suppresses keys pressed after control moves to the peer.
+pub struct MacKeyboardCapture {
+    receiver: mpsc::Receiver<KeyboardEvent>,
+    routing: Arc<Mutex<KeyboardRoutingState>>,
+    overflowed: Arc<AtomicBool>,
+    emergency_release: Arc<AtomicBool>,
+    run_loop: usize,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl MacKeyboardCapture {
+    pub fn start() -> Result<Self, PlatformError> {
+        if !accessibility_trusted() {
+            return Err(PlatformError::new(
+                "macOS Accessibility permission is required for keyboard capture",
+            ));
+        }
+
+        let (event_sender, event_receiver) = mpsc::sync_channel(CAPTURE_QUEUE_CAPACITY);
+        let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
+        // SAFETY: Combined-session flags contain no borrowed memory and give the
+        // initial Caps Lock toggle state before the event tap starts.
+        let caps_lock_on = unsafe { CGEventSourceFlagsState(0) } & FLAG_ALPHA_SHIFT != 0;
+        let routing = Arc::new(Mutex::new(KeyboardRoutingState {
+            caps_lock_on,
+            ..KeyboardRoutingState::default()
+        }));
+        let overflowed = Arc::new(AtomicBool::new(false));
+        let emergency_release = Arc::new(AtomicBool::new(false));
+        let callback_routing = Arc::clone(&routing);
+        let callback_overflowed = Arc::clone(&overflowed);
+        let callback_emergency = Arc::clone(&emergency_release);
+        let thread = std::thread::Builder::new()
+            .name("edgemouse-cgevent-keyboard-tap".to_owned())
+            .spawn(move || {
+                run_keyboard_event_tap(
+                    event_sender,
+                    callback_routing,
+                    callback_overflowed,
+                    callback_emergency,
+                    |result| drop(startup_sender.send(result)),
+                );
+            })
+            .map_err(|error| {
+                PlatformError::new(format!("failed to start keyboard event tap: {error}"))
+            })?;
+        let run_loop = startup_receiver
+            .recv()
+            .map_err(|_| PlatformError::new("keyboard event tap exited during startup"))??;
+        Ok(Self {
+            receiver: event_receiver,
+            routing,
+            overflowed,
+            emergency_release,
+            run_loop,
+            thread: Some(thread),
+        })
+    }
+
+    fn discard_queue(&mut self) -> Result<(), PlatformError> {
+        loop {
+            match self.receiver.try_recv() {
+                Ok(_) => {}
+                Err(mpsc::TryRecvError::Empty) => return Ok(()),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(PlatformError::new("macOS keyboard event tap stopped"));
+                }
+            }
+        }
+    }
+}
+
+impl KeyboardCaptureBackend for MacKeyboardCapture {
+    fn permission_state(&self) -> PermissionState {
+        if accessibility_trusted() {
+            PermissionState::Granted
+        } else {
+            PermissionState::Denied
+        }
+    }
+
+    fn set_remote(&mut self, remote: bool) -> Result<(), PlatformError> {
+        self.discard_queue()?;
+        let mut routing = self
+            .routing
+            .lock()
+            .map_err(|_| PlatformError::new("macOS keyboard routing lock was poisoned"))?;
+        if remote && !routing.remote {
+            let local_pressed = std::mem::take(&mut routing.local_pressed);
+            routing.passthrough_pressed.extend(local_pressed);
+        }
+        routing.remote = remote;
+        Ok(())
+    }
+
+    fn try_next_event(&mut self) -> Result<Option<KeyboardEvent>, PlatformError> {
+        if self.overflowed.swap(false, Ordering::AcqRel) {
+            return Err(PlatformError::new(
+                "macOS keyboard capture queue overflowed; local input was released",
+            ));
+        }
+        match self.receiver.try_recv() {
+            Ok(event) => Ok(Some(event)),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err(PlatformError::new("macOS keyboard event tap stopped"))
+            }
+        }
+    }
+
+    fn take_emergency_release(&self) -> bool {
+        self.emergency_release.swap(false, Ordering::AcqRel)
+    }
+}
+
+impl Drop for MacKeyboardCapture {
+    fn drop(&mut self) {
+        if let Ok(mut routing) = self.routing.lock() {
+            routing.remote = false;
+        }
         if self.run_loop != 0 {
             let run_loop = self.run_loop as *mut c_void;
             // SAFETY: The run loop stays alive until its owning thread exits.
@@ -1116,6 +1282,7 @@ fn mac_virtual_key(key: KeyCode) -> Option<u16> {
         0x61 => 92,
         0x62 => 82,
         0x63 => 65,
+        0x64 => 10,
         0x67 => 81,
         0x68 => 105,
         0x69 => 107,
@@ -1135,6 +1302,400 @@ fn mac_virtual_key(key: KeyCode) -> Option<u16> {
         0xe7 => 54,
         _ => return None,
     })
+}
+
+fn run_keyboard_event_tap(
+    sender: mpsc::SyncSender<KeyboardEvent>,
+    routing: Arc<Mutex<KeyboardRoutingState>>,
+    overflowed: Arc<AtomicBool>,
+    emergency_release: Arc<AtomicBool>,
+    report_startup: impl FnOnce(Result<usize, PlatformError>),
+) {
+    let state = Box::new(KeyboardCallbackState {
+        sender,
+        routing,
+        overflowed,
+        emergency_release,
+        tap: AtomicUsize::new(0),
+    });
+    let state_ptr = Box::into_raw(state);
+    let mask = [EVENT_KEY_DOWN, EVENT_KEY_UP, EVENT_FLAGS_CHANGED]
+        .into_iter()
+        .fold(0_u64, |mask, event_type| mask | (1_u64 << event_type));
+
+    // SAFETY: `state_ptr` remains allocated until the run loop stops. The callback
+    // signature and event mask follow the CoreGraphics API contract.
+    let tap = unsafe {
+        CGEventTapCreate(
+            EVENT_TAP_SESSION,
+            EVENT_TAP_HEAD,
+            EVENT_TAP_ACTIVE,
+            mask,
+            keyboard_event_tap_callback,
+            state_ptr.cast(),
+        )
+    };
+    if tap.is_null() {
+        report_startup(Err(PlatformError::new(
+            "CGEventTapCreate failed for keyboard capture; check Accessibility permission",
+        )));
+        // SAFETY: No callback can run because tap creation failed.
+        drop(unsafe { Box::from_raw(state_ptr) });
+        return;
+    }
+    // SAFETY: state_ptr is valid for the run-loop lifetime.
+    unsafe { (*state_ptr).tap.store(tap as usize, Ordering::Release) };
+
+    // SAFETY: The tap is a valid CFMachPort and CoreFoundation owns the source
+    // references while the run loop is active.
+    let source = unsafe { CFMachPortCreateRunLoopSource(ptr::null(), tap, 0) };
+    if source.is_null() {
+        report_startup(Err(PlatformError::new(
+            "CFMachPortCreateRunLoopSource failed for keyboard capture",
+        )));
+        // SAFETY: Both objects were created by this function and are no longer active.
+        unsafe {
+            CFRelease(tap);
+            drop(Box::from_raw(state_ptr));
+        }
+        return;
+    }
+    // SAFETY: These functions operate on the current thread's run loop.
+    let run_loop = unsafe { CFRunLoopGetCurrent() };
+    unsafe {
+        CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);
+        CGEventTapEnable(tap, true);
+    }
+    report_startup(Ok(run_loop as usize));
+    // SAFETY: Runs until Drop asks this exact run loop to stop.
+    unsafe { CFRunLoopRun() };
+
+    // SAFETY: The run loop has stopped, so no callback is active.
+    unsafe {
+        CFRelease(source);
+        CFRelease(tap);
+        drop(Box::from_raw(state_ptr));
+    }
+}
+
+unsafe extern "C" fn keyboard_event_tap_callback(
+    _proxy: *mut c_void,
+    event_type: u32,
+    event: *mut c_void,
+    user_info: *mut c_void,
+) -> *mut c_void {
+    if event.is_null() || user_info.is_null() {
+        return event;
+    }
+    // SAFETY: CoreGraphics calls us with the state pointer supplied to the tap.
+    let state = unsafe { &*user_info.cast::<KeyboardCallbackState>() };
+    if matches!(
+        event_type,
+        EVENT_TAP_DISABLED_TIMEOUT | EVENT_TAP_DISABLED_USER_INPUT
+    ) {
+        let tap = state.tap.load(Ordering::Acquire) as *mut c_void;
+        if !tap.is_null() {
+            // SAFETY: The tap is retained for the callback-state lifetime.
+            unsafe { CGEventTapEnable(tap, true) };
+        }
+        return event;
+    }
+    // SAFETY: event is a live CGEventRef for this callback.
+    if unsafe { CGEventGetIntegerValueField(event, EVENT_SOURCE_USER_DATA) } == EVENT_MARKER {
+        return event;
+    }
+    // SAFETY: The keycode field is valid for keyboard and flags-changed events.
+    let virtual_key = unsafe { CGEventGetIntegerValueField(event, FIELD_KEYBOARD_KEYCODE) };
+    let Ok(virtual_key) = u16::try_from(virtual_key) else {
+        return event;
+    };
+    let Some(key) = mac_key_code(virtual_key) else {
+        return event;
+    };
+    // SAFETY: Flags are available on every CGEvent.
+    let flags = unsafe { CGEventGetFlags(event) };
+    let Ok(mut routing) = state.routing.try_lock() else {
+        // Never block WindowServer's event-tap callback.
+        return event;
+    };
+
+    if event_type == EVENT_FLAGS_CHANGED && key == KeyCode::CAPS_LOCK {
+        let caps_lock_on = flags & FLAG_ALPHA_SHIFT != 0;
+        if caps_lock_on == routing.caps_lock_on {
+            return if routing.remote {
+                ptr::null_mut()
+            } else {
+                event
+            };
+        }
+        routing.caps_lock_on = caps_lock_on;
+        let suppress = routing.remote;
+        drop(routing);
+        if suppress {
+            let pressed = KeyboardEvent {
+                key,
+                state: KeyState::Pressed,
+                repeat: false,
+            };
+            let released = KeyboardEvent {
+                key,
+                state: KeyState::Released,
+                repeat: false,
+            };
+            if queue_mac_keyboard_event(state, pressed) && queue_mac_keyboard_event(state, released)
+            {
+                return ptr::null_mut();
+            }
+        }
+        return event;
+    }
+
+    let Some(key_state) = mac_key_state(event_type, key, flags, &routing) else {
+        return event;
+    };
+    let (send, suppress, repeat) = route_mac_keyboard_event(&mut routing, key, key_state);
+    let emergency = suppress
+        && key == KeyCode::ESCAPE
+        && key_state == KeyState::Pressed
+        && has_mac_emergency_modifiers(&routing.captured_pressed);
+    if emergency {
+        routing.remote = false;
+        state.emergency_release.store(true, Ordering::Release);
+    }
+    drop(routing);
+
+    if send && !emergency {
+        let forwarded = KeyboardEvent {
+            key: remote_mac_key_code(key),
+            state: key_state,
+            repeat,
+        };
+        if !queue_mac_keyboard_event(state, forwarded) {
+            return event;
+        }
+    }
+    if suppress { ptr::null_mut() } else { event }
+}
+
+fn queue_mac_keyboard_event(state: &KeyboardCallbackState, event: KeyboardEvent) -> bool {
+    match state.sender.try_send(event) {
+        Ok(()) => true,
+        Err(mpsc::TrySendError::Full(_) | mpsc::TrySendError::Disconnected(_)) => {
+            state.overflowed.store(true, Ordering::Release);
+            if let Ok(mut routing) = state.routing.try_lock() {
+                routing.remote = false;
+            }
+            false
+        }
+    }
+}
+
+fn mac_key_state(
+    event_type: u32,
+    key: KeyCode,
+    flags: u64,
+    routing: &KeyboardRoutingState,
+) -> Option<KeyState> {
+    match event_type {
+        EVENT_KEY_DOWN => Some(KeyState::Pressed),
+        EVENT_KEY_UP => Some(KeyState::Released),
+        EVENT_FLAGS_CHANGED => {
+            let flag = mac_modifier_flag(key)?;
+            if flags & flag == 0 || routing.key_is_pressed(key) {
+                Some(KeyState::Released)
+            } else {
+                Some(KeyState::Pressed)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn mac_modifier_flag(key: KeyCode) -> Option<u64> {
+    match key {
+        KeyCode::LEFT_SHIFT | KeyCode::RIGHT_SHIFT => Some(FLAG_SHIFT),
+        KeyCode::LEFT_CONTROL | KeyCode::RIGHT_CONTROL => Some(FLAG_CONTROL),
+        KeyCode::LEFT_ALT | KeyCode::RIGHT_ALT => Some(FLAG_ALTERNATE),
+        KeyCode::LEFT_META | KeyCode::RIGHT_META => Some(FLAG_COMMAND),
+        _ => None,
+    }
+}
+
+fn route_mac_keyboard_event(
+    routing: &mut KeyboardRoutingState,
+    key: KeyCode,
+    state: KeyState,
+) -> (bool, bool, bool) {
+    if routing.passthrough_pressed.contains(&key) {
+        if state == KeyState::Released {
+            routing.passthrough_pressed.remove(&key);
+        }
+        return (false, false, false);
+    }
+    if routing.remote {
+        return match state {
+            KeyState::Pressed => {
+                let repeat = !routing.captured_pressed.insert(key);
+                (true, true, repeat)
+            }
+            KeyState::Released if routing.captured_pressed.remove(&key) => (true, true, false),
+            KeyState::Released => (false, false, false),
+        };
+    }
+    if routing.captured_pressed.contains(&key) {
+        if state == KeyState::Released {
+            routing.captured_pressed.remove(&key);
+        }
+        return (false, true, false);
+    }
+    match state {
+        KeyState::Pressed => {
+            routing.local_pressed.insert(key);
+        }
+        KeyState::Released => {
+            routing.local_pressed.remove(&key);
+        }
+    }
+    (false, false, false)
+}
+
+/// Map Mac shortcut muscle memory to Windows: Command becomes Control, while
+/// physical Control remains available as the Windows key.
+fn remote_mac_key_code(key: KeyCode) -> KeyCode {
+    match key {
+        KeyCode::LEFT_CONTROL => KeyCode::LEFT_META,
+        KeyCode::RIGHT_CONTROL => KeyCode::RIGHT_META,
+        KeyCode::LEFT_META => KeyCode::LEFT_CONTROL,
+        KeyCode::RIGHT_META => KeyCode::RIGHT_CONTROL,
+        _ => key,
+    }
+}
+
+fn has_mac_emergency_modifiers(pressed: &BTreeSet<KeyCode>) -> bool {
+    let control_or_command = pressed.contains(&KeyCode::LEFT_CONTROL)
+        || pressed.contains(&KeyCode::RIGHT_CONTROL)
+        || pressed.contains(&KeyCode::LEFT_META)
+        || pressed.contains(&KeyCode::RIGHT_META);
+    control_or_command
+        && (pressed.contains(&KeyCode::LEFT_ALT) || pressed.contains(&KeyCode::RIGHT_ALT))
+        && (pressed.contains(&KeyCode::LEFT_SHIFT) || pressed.contains(&KeyCode::RIGHT_SHIFT))
+}
+
+fn mac_key_code(virtual_key: u16) -> Option<KeyCode> {
+    let usage = match virtual_key {
+        0 => 0x04,
+        11 => 0x05,
+        8 => 0x06,
+        2 => 0x07,
+        14 => 0x08,
+        3 => 0x09,
+        5 => 0x0a,
+        4 => 0x0b,
+        34 => 0x0c,
+        38 => 0x0d,
+        40 => 0x0e,
+        37 => 0x0f,
+        46 => 0x10,
+        45 => 0x11,
+        31 => 0x12,
+        35 => 0x13,
+        12 => 0x14,
+        15 => 0x15,
+        1 => 0x16,
+        17 => 0x17,
+        32 => 0x18,
+        9 => 0x19,
+        13 => 0x1a,
+        7 => 0x1b,
+        16 => 0x1c,
+        6 => 0x1d,
+        18 => 0x1e,
+        19 => 0x1f,
+        20 => 0x20,
+        21 => 0x21,
+        23 => 0x22,
+        22 => 0x23,
+        26 => 0x24,
+        28 => 0x25,
+        25 => 0x26,
+        29 => 0x27,
+        36 => 0x28,
+        53 => 0x29,
+        51 => 0x2a,
+        48 => 0x2b,
+        49 => 0x2c,
+        27 => 0x2d,
+        24 => 0x2e,
+        33 => 0x2f,
+        30 => 0x30,
+        42 => 0x31,
+        10 => 0x64,
+        41 => 0x33,
+        39 => 0x34,
+        50 => 0x35,
+        43 => 0x36,
+        47 => 0x37,
+        44 => 0x38,
+        57 => 0x39,
+        122 => 0x3a,
+        120 => 0x3b,
+        99 => 0x3c,
+        118 => 0x3d,
+        96 => 0x3e,
+        97 => 0x3f,
+        98 => 0x40,
+        100 => 0x41,
+        101 => 0x42,
+        109 => 0x43,
+        103 => 0x44,
+        111 => 0x45,
+        114 => 0x49,
+        115 => 0x4a,
+        116 => 0x4b,
+        117 => 0x4c,
+        119 => 0x4d,
+        121 => 0x4e,
+        124 => 0x4f,
+        123 => 0x50,
+        125 => 0x51,
+        126 => 0x52,
+        71 => 0x53,
+        75 => 0x54,
+        67 => 0x55,
+        78 => 0x56,
+        69 => 0x57,
+        76 => 0x58,
+        83 => 0x59,
+        84 => 0x5a,
+        85 => 0x5b,
+        86 => 0x5c,
+        87 => 0x5d,
+        88 => 0x5e,
+        89 => 0x5f,
+        91 => 0x60,
+        92 => 0x61,
+        82 => 0x62,
+        65 => 0x63,
+        81 => 0x67,
+        105 => 0x68,
+        107 => 0x69,
+        113 => 0x6a,
+        106 => 0x6b,
+        64 => 0x6c,
+        79 => 0x6d,
+        80 => 0x6e,
+        90 => 0x6f,
+        59 => 0xe0,
+        56 => 0xe1,
+        58 => 0xe2,
+        55 => 0xe3,
+        62 => 0xe4,
+        60 => 0xe5,
+        61 => 0xe6,
+        54 => 0xe7,
+        _ => return None,
+    };
+    KeyCode::from_usage(usage)
 }
 
 fn run_event_tap(
@@ -1370,6 +1931,103 @@ mod tests {
         assert_eq!(mac_virtual_key(KeyCode::LEFT_META), Some(55));
         assert_eq!(mac_virtual_key(KeyCode::RIGHT_ALT), Some(61));
         assert_eq!(mac_virtual_key(KeyCode::ARROW_LEFT), Some(123));
+    }
+
+    #[test]
+    fn maps_common_mac_virtual_keys_to_hid_usages() {
+        assert_eq!(mac_key_code(0), Some(KeyCode::A));
+        assert_eq!(mac_key_code(36), Some(KeyCode::ENTER));
+        assert_eq!(mac_key_code(55), Some(KeyCode::LEFT_META));
+        assert_eq!(mac_key_code(61), Some(KeyCode::RIGHT_ALT));
+        assert_eq!(mac_key_code(123), Some(KeyCode::ARROW_LEFT));
+        assert_eq!(mac_key_code(u16::MAX), None);
+    }
+
+    #[test]
+    fn swaps_command_and_control_for_windows_shortcut_semantics() {
+        assert_eq!(
+            remote_mac_key_code(KeyCode::LEFT_META),
+            KeyCode::LEFT_CONTROL
+        );
+        assert_eq!(
+            remote_mac_key_code(KeyCode::RIGHT_META),
+            KeyCode::RIGHT_CONTROL
+        );
+        assert_eq!(
+            remote_mac_key_code(KeyCode::LEFT_CONTROL),
+            KeyCode::LEFT_META
+        );
+        assert_eq!(
+            remote_mac_key_code(KeyCode::RIGHT_CONTROL),
+            KeyCode::RIGHT_META
+        );
+        assert_eq!(remote_mac_key_code(KeyCode::LEFT_ALT), KeyCode::LEFT_ALT);
+        assert_eq!(remote_mac_key_code(KeyCode::A), KeyCode::A);
+    }
+
+    #[test]
+    fn mac_keys_held_before_handoff_remain_local_until_released() {
+        let mut routing = KeyboardRoutingState::default();
+        assert_eq!(
+            route_mac_keyboard_event(&mut routing, KeyCode::LEFT_META, KeyState::Pressed),
+            (false, false, false)
+        );
+        let local_pressed = std::mem::take(&mut routing.local_pressed);
+        routing.passthrough_pressed.extend(local_pressed);
+        routing.remote = true;
+        assert_eq!(
+            route_mac_keyboard_event(&mut routing, KeyCode::LEFT_META, KeyState::Released),
+            (false, false, false)
+        );
+        assert!(routing.passthrough_pressed.is_empty());
+    }
+
+    #[test]
+    fn mac_remote_keys_stay_suppressed_until_physically_released() {
+        let mut routing = KeyboardRoutingState {
+            remote: true,
+            ..KeyboardRoutingState::default()
+        };
+        assert_eq!(
+            route_mac_keyboard_event(&mut routing, KeyCode::A, KeyState::Pressed),
+            (true, true, false)
+        );
+        assert_eq!(
+            route_mac_keyboard_event(&mut routing, KeyCode::A, KeyState::Pressed),
+            (true, true, true)
+        );
+        routing.remote = false;
+        assert_eq!(
+            route_mac_keyboard_event(&mut routing, KeyCode::A, KeyState::Released),
+            (false, true, false)
+        );
+        assert!(routing.captured_pressed.is_empty());
+    }
+
+    #[test]
+    fn flags_changed_distinguishes_left_and_right_modifier_releases() {
+        let mut routing = KeyboardRoutingState::default();
+        routing.local_pressed.insert(KeyCode::LEFT_SHIFT);
+        routing.local_pressed.insert(KeyCode::RIGHT_SHIFT);
+        assert_eq!(
+            mac_key_state(
+                EVENT_FLAGS_CHANGED,
+                KeyCode::RIGHT_SHIFT,
+                FLAG_SHIFT,
+                &routing
+            ),
+            Some(KeyState::Released)
+        );
+        routing.local_pressed.remove(&KeyCode::RIGHT_SHIFT);
+        assert_eq!(
+            mac_key_state(
+                EVENT_FLAGS_CHANGED,
+                KeyCode::RIGHT_SHIFT,
+                FLAG_SHIFT,
+                &routing
+            ),
+            Some(KeyState::Pressed)
+        );
     }
 
     #[test]

@@ -2,10 +2,10 @@
 
 EdgeMouse is a command-line software KVM that moves input between one
 Windows user session and one macOS user session over a LAN. Crossing a configured
-screen edge transfers mouse movement, buttons, scrolling, and the Windows
-keyboard to macOS; crossing back restores local control.
+screen edge transfers mouse movement, buttons, scrolling, and the local keyboard;
+crossing back restores local control.
 
-This repository contains a functional mouse MVP, Windows-to-macOS keyboard
+This repository contains a functional mouse MVP, bidirectional keyboard
 forwarding, and automatic desktop geometry exchange. It intentionally excludes
 clipboard sync, relay servers, tray UI, installers, and elevated Windows desktops.
 
@@ -14,10 +14,11 @@ clipboard sync, relay servers, tray UI, installers, and elevated Windows desktop
 - Left, right, top, or bottom edge switching with entry hysteresis.
 - Primary, secondary, middle, back, and forward buttons.
 - Vertical and horizontal scrolling.
-- Windows keyboard forwarding to macOS while the Windows mouse owns the Mac,
+- Bidirectional keyboard forwarding while the local mouse owns the peer,
   including modifiers, navigation, function keys, numpad keys, and key repeat.
-- Windows-style shortcut mapping on macOS: Windows `Ctrl` becomes Mac `Command`,
-  the Windows key becomes Mac `Control`, and `Alt` remains Mac `Option`.
+- Cross-platform shortcut mapping: Windows `Ctrl` becomes Mac `Command` and Mac
+  `Command` becomes Windows `Ctrl`; the remaining Control/Windows and
+  Alt/Option keys stay available in the corresponding platform roles.
 - Ordered keyboard delivery, forced key release on handback/disconnect, held-key
   transition safety, and `Ctrl+Alt+Shift+Esc` emergency local recovery.
 - Coordinate mapping between differently sized Windows and macOS displays.
@@ -48,8 +49,8 @@ clipboard sync, relay servers, tray UI, installers, and elevated Windows desktop
 
 Windows Raw Input capture remains a future high-polling-rate optimization. The
 MVP uses low-level mouse and keyboard hooks and a fixed mouse capture anchor
-while control is remote. Keyboard capture in the reverse macOS-to-Windows
-direction is not enabled yet.
+while control is remote. Both platforms fail open if keyboard capture cannot
+keep up, and keys held before a handoff remain local until physically released.
 
 ## Build
 
@@ -334,6 +335,12 @@ after real-world testing exposed stop-time correction jumps. It also resamples
 and seeds the Windows pointer after connection setup, so the first outward edge
 movement is preserved even when the program becomes ready with the cursor
 already at the screen boundary. Protocol v5 is unchanged.
+EdgeMouse 0.4.0 adds native macOS keyboard capture and completes bidirectional
+keyboard following. Mac `Command` shortcuts map to Windows `Control`, keys held
+before a handoff remain local, and all captured keys are released during
+handback, emergency recovery, disconnect, or shutdown. Protocol v5 remains
+unchanged, but both computers should run 0.4.0 when testing reverse keyboard
+control.
 
 ## Verify the source tree
 

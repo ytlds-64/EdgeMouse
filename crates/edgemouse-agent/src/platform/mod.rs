@@ -62,6 +62,8 @@ pub type NativeMouseCapture = edgemouse_platform_macos::MacMouseCapture;
 #[cfg(target_os = "macos")]
 pub type NativeMouseInjector = edgemouse_platform_macos::MacMouseInjector;
 #[cfg(target_os = "macos")]
+pub type NativeKeyboardCapture = edgemouse_platform_macos::MacKeyboardCapture;
+#[cfg(target_os = "macos")]
 pub type NativeKeyboardInjector = edgemouse_platform_macos::MacKeyboardInjector;
 
 #[cfg(target_os = "windows")]
@@ -72,29 +74,6 @@ pub type NativeMouseInjector = edgemouse_platform_windows::WindowsMouseInjector;
 pub type NativeKeyboardCapture = edgemouse_platform_windows::WindowsKeyboardCapture;
 #[cfg(target_os = "windows")]
 pub type NativeKeyboardInjector = edgemouse_platform_windows::WindowsKeyboardInjector;
-
-/// Keyboard capture on macOS is intentionally inactive in the first keyboard
-/// MVP. Windows-to-Mac control is enabled without changing the proven macOS
-/// mouse event tap; the reverse direction can be added independently.
-#[cfg(target_os = "macos")]
-pub struct NativeKeyboardCapture;
-
-#[cfg(target_os = "macos")]
-impl edgemouse_core::KeyboardCaptureBackend for NativeKeyboardCapture {
-    fn permission_state(&self) -> edgemouse_core::PermissionState {
-        edgemouse_core::PermissionState::Granted
-    }
-
-    fn set_remote(&mut self, _remote: bool) -> Result<(), edgemouse_core::PlatformError> {
-        Ok(())
-    }
-
-    fn try_next_event(
-        &mut self,
-    ) -> Result<Option<edgemouse_core::KeyboardEvent>, edgemouse_core::PlatformError> {
-        Ok(None)
-    }
-}
 
 #[cfg(target_os = "macos")]
 pub fn current_pointer() -> Result<edgemouse_core::Point, edgemouse_core::PlatformError> {
@@ -136,7 +115,7 @@ pub fn injector(initial: edgemouse_core::Point) -> NativeMouseInjector {
 
 #[cfg(target_os = "macos")]
 pub fn start_keyboard_capture() -> Result<NativeKeyboardCapture, edgemouse_core::PlatformError> {
-    Ok(NativeKeyboardCapture)
+    NativeKeyboardCapture::start()
 }
 
 #[cfg(target_os = "windows")]

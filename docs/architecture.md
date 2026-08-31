@@ -8,7 +8,7 @@ paired logical screen; moving back through the opposite edge restores it.
 
 Clipboard, file transfer, relay servers, per-monitor portal editing, tray UI,
 installers, lock screens, and Windows UAC secure desktops are outside this
-milestone. Windows keyboard input follows the mouse to macOS.
+milestone. The local keyboard follows the mouse in both directions.
 
 ## Runtime
 
@@ -186,10 +186,12 @@ responsible for suppression.
 
 ### macOS
 
-An active session `CGEventTap` captures and suppresses mouse events on a
-dedicated `CFRunLoop`. `CGEventPost` injects absolute movement, drag variants,
-buttons, and pixel scrolling with a dedicated event-source marker. Startup
-checks Accessibility permission. Automatic mode unions all active
+Active session `CGEventTap` instances capture and suppress mouse and keyboard
+events on dedicated `CFRunLoop` threads. `CGEventPost` injects absolute movement,
+drag variants, buttons, pixel scrolling, and keyboard events with a dedicated
+event-source marker. Keyboard routing keeps keys held before handoff local and
+fails open on queue pressure or callback contention. Startup checks Accessibility
+permission. Automatic mode unions all active
 `CGDisplayBounds` rectangles in the same global point coordinate space used by
 input events, so Retina scale and display rotation require no manual conversion.
 During remote send or receive,
@@ -207,5 +209,5 @@ restored during transitions and teardown.
    settings into a tray/settings UI.
 4. Add signed installers and diagnostics export around the existing per-user
    launch-at-login scripts.
-5. Make the current Windows-style modifier mapping configurable, add
-   macOS-to-Windows capture, then consider clipboard sync.
+5. Make the cross-platform modifier mapping configurable, then add bounded,
+   opt-in text and image clipboard synchronization.
