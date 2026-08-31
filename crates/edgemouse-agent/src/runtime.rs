@@ -594,11 +594,13 @@ fn run_loop(
                     session_id: remote_session,
                     after_sequence,
                     event,
+                    received_at,
                 } => {
                     let transition = remote.handle_datagram(
                         remote_session,
                         after_sequence,
                         event,
+                        received_at,
                         injector,
                         now_ms,
                     )?;
@@ -629,9 +631,10 @@ fn run_loop(
                     stale_moves,
                     arrival_jitter_ms,
                     max_arrival_gap_ms,
+                    superseded_moves,
                 } => {
                     println!(
-                        "Mouse link: RTT {rtt_ms:.1} ms; interval {send_interval_ms} ms; sent {sent_moves}; skipped {skipped_moves}; merged {coalesced_moves}; received {received_moves}; stale {stale_moves}; arrival jitter {arrival_jitter_ms:.1} ms; max gap {max_arrival_gap_ms:.1} ms"
+                        "Mouse link: RTT {rtt_ms:.1} ms; interval {send_interval_ms} ms; sent {sent_moves}; skipped {skipped_moves}; merged {coalesced_moves}; received {received_moves}; stale {stale_moves}; superseded {superseded_moves}; arrival jitter {arrival_jitter_ms:.1} ms; max gap {max_arrival_gap_ms:.1} ms"
                     );
                 }
                 NetworkEvent::Disconnected(reason) => {
@@ -872,6 +875,7 @@ struct PendingDatagram {
     session_id: u64,
     after_sequence: u64,
     event: RoutedEvent,
+    received_at: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -948,7 +952,7 @@ impl RemoteReceiver {
         if routed.sequence <= self.last_sequence {
             return Ok(RemoteTransition::None);
         }
-        injector.inject(routed.event)?;
+        injector.inject_received(routed.event, Instant::now())?;
         self.last_sequence = routed.sequence;
         self.last_reliable_sequence = routed.sequence;
         self.last_activity_ms = Some(now_ms);
@@ -1014,6 +1018,7 @@ impl RemoteReceiver {
         session_id: u64,
         after_sequence: u64,
         routed: RoutedEvent,
+        received_at: Instant,
         injector: &mut impl MouseInjectionBackend,
         now_ms: u64,
     ) -> Result<RemoteTransition, Box<dyn Error>> {
@@ -1039,11 +1044,12 @@ impl RemoteReceiver {
                     session_id,
                     after_sequence,
                     event: routed,
+                    received_at,
                 });
             }
             return Ok(RemoteTransition::None);
         }
-        self.inject_datagram(routed, injector, now_ms)
+        self.inject_datagram(routed, received_at, injector, now_ms)
     }
 
     fn take_ready_datagram(
@@ -1063,19 +1069,20 @@ impl RemoteReceiver {
             self.pending_datagram = Some(pending);
             return Ok(RemoteTransition::None);
         }
-        self.inject_datagram(pending.event, injector, now_ms)
+        self.inject_datagram(pending.event, pending.received_at, injector, now_ms)
     }
 
     fn inject_datagram(
         &mut self,
         routed: RoutedEvent,
+        received_at: Instant,
         injector: &mut impl MouseInjectionBackend,
         now_ms: u64,
     ) -> Result<RemoteTransition, Box<dyn Error>> {
         let RemoteMouseEvent::MoveAbsolute { position, .. } = routed.event else {
             return Err("pending datagram did not contain absolute movement".into());
         };
-        injector.inject(routed.event)?;
+        injector.inject_received(routed.event, received_at)?;
         self.last_sequence = routed.sequence;
         self.last_activity_ms = Some(now_ms);
         self.last_position = Some(position);
@@ -1489,10 +1496,11 @@ mod tests {
                 position: Point::new(30.0, 40.0),
             },
         };
+        let received_at = Instant::now();
 
         assert_eq!(
             receiver
-                .handle_datagram(9, 3, movement, &mut injector, 5)
+                .handle_datagram(9, 3, movement, received_at, &mut injector, 5)
                 .unwrap(),
             RemoteTransition::None
         );
@@ -1513,7 +1521,7 @@ mod tests {
             )
             .unwrap();
         receiver
-            .handle_datagram(9, 3, movement, &mut injector, 15)
+            .handle_datagram(9, 3, movement, received_at, &mut injector, 15)
             .unwrap();
         assert_eq!(injector.events.len(), 1);
 

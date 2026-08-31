@@ -1,6 +1,7 @@
 use edgemouse_core::{NodeId, RemoteMouseEvent, RoutedEvent};
 use edgemouse_protocol::{ScreenInfo, WireMessage};
 use edgemouse_transport::{PeerConfig, PeerLink};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
@@ -15,6 +16,10 @@ const MOUSE_FLUSH_INTERVAL_FAST: Duration = Duration::from_millis(4);
 const METRICS_INTERVAL: Duration = Duration::from_secs(5);
 const ACTIVE_MOVEMENT_GAP_MAX: Duration = Duration::from_millis(100);
 const ARRIVAL_JITTER_WEIGHT: f64 = 1.0 / 16.0;
+#[cfg(target_os = "macos")]
+const INCOMING_MOVE_CAPACITY: usize = 32;
+#[cfg(not(target_os = "macos"))]
+const INCOMING_MOVE_CAPACITY: usize = 1;
 #[cfg(target_os = "windows")]
 const WINDOWS_TIMER_PERIOD_MS: u32 = 1;
 
@@ -58,6 +63,7 @@ pub enum NetworkEvent {
         session_id: u64,
         after_sequence: u64,
         event: RoutedEvent,
+        received_at: Instant,
     },
     Metrics {
         rtt_ms: f64,
@@ -69,6 +75,7 @@ pub enum NetworkEvent {
         stale_moves: u64,
         arrival_jitter_ms: f64,
         max_arrival_gap_ms: f64,
+        superseded_moves: u64,
     },
     Disconnected(String),
 }
@@ -97,7 +104,7 @@ struct MoveCoalescer {
 
 #[derive(Default)]
 struct IncomingMoveCoalescer {
-    pending: Option<WireMessage>,
+    pending: VecDeque<BufferedIncomingMove>,
     last_forwarded_sequence: u64,
     received: u64,
     stale: u64,
@@ -105,6 +112,13 @@ struct IncomingMoveCoalescer {
     previous_gap: Option<Duration>,
     arrival_jitter_ms: f64,
     max_arrival_gap_ms: f64,
+    superseded: u64,
+}
+
+#[derive(Debug)]
+struct BufferedIncomingMove {
+    message: WireMessage,
+    received_at: Instant,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -113,6 +127,7 @@ struct IncomingMoveMetrics {
     stale: u64,
     arrival_jitter_ms: f64,
     max_arrival_gap_ms: f64,
+    superseded: u64,
 }
 
 impl MoveCoalescer {
@@ -145,14 +160,21 @@ impl IncomingMoveCoalescer {
         self.note_arrival(now);
         let pending_sequence = self
             .pending
-            .as_ref()
-            .and_then(mouse_datagram_sequence)
+            .back()
+            .and_then(|pending| mouse_datagram_sequence(&pending.message))
             .unwrap_or(0);
         if sequence <= self.last_forwarded_sequence || sequence <= pending_sequence {
             self.stale = self.stale.saturating_add(1);
             return;
         }
-        self.pending = Some(message);
+        if self.pending.len() == INCOMING_MOVE_CAPACITY {
+            drop(self.pending.pop_front());
+            self.superseded = self.superseded.saturating_add(1);
+        }
+        self.pending.push_back(BufferedIncomingMove {
+            message,
+            received_at: now,
+        });
     }
 
     fn note_arrival(&mut self, now: Instant) {
@@ -175,11 +197,11 @@ impl IncomingMoveCoalescer {
         self.last_arrival = Some(now);
     }
 
-    fn take(&mut self) -> Option<WireMessage> {
-        let message = self.pending.take()?;
-        self.last_forwarded_sequence = mouse_datagram_sequence(&message)
+    fn take(&mut self) -> Option<BufferedIncomingMove> {
+        let buffered = self.pending.pop_front()?;
+        self.last_forwarded_sequence = mouse_datagram_sequence(&buffered.message)
             .expect("incoming coalescer only contains movement datagrams");
-        Some(message)
+        Some(buffered)
     }
 
     fn take_metrics(&mut self) -> IncomingMoveMetrics {
@@ -188,11 +210,13 @@ impl IncomingMoveCoalescer {
             stale: self.stale,
             arrival_jitter_ms: self.arrival_jitter_ms,
             max_arrival_gap_ms: self.max_arrival_gap_ms,
+            superseded: self.superseded,
         };
         self.received = 0;
         self.stale = 0;
         self.arrival_jitter_ms = 0.0;
         self.max_arrival_gap_ms = 0.0;
+        self.superseded = 0;
         metrics
     }
 }
@@ -323,18 +347,22 @@ impl Network {
         match self.events.try_recv() {
             Ok(event) => Ok(Some(event)),
             Err(std_mpsc::TryRecvError::Empty) => {
-                let message = self
+                let buffered = self
                     .incoming_move
                     .lock()
                     .map_err(|_| "incoming mouse buffer lock was poisoned".to_owned())?
                     .take();
-                match message {
-                    Some(WireMessage::MouseDatagram {
-                        session_id,
-                        after_sequence,
-                        sequence,
-                        screen,
-                        position,
+                match buffered {
+                    Some(BufferedIncomingMove {
+                        message:
+                            WireMessage::MouseDatagram {
+                                session_id,
+                                after_sequence,
+                                sequence,
+                                screen,
+                                position,
+                            },
+                        received_at,
                     }) => Ok(Some(NetworkEvent::Datagram {
                         session_id,
                         after_sequence,
@@ -342,6 +370,7 @@ impl Network {
                             sequence,
                             event: RemoteMouseEvent::MoveAbsolute { screen, position },
                         },
+                        received_at,
                     })),
                     Some(_) => {
                         Err("incoming mouse buffer contained a non-datagram message".to_owned())
@@ -494,6 +523,7 @@ async fn run_network(
                         stale_moves: incoming_metrics.stale,
                         arrival_jitter_ms: incoming_metrics.arrival_jitter_ms,
                         max_arrival_gap_ms: incoming_metrics.max_arrival_gap_ms,
+                        superseded_moves: incoming_metrics.superseded,
                     }).is_err() {
                         break;
                     }
@@ -678,18 +708,29 @@ mod tests {
         coalescer.push(movement_datagram(10, 120.0));
         coalescer.push(movement_datagram(11, 110.0));
         coalescer.push(movement_datagram(9, 130.0));
-        assert_eq!(coalescer.take(), Some(movement_datagram(11, 110.0)));
+        if INCOMING_MOVE_CAPACITY > 1 {
+            assert_eq!(
+                coalescer.take().map(|buffered| buffered.message),
+                Some(movement_datagram(10, 120.0))
+            );
+        }
+        assert_eq!(
+            coalescer.take().map(|buffered| buffered.message),
+            Some(movement_datagram(11, 110.0))
+        );
 
         coalescer.push(movement_datagram(10, 120.0));
-        assert_eq!(coalescer.take(), None);
+        assert!(coalescer.take().is_none());
         let metrics = coalescer.take_metrics();
         assert_eq!(metrics.received, 4);
         assert_eq!(metrics.stale, 2);
+        assert_eq!(metrics.superseded, u64::from(INCOMING_MOVE_CAPACITY == 1));
         let reset = coalescer.take_metrics();
         assert_eq!(reset.received, 0);
         assert_eq!(reset.stale, 0);
         assert_eq!(reset.arrival_jitter_ms, 0.0);
         assert_eq!(reset.max_arrival_gap_ms, 0.0);
+        assert_eq!(reset.superseded, 0);
     }
 
     #[test]
@@ -706,6 +747,25 @@ mod tests {
         assert_eq!(metrics.stale, 0);
         assert!((metrics.arrival_jitter_ms - 0.5).abs() < f64::EPSILON);
         assert_eq!(metrics.max_arrival_gap_ms, 12.0);
+    }
+
+    #[test]
+    fn incoming_buffer_keeps_a_short_ordered_history() {
+        let start = Instant::now();
+        let mut coalescer = IncomingMoveCoalescer::default();
+        for sequence in 1..=u64::try_from(INCOMING_MOVE_CAPACITY + 2).unwrap() {
+            coalescer.push_at(
+                movement_datagram(sequence, sequence as f64),
+                start + Duration::from_millis(sequence),
+            );
+        }
+
+        let first = coalescer
+            .take()
+            .expect("the buffer should contain movement");
+        assert_eq!(mouse_datagram_sequence(&first.message), Some(3));
+        assert_eq!(first.received_at, start + Duration::from_millis(3));
+        assert_eq!(coalescer.take_metrics().superseded, 2);
     }
 
     #[test]

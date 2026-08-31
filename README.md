@@ -294,12 +294,14 @@ Remote absolute movement is emitted every 4–12 ms according to current RTT,
 always using the newest position. Stale movement is discarded during network
 jitter instead of being replayed later. Buttons, wheels, enter, leave, and the
 last position before each control event remain reliable and strictly ordered.
-On macOS, received movement is rendered on a stable 4 ms cadence with a bounded
-low-latency filter. Normal movement adds only a few milliseconds of lag, while a
-large update after a Wi-Fi gap is spread across short frames instead of becoming
-one visible cursor jump. Buttons, wheels, leave events, and drag transitions
-flush the newest position immediately, so smoothing never changes control-event
-ordering or click accuracy.
+On macOS, received movement keeps a short arrival-timestamped history and is
+rendered on a stable 4 ms cadence through an adaptive 8–12 ms jitter buffer.
+Positions between received samples are interpolated instead of jumping from one
+network packet to the next. When measured arrival jitter is high, a genuine
+packet gap may use at most 12 ms and 24 pixels of bounded prediction; the real
+position always replaces it as soon as a sample arrives. Buttons, wheels, leave
+events, and drag transitions flush the newest real position immediately, so
+buffering never changes control-event ordering or click accuracy.
 If the peer's physical mouse becomes unresponsive while it controls this
 computer, deliberately pushing this computer's physical mouse toward the
 configured peer edge requests an authenticated control handoff. The detector
@@ -324,6 +326,9 @@ synchronized with the currently injected pointer.
 EdgeMouse 0.3.3 adds low-latency macOS receive smoothing and arrival-jitter
 diagnostics without changing protocol v5, so it remains connection-compatible
 with 0.3.1 and 0.3.2 during a staged upgrade.
+EdgeMouse 0.3.4 replaces the fixed macOS receive filter with an adaptive 8–12 ms
+jitter buffer, arrival-time interpolation, and short bounded prediction. It
+still uses protocol v5 and remains connection-compatible with 0.3.1–0.3.3.
 
 ## Verify the source tree
 

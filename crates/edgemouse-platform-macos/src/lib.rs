@@ -7,7 +7,7 @@ use edgemouse_core::{
     MouseButton, MouseCaptureBackend, MouseInjectionBackend, PermissionState, PhysicalMouseEvent,
     PlatformError, Point, Rect, RemoteMouseEvent, Vector,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::c_void;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -26,9 +26,19 @@ const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_DISTANCE: f64 = 5.0;
 const MAX_CLICK_STATE: i64 = 3;
 const MOTION_FRAME_INTERVAL: Duration = Duration::from_millis(4);
-const MOTION_TIME_CONSTANT_SECONDS: f64 = 0.006;
+const MOTION_TIME_CONSTANT_SECONDS: f64 = 0.004;
 const MOTION_SNAP_DISTANCE: f64 = 0.25;
 const MOTION_MAX_FRAME_DISTANCE: f64 = 240.0;
+const MOTION_BUFFER_MIN: Duration = Duration::from_millis(8);
+const MOTION_BUFFER_MAX: Duration = Duration::from_millis(12);
+const MOTION_ACTIVE_GAP_MAX: Duration = Duration::from_millis(100);
+const MOTION_MIN_SAMPLE_INTERVAL: Duration = Duration::from_millis(1);
+const MOTION_MAX_SAMPLES: usize = 32;
+const MOTION_JITTER_WEIGHT: f64 = 1.0 / 8.0;
+const MOTION_PREDICTION_THRESHOLD_MS: f64 = 3.0;
+const MOTION_PREDICTION_MAX: Duration = Duration::from_millis(12);
+const MOTION_PREDICTION_MAX_DISTANCE: f64 = 24.0;
+const MOTION_PREDICTION_MAX_SPEED: f64 = 4_000.0;
 
 const EVENT_LEFT_DOWN: u32 = 1;
 const EVENT_LEFT_UP: u32 = 2;
@@ -457,9 +467,23 @@ pub struct MacMouseInjector {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct TimedPosition {
+    position: Point,
+    at: Instant,
+}
+
+#[derive(Debug)]
 struct MotionSmoother {
     displayed: Point,
     target: Point,
+    latest: Point,
+    previous_played: Option<TimedPosition>,
+    played: TimedPosition,
+    samples: VecDeque<TimedPosition>,
+    last_arrival: Option<Instant>,
+    previous_arrival_gap: Option<Duration>,
+    arrival_jitter_ms: f64,
+    buffer_delay: Duration,
     last_frame: Instant,
     next_frame: Instant,
     pending: bool,
@@ -470,6 +494,14 @@ impl MotionSmoother {
         Self {
             displayed: position,
             target: position,
+            latest: position,
+            previous_played: None,
+            played: TimedPosition { position, at: now },
+            samples: VecDeque::new(),
+            last_arrival: None,
+            previous_arrival_gap: None,
+            arrival_jitter_ms: 0.0,
+            buffer_delay: MOTION_BUFFER_MIN,
             last_frame: now,
             next_frame: now + MOTION_FRAME_INTERVAL,
             pending: false,
@@ -479,14 +511,130 @@ impl MotionSmoother {
     fn jump(&mut self, position: Point, now: Instant) {
         self.displayed = position;
         self.target = position;
+        self.latest = position;
+        self.previous_played = None;
+        self.played = TimedPosition { position, at: now };
+        self.samples.clear();
+        self.last_arrival = None;
+        self.previous_arrival_gap = None;
+        self.arrival_jitter_ms = 0.0;
+        self.buffer_delay = MOTION_BUFFER_MIN;
         self.last_frame = now;
         self.next_frame = now + MOTION_FRAME_INTERVAL;
         self.pending = false;
     }
 
-    fn set_target(&mut self, position: Point) {
-        self.target = position;
-        self.pending = position != self.displayed;
+    fn set_target(&mut self, position: Point, received_at: Instant) {
+        self.note_arrival(received_at);
+        self.latest = position;
+        let last_sample_at = self
+            .samples
+            .back()
+            .map_or(self.played.at, |sample| sample.at);
+        let sample_at = received_at.max(last_sample_at + MOTION_MIN_SAMPLE_INTERVAL);
+        if self.samples.len() == MOTION_MAX_SAMPLES {
+            let _ = self.samples.pop_front();
+        }
+        self.samples.push_back(TimedPosition {
+            position,
+            at: sample_at,
+        });
+        self.pending = true;
+    }
+
+    fn note_arrival(&mut self, received_at: Instant) {
+        if let Some(last_arrival) = self.last_arrival {
+            let gap = received_at.saturating_duration_since(last_arrival);
+            if gap <= MOTION_ACTIVE_GAP_MAX {
+                if let Some(previous_gap) = self.previous_arrival_gap {
+                    let variation_ms =
+                        (gap.as_secs_f64() - previous_gap.as_secs_f64()).abs() * 1_000.0;
+                    self.arrival_jitter_ms +=
+                        (variation_ms - self.arrival_jitter_ms) * MOTION_JITTER_WEIGHT;
+                }
+                self.previous_arrival_gap = Some(gap);
+            } else {
+                self.previous_arrival_gap = None;
+            }
+        }
+        self.last_arrival = Some(received_at);
+        let delay_ms = (MOTION_BUFFER_MIN.as_secs_f64() * 1_000.0 + self.arrival_jitter_ms * 0.5)
+            .clamp(
+                MOTION_BUFFER_MIN.as_secs_f64() * 1_000.0,
+                MOTION_BUFFER_MAX.as_secs_f64() * 1_000.0,
+            );
+        self.buffer_delay = Duration::from_secs_f64(delay_ms / 1_000.0);
+    }
+
+    fn desired_position(&mut self, playback_at: Instant) -> (Point, bool) {
+        while self
+            .samples
+            .front()
+            .is_some_and(|sample| sample.at <= playback_at)
+        {
+            self.previous_played = Some(self.played);
+            self.played = self
+                .samples
+                .pop_front()
+                .expect("the front sample was checked");
+        }
+
+        if let Some(next) = self.samples.front()
+            && playback_at > self.played.at
+        {
+            let span = next.at.saturating_duration_since(self.played.at);
+            if !span.is_zero() {
+                let progress = playback_at
+                    .saturating_duration_since(self.played.at)
+                    .as_secs_f64()
+                    / span.as_secs_f64();
+                return (
+                    lerp_point(
+                        self.played.position,
+                        next.position,
+                        progress.clamp(0.0, 1.0),
+                    ),
+                    true,
+                );
+            }
+        }
+
+        let Some(previous) = self.previous_played else {
+            return (self.played.position, !self.samples.is_empty());
+        };
+        let prediction_age = playback_at.saturating_duration_since(self.played.at);
+        let can_predict = self.arrival_jitter_ms >= MOTION_PREDICTION_THRESHOLD_MS
+            && !prediction_age.is_zero()
+            && prediction_age < MOTION_PREDICTION_MAX
+            && self.samples.is_empty();
+        if !can_predict {
+            return (self.played.position, !self.samples.is_empty());
+        }
+        let sample_span = self.played.at.saturating_duration_since(previous.at);
+        if sample_span.is_zero() {
+            return (self.played.position, false);
+        }
+        let velocity_x = ((self.played.position.x - previous.position.x)
+            / sample_span.as_secs_f64())
+        .clamp(-MOTION_PREDICTION_MAX_SPEED, MOTION_PREDICTION_MAX_SPEED);
+        let velocity_y = ((self.played.position.y - previous.position.y)
+            / sample_span.as_secs_f64())
+        .clamp(-MOTION_PREDICTION_MAX_SPEED, MOTION_PREDICTION_MAX_SPEED);
+        let mut prediction_x = velocity_x * prediction_age.as_secs_f64();
+        let mut prediction_y = velocity_y * prediction_age.as_secs_f64();
+        let prediction_distance = prediction_x.hypot(prediction_y);
+        if prediction_distance > MOTION_PREDICTION_MAX_DISTANCE {
+            let scale = MOTION_PREDICTION_MAX_DISTANCE / prediction_distance;
+            prediction_x *= scale;
+            prediction_y *= scale;
+        }
+        (
+            Point::new(
+                self.played.position.x + prediction_x,
+                self.played.position.y + prediction_y,
+            ),
+            true,
+        )
     }
 
     fn sample(&mut self, now: Instant) -> Option<Point> {
@@ -494,6 +642,10 @@ impl MotionSmoother {
             return None;
         }
 
+        let playback_at = now.checked_sub(self.buffer_delay).unwrap_or(now);
+        let (desired, keep_polling) = self.desired_position(playback_at);
+        self.target = desired;
+        let previous_displayed = self.displayed;
         let elapsed = now.saturating_duration_since(self.last_frame).as_secs_f64();
         let dx = self.target.x - self.displayed.x;
         let dy = self.target.y - self.displayed.y;
@@ -510,22 +662,31 @@ impl MotionSmoother {
         );
         if (self.target.x - next.x).hypot(self.target.y - next.y) <= MOTION_SNAP_DISTANCE {
             next = self.target;
-            self.pending = false;
         }
+        self.pending = keep_polling
+            || !self.samples.is_empty()
+            || (self.target.x - next.x).hypot(self.target.y - next.y) > MOTION_SNAP_DISTANCE;
         self.displayed = next;
         self.last_frame = now;
         self.next_frame = now + MOTION_FRAME_INTERVAL;
-        Some(next)
+        (next != previous_displayed).then_some(next)
     }
 
     fn finish(&mut self, now: Instant) -> Option<Point> {
-        if !self.pending {
+        if !self.pending && self.latest == self.displayed {
             return None;
         }
-        let target = self.target;
+        let target = self.latest;
         self.jump(target, now);
         Some(target)
     }
+}
+
+fn lerp_point(start: Point, end: Point, progress: f64) -> Point {
+    Point::new(
+        start.x + (end.x - start.x) * progress,
+        start.y + (end.y - start.y) * progress,
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -762,17 +923,25 @@ impl MouseInjectionBackend for MacMouseInjector {
     }
 
     fn inject(&mut self, event: RemoteMouseEvent) -> Result<(), PlatformError> {
+        self.inject_received(event, Instant::now())
+    }
+
+    fn inject_received(
+        &mut self,
+        event: RemoteMouseEvent,
+        received_at: Instant,
+    ) -> Result<(), PlatformError> {
         match event {
             RemoteMouseEvent::Enter { position, .. } => {
                 self.clicks.reset();
-                self.motion.jump(position, Instant::now());
+                self.motion.jump(position, received_at);
                 self.post_movement_now(position)
             }
             RemoteMouseEvent::MoveAbsolute { position, .. } => {
                 if !position.is_finite() {
                     return Err(PlatformError::new("mouse position must be finite"));
                 }
-                self.motion.set_target(position);
+                self.motion.set_target(position, received_at);
                 Ok(())
             }
             RemoteMouseEvent::Button { button, state } => {
@@ -1350,21 +1519,23 @@ mod tests {
     }
 
     #[test]
-    fn motion_smoother_waits_for_a_frame_and_converges_without_jumping() {
+    fn motion_smoother_waits_for_its_jitter_buffer() {
         let start = Instant::now();
         let mut motion = MotionSmoother::new(Point::new(0.0, 0.0), start);
-        motion.set_target(Point::new(100.0, 0.0));
+        motion.set_target(Point::new(100.0, 0.0), start + Duration::from_millis(4));
 
         assert_eq!(motion.sample(start + Duration::from_millis(3)), None);
+        assert_eq!(motion.sample(start + Duration::from_millis(4)), None);
+        assert_eq!(motion.sample(start + Duration::from_millis(8)), None);
         let first = motion
-            .sample(start + MOTION_FRAME_INTERVAL)
-            .expect("the first frame should be ready");
+            .sample(start + Duration::from_millis(12))
+            .expect("the buffered sample should become ready");
         assert!(first.x > 0.0 && first.x < 100.0);
         assert_eq!(first.y, 0.0);
 
         let mut latest = first;
-        for frame in 2..=12 {
-            if let Some(position) = motion.sample(start + MOTION_FRAME_INTERVAL * frame) {
+        for frame in 4..=16 {
+            if let Some(position) = motion.sample(start + Duration::from_millis(frame * 4)) {
                 latest = position;
             }
         }
@@ -1372,18 +1543,46 @@ mod tests {
     }
 
     #[test]
-    fn motion_smoother_caps_a_large_delayed_step() {
+    fn motion_smoother_interpolates_between_buffered_samples() {
         let start = Instant::now();
         let mut motion = MotionSmoother::new(Point::new(0.0, 0.0), start);
-        motion.set_target(Point::new(1_000.0, 0.0));
+        motion.set_target(Point::new(40.0, 0.0), start + Duration::from_millis(4));
+        motion.set_target(Point::new(80.0, 0.0), start + Duration::from_millis(8));
 
-        let first = motion
-            .sample(start + Duration::from_millis(100))
-            .expect("a delayed frame should be ready");
-        assert_eq!(first, Point::new(MOTION_MAX_FRAME_DISTANCE, 0.0));
+        let (desired, keep_polling) = motion.desired_position(start + Duration::from_millis(6));
+        assert_eq!(desired, Point::new(60.0, 0.0));
+        assert!(keep_polling);
+    }
+
+    #[test]
+    fn motion_prediction_is_short_and_distance_bounded() {
+        let start = Instant::now();
+        let mut motion = MotionSmoother::new(Point::new(0.0, 0.0), start);
+        motion.set_target(Point::new(10.0, 0.0), start + Duration::from_millis(4));
+        motion.set_target(Point::new(20.0, 0.0), start + Duration::from_millis(8));
+        let _ = motion.desired_position(start + Duration::from_millis(8));
+        motion.arrival_jitter_ms = 10.0;
+
+        let (predicted, keep_polling) = motion.desired_position(start + Duration::from_millis(19));
+        assert!(predicted.x > 20.0);
+        assert!(predicted.x - 20.0 <= MOTION_PREDICTION_MAX_DISTANCE);
+        assert!(keep_polling);
+
+        let (stopped, keep_polling) = motion.desired_position(start + Duration::from_millis(20));
+        assert_eq!(stopped, Point::new(20.0, 0.0));
+        assert!(!keep_polling);
+    }
+
+    #[test]
+    fn reliable_control_flushes_the_latest_buffered_position() {
+        let start = Instant::now();
+        let mut motion = MotionSmoother::new(Point::new(0.0, 0.0), start);
+        motion.set_target(Point::new(1_000.0, 0.0), start + Duration::from_millis(1));
+
         assert_eq!(
-            motion.finish(start + Duration::from_millis(101)),
+            motion.finish(start + Duration::from_millis(2)),
             Some(Point::new(1_000.0, 0.0))
         );
+        assert!(motion.samples.is_empty());
     }
 }

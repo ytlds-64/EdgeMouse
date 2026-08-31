@@ -1,6 +1,7 @@
 use crate::{KeyboardEvent, PhysicalMouseEvent, Point, RemoteMouseEvent};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionState {
@@ -28,6 +29,19 @@ pub trait MouseCaptureBackend {
 pub trait MouseInjectionBackend {
     fn permission_state(&self) -> PermissionState;
     fn inject(&mut self, event: RemoteMouseEvent) -> Result<(), PlatformError>;
+
+    /// Injects an event while preserving the receiver-side arrival timestamp.
+    ///
+    /// Immediate backends ignore the timestamp. A paced backend may use it to
+    /// interpolate a short history of absolute movement without delaying
+    /// reliable buttons or wheels.
+    fn inject_received(
+        &mut self,
+        event: RemoteMouseEvent,
+        _received_at: Instant,
+    ) -> Result<(), PlatformError> {
+        self.inject(event)
+    }
 
     /// Advances any platform-specific, low-latency movement pacing.
     ///
