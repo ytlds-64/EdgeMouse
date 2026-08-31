@@ -67,6 +67,7 @@ const FLAG_CONTROL: u64 = 1 << 18;
 const FLAG_ALTERNATE: u64 = 1 << 19;
 const FLAG_COMMAND: u64 = 1 << 20;
 const FLAG_NUMERIC_PAD: u64 = 1 << 21;
+const FLAG_SECONDARY_FN: u64 = 1 << 23;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -99,6 +100,13 @@ type EventTapCallback = unsafe extern "C" fn(
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn AXIsProcessTrusted() -> u8;
+    fn _CGSDefaultConnection() -> i32;
+    fn CGSSetConnectionProperty(
+        connection: i32,
+        target: i32,
+        key: *const c_void,
+        value: *const c_void,
+    ) -> i32;
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -155,7 +163,13 @@ unsafe extern "C" {
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
+    static kCFBooleanTrue: *const c_void;
     static kCFRunLoopCommonModes: *const c_void;
+    fn CFStringCreateWithCString(
+        allocator: *const c_void,
+        string: *const i8,
+        encoding: u32,
+    ) -> *mut c_void;
     fn CFMachPortCreateRunLoopSource(
         allocator: *const c_void,
         port: *mut c_void,
@@ -314,6 +328,7 @@ impl MacMouseCapture {
         if self.cursor_hidden {
             return Ok(());
         }
+        Self::allow_background_cursor_control()?;
         // SAFETY: The display ID comes from CoreGraphics and has no ownership.
         let result = unsafe { CGDisplayHideCursor(CGMainDisplayID()) };
         if result != 0 {
@@ -322,6 +337,10 @@ impl MacMouseCapture {
             )));
         }
         self.cursor_hidden = true;
+        // Re-associating immediately after hiding avoids a WindowServer race in
+        // which a background event-tap process has its cursor made visible again.
+        // Remote mode disconnects physical motion again after this returns.
+        Self::associate_cursor(true)?;
         Ok(())
     }
 
@@ -329,6 +348,7 @@ impl MacMouseCapture {
         if !self.cursor_hidden {
             return Ok(());
         }
+        Self::allow_background_cursor_control()?;
         // SAFETY: The display ID comes from CoreGraphics and has no ownership.
         let result = unsafe { CGDisplayShowCursor(CGMainDisplayID()) };
         if result != 0 {
@@ -338,6 +358,39 @@ impl MacMouseCapture {
         }
         self.cursor_hidden = false;
         Ok(())
+    }
+
+    fn allow_background_cursor_control() -> Result<(), PlatformError> {
+        // CGDisplayHideCursor normally only honors foreground applications. This
+        // WindowServer property is the same compatibility path used by mature
+        // software KVMs so a login/background agent can own cursor visibility.
+        const PROPERTY: &[u8] = b"SetsCursorInBackground\0";
+        const MAC_ROMAN: u32 = 0;
+        // SAFETY: PROPERTY is a static nul-terminated ASCII string and the create
+        // call returns an owned CoreFoundation object.
+        let property = unsafe {
+            CFStringCreateWithCString(ptr::null(), PROPERTY.as_ptr().cast::<i8>(), MAC_ROMAN)
+        };
+        if property.is_null() {
+            return Err(PlatformError::new(
+                "failed to create the macOS background cursor property",
+            ));
+        }
+        // SAFETY: The connection identifiers are supplied by WindowServer; the
+        // property and singleton Boolean remain valid for the duration of the call.
+        let result = unsafe {
+            let connection = _CGSDefaultConnection();
+            CGSSetConnectionProperty(connection, connection, property, kCFBooleanTrue)
+        };
+        // SAFETY: This function owns the create-rule reference.
+        unsafe { CFRelease(property) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(PlatformError::new(format!(
+                "failed to enable background cursor control (WindowServer code {result})"
+            )))
+        }
     }
 
     fn warp(position: Point) -> Result<(), PlatformError> {
@@ -406,16 +459,16 @@ impl MouseCaptureBackend for MacMouseCapture {
                 self.show_cursor()
             }
             CaptureMode::Remote { anchor } => {
-                Self::associate_cursor(false)?;
                 Self::warp(anchor)?;
                 self.hide_cursor()?;
+                Self::associate_cursor(false)?;
                 self.suppress.store(true, Ordering::Release);
                 Ok(())
             }
             CaptureMode::ReceivingRemote { position } => {
-                Self::associate_cursor(false)?;
                 Self::warp(position)?;
                 self.show_cursor()?;
+                Self::associate_cursor(false)?;
                 self.suppress.store(true, Ordering::Release);
                 Ok(())
             }
@@ -464,6 +517,7 @@ struct KeyboardRoutingState {
     captured_pressed: BTreeSet<KeyCode>,
     passthrough_pressed: BTreeSet<KeyCode>,
     caps_lock_on: bool,
+    function_key_down: bool,
 }
 
 impl KeyboardRoutingState {
@@ -1409,13 +1463,30 @@ unsafe extern "C" fn keyboard_event_tap_callback(
     let Ok(virtual_key) = u16::try_from(virtual_key) else {
         return event;
     };
-    let Some(key) = mac_key_code(virtual_key) else {
-        return event;
-    };
     // SAFETY: Flags are available on every CGEvent.
     let flags = unsafe { CGEventGetFlags(event) };
     let Ok(mut routing) = state.routing.try_lock() else {
         // Never block WindowServer's event-tap callback.
+        return event;
+    };
+
+    if is_mac_language_key(virtual_key) {
+        let pressed = mac_language_key_pressed(event_type, virtual_key, flags, &routing);
+        if virtual_key == 63 {
+            routing.function_key_down = pressed;
+        }
+        let suppress = routing.remote;
+        drop(routing);
+        if suppress && pressed {
+            if queue_windows_language_toggle(state) {
+                return ptr::null_mut();
+            }
+            return event;
+        }
+        return if suppress { ptr::null_mut() } else { event };
+    }
+
+    let Some(key) = mac_key_code(virtual_key) else {
         return event;
     };
 
@@ -1431,25 +1502,17 @@ unsafe extern "C" fn keyboard_event_tap_callback(
         routing.caps_lock_on = caps_lock_on;
         let suppress = routing.remote;
         drop(routing);
-        if suppress {
-            let pressed = KeyboardEvent {
-                key,
-                state: KeyState::Pressed,
-                repeat: false,
-            };
-            let released = KeyboardEvent {
-                key,
-                state: KeyState::Released,
-                repeat: false,
-            };
-            if queue_mac_keyboard_event(state, pressed) && queue_mac_keyboard_event(state, released)
-            {
-                return ptr::null_mut();
-            }
+        if suppress && queue_windows_language_toggle(state) {
+            return ptr::null_mut();
         }
         return event;
     }
 
+    let modifier_events = if matches!(event_type, EVENT_KEY_DOWN | EVENT_KEY_UP) {
+        reconcile_mac_modifier_flags(&mut routing, flags)
+    } else {
+        Vec::new()
+    };
     let Some(key_state) = mac_key_state(event_type, key, flags, &routing) else {
         return event;
     };
@@ -1464,6 +1527,11 @@ unsafe extern "C" fn keyboard_event_tap_callback(
     }
     drop(routing);
 
+    for modifier_event in modifier_events {
+        if !queue_mac_keyboard_event(state, modifier_event) {
+            return event;
+        }
+    }
     if send && !emergency {
         let forwarded = KeyboardEvent {
             key: remote_mac_key_code(key),
@@ -1475,6 +1543,51 @@ unsafe extern "C" fn keyboard_event_tap_callback(
         }
     }
     if suppress { ptr::null_mut() } else { event }
+}
+
+fn queue_windows_language_toggle(state: &KeyboardCallbackState) -> bool {
+    // Win+Space is Windows' layout-independent input-source switch. Sending the
+    // complete chord preserves the Mac 中/英 key's user-facing meaning instead of
+    // incorrectly turning it into Windows Caps Lock.
+    [
+        (KeyCode::LEFT_META, KeyState::Pressed),
+        (KeyCode::SPACE, KeyState::Pressed),
+        (KeyCode::SPACE, KeyState::Released),
+        (KeyCode::LEFT_META, KeyState::Released),
+    ]
+    .into_iter()
+    .all(|(key, key_state)| {
+        queue_mac_keyboard_event(
+            state,
+            KeyboardEvent {
+                key,
+                state: key_state,
+                repeat: false,
+            },
+        )
+    })
+}
+
+fn is_mac_language_key(virtual_key: u16) -> bool {
+    // Globe/Fn, JIS Eisu and JIS Kana. Caps Lock is handled separately because
+    // it reports its toggle through FLAG_ALPHA_SHIFT.
+    matches!(virtual_key, 63 | 102 | 104)
+}
+
+fn mac_language_key_pressed(
+    event_type: u32,
+    virtual_key: u16,
+    flags: u64,
+    routing: &KeyboardRoutingState,
+) -> bool {
+    match event_type {
+        EVENT_KEY_DOWN => true,
+        EVENT_KEY_UP => false,
+        EVENT_FLAGS_CHANGED if virtual_key == 63 => {
+            flags & FLAG_SECONDARY_FN != 0 && !routing.function_key_down
+        }
+        _ => false,
+    }
 }
 
 fn queue_mac_keyboard_event(state: &KeyboardCallbackState, event: KeyboardEvent) -> bool {
@@ -1519,6 +1632,45 @@ fn mac_modifier_flag(key: KeyCode) -> Option<u64> {
         KeyCode::LEFT_META | KeyCode::RIGHT_META => Some(FLAG_COMMAND),
         _ => None,
     }
+}
+
+fn reconcile_mac_modifier_flags(
+    routing: &mut KeyboardRoutingState,
+    flags: u64,
+) -> Vec<KeyboardEvent> {
+    if !routing.remote {
+        return Vec::new();
+    }
+    let groups = [
+        (FLAG_SHIFT, KeyCode::LEFT_SHIFT, KeyCode::RIGHT_SHIFT),
+        (FLAG_CONTROL, KeyCode::LEFT_CONTROL, KeyCode::RIGHT_CONTROL),
+        (FLAG_ALTERNATE, KeyCode::LEFT_ALT, KeyCode::RIGHT_ALT),
+        (FLAG_COMMAND, KeyCode::LEFT_META, KeyCode::RIGHT_META),
+    ];
+    let mut events = Vec::new();
+    for (flag, left, right) in groups {
+        let left_down = routing.captured_pressed.contains(&left);
+        let right_down = routing.captured_pressed.contains(&right);
+        if flags & flag != 0 && !left_down && !right_down {
+            routing.captured_pressed.insert(left);
+            events.push(KeyboardEvent {
+                key: remote_mac_key_code(left),
+                state: KeyState::Pressed,
+                repeat: false,
+            });
+        } else if flags & flag == 0 {
+            for key in [left, right] {
+                if routing.captured_pressed.remove(&key) {
+                    events.push(KeyboardEvent {
+                        key: remote_mac_key_code(key),
+                        state: KeyState::Released,
+                        repeat: false,
+                    });
+                }
+            }
+        }
+    }
+    events
 }
 
 fn route_mac_keyboard_event(
@@ -2028,6 +2180,86 @@ mod tests {
             ),
             Some(KeyState::Pressed)
         );
+    }
+
+    #[test]
+    fn ordinary_key_events_recover_a_missed_modifier_transition() {
+        let mut routing = KeyboardRoutingState {
+            remote: true,
+            ..KeyboardRoutingState::default()
+        };
+        assert_eq!(
+            reconcile_mac_modifier_flags(&mut routing, FLAG_COMMAND),
+            vec![KeyboardEvent {
+                key: KeyCode::LEFT_CONTROL,
+                state: KeyState::Pressed,
+                repeat: false,
+            }]
+        );
+        assert!(routing.captured_pressed.contains(&KeyCode::LEFT_META));
+        assert!(reconcile_mac_modifier_flags(&mut routing, FLAG_COMMAND).is_empty());
+        assert_eq!(
+            reconcile_mac_modifier_flags(&mut routing, 0),
+            vec![KeyboardEvent {
+                key: KeyCode::LEFT_CONTROL,
+                state: KeyState::Released,
+                repeat: false,
+            }]
+        );
+        assert!(routing.captured_pressed.is_empty());
+    }
+
+    #[test]
+    fn modifier_recovery_covers_option_and_physical_control() {
+        let mut routing = KeyboardRoutingState {
+            remote: true,
+            ..KeyboardRoutingState::default()
+        };
+        assert_eq!(
+            reconcile_mac_modifier_flags(&mut routing, FLAG_ALTERNATE | FLAG_CONTROL),
+            vec![
+                KeyboardEvent {
+                    key: KeyCode::LEFT_META,
+                    state: KeyState::Pressed,
+                    repeat: false,
+                },
+                KeyboardEvent {
+                    key: KeyCode::LEFT_ALT,
+                    state: KeyState::Pressed,
+                    repeat: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn mac_language_keys_trigger_only_on_press() {
+        let mut routing = KeyboardRoutingState::default();
+        assert!(is_mac_language_key(63));
+        assert!(is_mac_language_key(102));
+        assert!(is_mac_language_key(104));
+        assert!(!is_mac_language_key(57));
+        assert!(mac_language_key_pressed(
+            EVENT_FLAGS_CHANGED,
+            63,
+            FLAG_SECONDARY_FN,
+            &routing
+        ));
+        routing.function_key_down = true;
+        assert!(!mac_language_key_pressed(
+            EVENT_FLAGS_CHANGED,
+            63,
+            FLAG_SECONDARY_FN,
+            &routing
+        ));
+        assert!(!mac_language_key_pressed(
+            EVENT_FLAGS_CHANGED,
+            63,
+            0,
+            &routing
+        ));
+        assert!(mac_language_key_pressed(EVENT_KEY_DOWN, 102, 0, &routing));
+        assert!(!mac_language_key_pressed(EVENT_KEY_UP, 102, 0, &routing));
     }
 
     #[test]
