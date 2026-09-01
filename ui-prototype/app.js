@@ -39,6 +39,7 @@ document.querySelectorAll(".segmented").forEach((group) => {
 
 const layoutCanvas = document.querySelector(".layout-canvas");
 const layoutDirectionButtons = [...document.querySelectorAll(".layout-direction button")];
+const dragBeam = layoutCanvas.querySelector(".drag-beam");
 
 function setLayoutEdge(edge) {
   const win = layoutCanvas.querySelector(".screen-win");
@@ -72,6 +73,51 @@ function setDropPreview(edge) {
   layoutDirectionButtons.forEach((button) => button.classList.toggle("is-drop-preview", button.dataset.edge === edge));
 }
 
+function cardCenter(rect) {
+  return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+}
+
+function pointOnCardEdge(rect, deltaX, deltaY) {
+  const center = cardCenter(rect);
+  const horizontalScale = Math.abs(deltaX) < 0.001 ? Number.POSITIVE_INFINITY : rect.width / 2 / Math.abs(deltaX);
+  const verticalScale = Math.abs(deltaY) < 0.001 ? Number.POSITIVE_INFINITY : rect.height / 2 / Math.abs(deltaY);
+  const scale = Math.min(horizontalScale, verticalScale);
+  return { x: center.x + deltaX * scale, y: center.y + deltaY * scale };
+}
+
+function updateDragBeam() {
+  const canvasRect = layoutCanvas.getBoundingClientRect();
+  const winRect = layoutCanvas.querySelector(".screen-win").getBoundingClientRect();
+  const macRect = layoutCanvas.querySelector(".screen-mac").getBoundingClientRect();
+  const cardsOverlap = winRect.left < macRect.right && winRect.right > macRect.left && winRect.top < macRect.bottom && winRect.bottom > macRect.top;
+  if (cardsOverlap) {
+    dragBeam.classList.remove("is-visible");
+    return;
+  }
+  const winCenter = cardCenter(winRect);
+  const macCenter = cardCenter(macRect);
+  const deltaX = macCenter.x - winCenter.x;
+  const deltaY = macCenter.y - winCenter.y;
+  const start = pointOnCardEdge(winRect, deltaX, deltaY);
+  const end = pointOnCardEdge(macRect, -deltaX, -deltaY);
+  const lineX = end.x - start.x;
+  const lineY = end.y - start.y;
+  const angle = Math.atan2(lineY, lineX);
+
+  dragBeam.style.left = `${start.x - canvasRect.left}px`;
+  dragBeam.style.top = `${start.y - canvasRect.top - 11}px`;
+  dragBeam.style.width = `${Math.hypot(lineX, lineY)}px`;
+  dragBeam.style.transform = `rotate(${angle}rad)`;
+  dragBeam.querySelector("span").style.transform = `translate(-50%, -50%) rotate(${-angle}rad)`;
+  dragBeam.classList.add("is-visible");
+}
+
+function hideDragBeam() {
+  dragBeam.classList.remove("is-visible");
+  dragBeam.removeAttribute("style");
+  dragBeam.querySelector("span").removeAttribute("style");
+}
+
 document.querySelectorAll(".mini-screen").forEach((screen) => {
   let drag;
 
@@ -85,6 +131,7 @@ document.querySelectorAll(".mini-screen").forEach((screen) => {
     drag = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, moved: false };
     screen.classList.add("is-dragging");
     layoutCanvas.classList.add("is-dragging");
+    updateDragBeam();
   });
 
   window.addEventListener("pointermove", (event) => {
@@ -93,6 +140,7 @@ document.querySelectorAll(".mini-screen").forEach((screen) => {
     const deltaY = event.clientY - drag.startY;
     drag.moved ||= Math.hypot(deltaX, deltaY) > 8;
     screen.style.transform = `translate3d(${deltaX}px, ${deltaY}px, 0) scale(1.02)`;
+    updateDragBeam();
     const other = layoutCanvas.querySelector(screen.classList.contains("screen-mac") ? ".screen-win" : ".screen-mac");
     const macRect = screen.classList.contains("screen-mac") ? screen.getBoundingClientRect() : other.getBoundingClientRect();
     const winRect = screen.classList.contains("screen-win") ? screen.getBoundingClientRect() : other.getBoundingClientRect();
@@ -110,6 +158,7 @@ document.querySelectorAll(".mini-screen").forEach((screen) => {
     screen.style.transform = "";
     screen.classList.remove("is-dragging");
     layoutCanvas.classList.remove("is-dragging");
+    hideDragBeam();
     setDropPreview();
     drag = undefined;
     if (moved) {

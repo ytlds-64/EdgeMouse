@@ -128,6 +128,12 @@ button.summary-card:hover { border-color: #b8dcd6; box-shadow: 0 5px 15px rgba(2
 .screen-badge.connected { left: auto; right: 23px; background: rgba(20, 148, 71, .88); }
 .edge-glow { position: relative; z-index: 3; display: grid; place-items: center; width: 20px; height: 160px; color: var(--teal-dark); background: rgba(17, 198, 186, .5); box-shadow: 0 0 20px #56ded3; }
 .edge-glow span { padding: 5px 10px; border-radius: 99px; background: white; box-shadow: 0 2px 8px rgba(0,0,0,.08); font-size: 10px; white-space: nowrap; transform: rotate(-90deg); }
+.layout-canvas.is-dragging .edge-glow { visibility: hidden; }
+.drag-beam { position: absolute; z-index: 5; left: 0; top: 0; display: block; width: 0; height: 22px; border: 1px solid rgba(22, 220, 205, .72); border-radius: 99px; opacity: 0; overflow: visible; pointer-events: none; transform-origin: 0 50%; background: linear-gradient(90deg, rgba(39, 224, 210, .45), rgba(7, 190, 178, .9) 48%, rgba(39, 224, 210, .45)); box-shadow: 0 0 9px rgba(21, 205, 191, .75), 0 0 24px rgba(38, 218, 204, .5); transition: opacity .12s ease; }
+.drag-beam::before { content: ""; position: absolute; inset: 3px 7px; border-radius: inherit; opacity: .78; background: repeating-linear-gradient(90deg, transparent 0 17px, rgba(255,255,255,.88) 18px 21px, transparent 22px 34px); background-size: 34px 100%; animation: beam-flow .8s linear infinite; }
+.drag-beam.is-visible { opacity: 1; }
+.drag-beam span { position: absolute; z-index: 2; left: 50%; top: 50%; padding: 6px 12px; border: 1px solid #d8e7e4; border-radius: 99px; color: var(--teal-dark); background: rgba(255,255,255,.96); box-shadow: 0 3px 12px rgba(22, 74, 72, .14); font-size: 10px; font-weight: 680; line-height: 1; white-space: nowrap; transform: translate(-50%, -50%); }
+@keyframes beam-flow { to { background-position: 34px 0; } }
 .canvas-hint { position: absolute; bottom: 23px; color: var(--muted); font-size: 12px; }
 .inspector { min-height: 530px; padding: 23px; }
 .status-chip { display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; border-radius: 99px; font-size: 11px; font-weight: 650; }
