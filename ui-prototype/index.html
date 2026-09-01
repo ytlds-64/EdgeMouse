@@ -96,9 +96,9 @@
                 <span class="round-icon">◴</span><div><strong>网络延迟</strong><small class="teal-text">18 ms · 良好</small></div><b>›</b>
               </button>
               <article class="direction-card">
-                <div class="card-title">输入方向 <span class="info-dot">i</span></div>
-                <label><span>反转横向滚动</span><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></label>
-                <label><span>反转纵向滚动</span><button class="toggle" type="button" role="switch" aria-checked="false"><span></span></button></label>
+                <div class="card-title">Mac → Windows <span class="info-dot">i</span></div>
+                <label><span>反转横向滚动</span><button class="toggle is-on" data-overview-setting="horizontal" type="button" role="switch" aria-checked="true"><span></span></button></label>
+                <label><span>反转纵向滚动</span><button class="toggle" data-overview-setting="vertical" type="button" role="switch" aria-checked="false"><span></span></button></label>
               </article>
             </div>
             <div class="page-footer"><span>设置会在两台设备下次连接时同步</span><button class="primary-button save-button" type="button">保存设置</button></div>
@@ -127,33 +127,44 @@
 
           <section class="page" id="page-input" data-title="输入">
             <div class="page-heading"><div><h1>输入</h1><p>设置鼠标、触控板和键盘在另一台设备上的使用方式</p></div></div>
+            <div class="panel input-profile-bar">
+              <div class="profile-copy"><span class="route-icon">↔</span><div><strong>分别设置两个控制方向</strong><small>切换方向不会影响另一侧已经保存的偏好</small></div></div>
+              <div class="profile-switcher" role="tablist" aria-label="输入控制方向">
+                <button class="input-profile-button is-selected" type="button" role="tab" aria-selected="true" data-profile="mac-to-windows"><span class="profile-device mac-profile">M</span><b>Mac → Windows</b><small>触控板与 Mac 键盘</small></button>
+                <button class="input-profile-button" type="button" role="tab" aria-selected="false" data-profile="windows-to-mac"><span class="profile-device windows-profile">W</span><b>Windows → Mac</b><small>鼠标与 Windows 键盘</small></button>
+              </div>
+            </div>
             <div class="settings-columns">
               <div class="column-stack">
                 <article class="panel setting-panel">
                   <div class="panel-heading"><div class="heading-icon">⌁</div><div><h2>鼠标与触控板</h2><p>两台设备可分别使用不同方向</p></div></div>
-                  <div class="setting-row"><div><strong>反转横向滚动</strong><small>修正 macOS 触控板控制 Windows 时的方向</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div>
-                  <div class="setting-row"><div><strong>反转纵向滚动</strong><small>保持当前自然滚动方向</small></div><button class="toggle" type="button" role="switch" aria-checked="false"><span></span></button></div>
-                  <div class="range-row"><div><strong>远程指针平滑度</strong><small>平衡跟手性与网络抖动</small></div><input type="range" min="0" max="100" value="64" aria-label="远程指针平滑度"/><output>均衡</output></div>
+                  <div class="setting-row"><div><strong>反转横向滚动</strong><small data-input-description="horizontal">修正 macOS 触控板控制 Windows 时的方向</small></div><button class="toggle is-on" data-input-setting="horizontal" type="button" role="switch" aria-checked="true"><span></span></button></div>
+                  <div class="setting-row"><div><strong>反转纵向滚动</strong><small>按当前控制方向单独保存</small></div><button class="toggle" data-input-setting="vertical" type="button" role="switch" aria-checked="false"><span></span></button></div>
+                  <div class="range-row"><div><strong>远程指针平滑度</strong><small>平衡跟手性与网络抖动</small></div><input id="pointer-smoothing" type="range" min="0" max="100" value="64" aria-label="远程指针平滑度"/><output for="pointer-smoothing">均衡</output></div>
                 </article>
                 <article class="panel setting-panel">
                   <div class="panel-heading"><div class="heading-icon">⌨</div><div><h2>键盘</h2><p>键盘随当前鼠标一起切换</p></div></div>
-                  <div class="setting-row"><div><strong>键盘跟随鼠标</strong><small>进入另一台设备时自动转发按键</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div>
-                  <div class="shortcut-map"><span>Windows Ctrl</span><b>→</b><span>Mac Command</span><span>Mac Command</span><b>→</b><span>Windows Ctrl</span><span>Alt / Option</span><b>→</b><span>保持系统角色</span></div>
+                  <div class="setting-row"><div><strong>键盘跟随鼠标</strong><small>进入另一台设备时自动转发按键</small></div><button class="toggle is-on" data-input-setting="keyboard" type="button" role="switch" aria-checked="true"><span></span></button></div>
+                  <div class="shortcut-map" aria-label="键盘映射">
+                    <span data-map-source="primary">Mac Command</span><b>→</b><select class="mapping-select" data-input-map="primary" aria-label="主修饰键映射"></select>
+                    <span data-map-source="secondary">Mac Option</span><b>→</b><select class="mapping-select" data-input-map="secondary" aria-label="次修饰键映射"></select>
+                    <span data-map-source="language">Mac 中 / 英</span><b>→</b><select class="mapping-select" data-input-map="language" aria-label="输入法切换键映射"></select>
+                  </div>
                 </article>
               </div>
               <div class="column-stack">
                 <article class="panel setting-panel">
                   <div class="panel-heading"><div class="heading-icon">↔</div><div><h2>控制权切换</h2><p>决定何时把输入交给另一台设备</p></div></div>
-                  <div class="form-group"><label>边缘触发方式</label><div class="segmented"><button class="is-selected" type="button">推动穿越</button><button type="button">停留后切换</button></div></div>
-                  <div class="setting-row"><div><strong>本机反向抢回</strong><small>鼠标卡住时可从目标边缘抢回控制</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div>
-                  <div class="setting-row"><div><strong>拖拽时禁止切换</strong><small>避免拖动文件时误穿越屏幕</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div>
+                  <div class="form-group"><label>边缘触发方式</label><div class="segmented" data-input-choice="trigger"><button class="is-selected" data-value="push" type="button">推动穿越</button><button data-value="dwell" type="button">停留后切换</button></div></div>
+                  <div class="setting-row"><div><strong>本机反向抢回</strong><small>鼠标卡住时可从目标边缘抢回控制</small></div><button class="toggle is-on" data-input-setting="reclaim" type="button" role="switch" aria-checked="true"><span></span></button></div>
+                  <div class="setting-row"><div><strong>拖拽时禁止切换</strong><small>避免拖动文件时误穿越屏幕</small></div><button class="toggle is-on" data-input-setting="dragLock" type="button" role="switch" aria-checked="true"><span></span></button></div>
                 </article>
                 <article class="panel recovery-card">
                   <div class="recovery-icon">!</div><div><h2>紧急恢复</h2><p>如果输入失去响应，同时按下以下组合键即可立即恢复本机控制。</p><kbd>Ctrl</kbd><i>+</i><kbd>Alt</kbd><i>+</i><kbd>Shift</kbd><i>+</i><kbd>Esc</kbd></div>
                 </article>
               </div>
             </div>
-            <div class="page-footer"><span>修改输入设置不会改变系统自身的鼠标设置</span><button class="primary-button save-button" type="button">保存输入设置</button></div>
+            <div class="page-footer"><span class="input-save-status">修改输入设置不会改变系统自身的鼠标设置</span><button class="primary-button save-button input-save-button" type="button">保存输入设置</button></div>
           </section>
 
           <section class="page" id="page-connection" data-title="连接">

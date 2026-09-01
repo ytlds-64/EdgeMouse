@@ -37,6 +37,166 @@ document.querySelectorAll(".segmented").forEach((group) => {
   });
 });
 
+const inputProfiles = {
+  "mac-to-windows": {
+    horizontal: true,
+    vertical: false,
+    smoothing: 64,
+    keyboard: true,
+    reclaim: true,
+    dragLock: true,
+    trigger: "push",
+    primary: "Windows Ctrl",
+    secondary: "Windows Alt",
+    language: "Windows Shift + Space",
+  },
+  "windows-to-mac": {
+    horizontal: false,
+    vertical: false,
+    smoothing: 52,
+    keyboard: true,
+    reclaim: true,
+    dragLock: true,
+    trigger: "push",
+    primary: "Mac Command",
+    secondary: "Mac Option",
+    language: "Mac 中 / 英",
+  },
+};
+
+const inputProfileMeta = {
+  "mac-to-windows": {
+    horizontalDescription: "修正 macOS 触控板控制 Windows 时的方向",
+    sources: { primary: "Mac Command", secondary: "Mac Option", language: "Mac 中 / 英" },
+    choices: {
+      primary: ["Windows Ctrl", "Windows 键", "保持原键"],
+      secondary: ["Windows Alt", "Windows Ctrl", "保持原键"],
+      language: ["Windows Shift + Space", "Windows 键 + Space", "不映射"],
+    },
+  },
+  "windows-to-mac": {
+    horizontalDescription: "单独调整 Windows 鼠标在 macOS 中的滚动方向",
+    sources: { primary: "Windows Ctrl", secondary: "Windows Alt", language: "Windows Shift + Space" },
+    choices: {
+      primary: ["Mac Command", "Mac Control", "保持原键"],
+      secondary: ["Mac Option", "Mac Command", "保持原键"],
+      language: ["Mac 中 / 英", "Mac Control + Space", "不映射"],
+    },
+  },
+};
+
+let activeInputProfile = "mac-to-windows";
+let inputSettingsDirty = false;
+const smoothingRange = document.querySelector("#pointer-smoothing");
+const smoothingOutput = document.querySelector('output[for="pointer-smoothing"]');
+const inputSaveStatus = document.querySelector(".input-save-status");
+
+function smoothingLabel(value) {
+  if (value < 34) return "跟手";
+  if (value < 68) return "均衡";
+  return "更平滑";
+}
+
+function setToggleState(toggle, enabled) {
+  toggle.classList.toggle("is-on", enabled);
+  toggle.setAttribute("aria-checked", String(enabled));
+}
+
+function markInputSettingsDirty() {
+  inputSettingsDirty = true;
+  inputSaveStatus.textContent = "有尚未保存的输入设置";
+  inputSaveStatus.classList.add("is-dirty");
+}
+
+function syncOverviewInputSettings() {
+  const profile = inputProfiles["mac-to-windows"];
+  document.querySelectorAll("[data-overview-setting]").forEach((toggle) => {
+    setToggleState(toggle, profile[toggle.dataset.overviewSetting]);
+  });
+}
+
+function renderInputProfile() {
+  const profile = inputProfiles[activeInputProfile];
+  const meta = inputProfileMeta[activeInputProfile];
+  document.querySelectorAll(".input-profile-button").forEach((button) => {
+    const selected = button.dataset.profile === activeInputProfile;
+    button.classList.toggle("is-selected", selected);
+    button.setAttribute("aria-selected", String(selected));
+  });
+  document.querySelectorAll("[data-input-setting]").forEach((toggle) => {
+    setToggleState(toggle, profile[toggle.dataset.inputSetting]);
+  });
+  document.querySelector('[data-input-description="horizontal"]').textContent = meta.horizontalDescription;
+  smoothingRange.value = String(profile.smoothing);
+  smoothingOutput.textContent = smoothingLabel(profile.smoothing);
+  document.querySelectorAll("[data-map-source]").forEach((source) => {
+    source.textContent = meta.sources[source.dataset.mapSource];
+  });
+  document.querySelectorAll("[data-input-map]").forEach((select) => {
+    const key = select.dataset.inputMap;
+    select.replaceChildren(...meta.choices[key].map((choice) => new Option(choice, choice)));
+    select.value = profile[key];
+    select.disabled = !profile.keyboard;
+  });
+  document.querySelectorAll('[data-input-choice="trigger"] button').forEach((button) => {
+    button.classList.toggle("is-selected", button.dataset.value === profile.trigger);
+  });
+}
+
+document.querySelectorAll(".input-profile-button").forEach((button) => {
+  button.addEventListener("click", () => {
+    activeInputProfile = button.dataset.profile;
+    renderInputProfile();
+  });
+});
+
+document.querySelectorAll("[data-input-setting]").forEach((toggle) => {
+  toggle.addEventListener("click", () => {
+    inputProfiles[activeInputProfile][toggle.dataset.inputSetting] = toggle.classList.contains("is-on");
+    markInputSettingsDirty();
+    syncOverviewInputSettings();
+    if (toggle.dataset.inputSetting === "keyboard") renderInputProfile();
+  });
+});
+
+document.querySelectorAll("[data-overview-setting]").forEach((toggle) => {
+  toggle.addEventListener("click", () => {
+    inputProfiles["mac-to-windows"][toggle.dataset.overviewSetting] = toggle.classList.contains("is-on");
+    markInputSettingsDirty();
+    if (activeInputProfile === "mac-to-windows") renderInputProfile();
+  });
+});
+
+smoothingRange.addEventListener("input", () => {
+  inputProfiles[activeInputProfile].smoothing = Number(smoothingRange.value);
+  smoothingOutput.textContent = smoothingLabel(Number(smoothingRange.value));
+  markInputSettingsDirty();
+});
+
+document.querySelectorAll("[data-input-map]").forEach((select) => {
+  select.addEventListener("change", () => {
+    inputProfiles[activeInputProfile][select.dataset.inputMap] = select.value;
+    markInputSettingsDirty();
+  });
+});
+
+document.querySelectorAll('[data-input-choice="trigger"] button').forEach((button) => {
+  button.addEventListener("click", () => {
+    inputProfiles[activeInputProfile].trigger = button.dataset.value;
+    markInputSettingsDirty();
+  });
+});
+
+document.querySelector(".input-save-button")?.addEventListener("click", () => {
+  inputSettingsDirty = false;
+  inputSaveStatus.textContent = "两个控制方向的设置已分别保存";
+  inputSaveStatus.classList.remove("is-dirty");
+  showToast("双向输入设置已保存（原型演示）");
+});
+
+renderInputProfile();
+syncOverviewInputSettings();
+
 const layoutCanvas = document.querySelector(".layout-canvas");
 const layoutDirectionButtons = [...document.querySelectorAll(".layout-direction button")];
 const dragBeam = layoutCanvas.querySelector(".drag-beam");
@@ -175,7 +335,7 @@ document.querySelectorAll(".mini-screen").forEach((screen) => {
   }, true);
 });
 
-document.querySelectorAll(".save-button").forEach((button) => button.addEventListener("click", () => showToast("设置已保存（原型演示）")));
+document.querySelectorAll(".save-button:not(.input-save-button)").forEach((button) => button.addEventListener("click", () => showToast("设置已保存（原型演示）")));
 document.querySelectorAll(".action-button").forEach((button) => button.addEventListener("click", () => showToast(`${button.textContent.trim()}（原型演示）`)));
 document.querySelector(".detect-button")?.addEventListener("click", (event) => {
   event.currentTarget.textContent = "检测中…";
