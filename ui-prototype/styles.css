@@ -116,7 +116,11 @@ button.summary-card:hover { border-color: #b8dcd6; box-shadow: 0 5px 15px rgba(2
 
 .layout-grid { display: grid; grid-template-columns: 1.55fr .75fr; gap: 18px; }
 .layout-canvas { position: relative; display: flex; align-items: center; justify-content: center; gap: 0; min-height: 530px; padding: 55px 40px; overflow: hidden; }
-.mini-screen { position: relative; z-index: 2; display: flex; flex-direction: column; align-items: center; width: 270px; padding: 13px 13px 17px; border: 1px solid #d5dddb; border-radius: 14px; background: white; box-shadow: var(--shadow); transition: .3s ease; }
+.mini-screen { position: relative; z-index: 2; display: flex; flex-direction: column; align-items: center; width: 270px; padding: 13px 13px 17px; border: 1px solid #d5dddb; border-radius: 14px; background: white; box-shadow: var(--shadow); cursor: grab; touch-action: none; user-select: none; transition: transform .3s ease, box-shadow .2s ease, opacity .2s ease; }
+.mini-screen:hover { box-shadow: 0 15px 34px rgba(28, 54, 57, .14), 0 3px 7px rgba(28, 54, 57, .07); }
+.mini-screen.is-dragging { z-index: 6; cursor: grabbing; transition: none; box-shadow: 0 22px 48px rgba(13, 81, 81, .24); }
+.layout-canvas.is-dragging .mini-screen:not(.is-dragging) { opacity: .74; }
+.layout-direction button.is-drop-preview { color: var(--teal-dark); background: #daf4ef; }
 .mini-screen strong { margin-top: 13px; font-size: 16px; }
 .mini-screen small { margin-top: 5px; color: var(--muted); }
 .mini-desktop { width: 100%; height: 150px; border: 5px solid #23343b; border-radius: 5px; }

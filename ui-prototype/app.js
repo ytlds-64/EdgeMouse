@@ -37,21 +37,93 @@ document.querySelectorAll(".segmented").forEach((group) => {
   });
 });
 
-document.querySelectorAll(".layout-direction button").forEach((button) => {
-  button.addEventListener("click", () => {
-    const canvas = document.querySelector(".layout-canvas");
-    const win = canvas.querySelector(".screen-win");
-    const mac = canvas.querySelector(".screen-mac");
-    const beam = canvas.querySelector(".edge-glow");
-    const edge = button.dataset.edge;
-    canvas.style.flexDirection = edge === "top" || edge === "bottom" ? "column" : "row";
-    beam.style.width = edge === "top" || edge === "bottom" ? "160px" : "20px";
-    beam.style.height = edge === "top" || edge === "bottom" ? "20px" : "160px";
-    beam.querySelector("span").style.transform = edge === "top" || edge === "bottom" ? "none" : "rotate(-90deg)";
-    if (edge === "left" || edge === "top") canvas.insertBefore(mac, win);
-    else canvas.insertBefore(win, mac);
-    canvas.insertBefore(beam, mac === canvas.firstElementChild ? win : mac);
+const layoutCanvas = document.querySelector(".layout-canvas");
+const layoutDirectionButtons = [...document.querySelectorAll(".layout-direction button")];
+
+function setLayoutEdge(edge) {
+  const win = layoutCanvas.querySelector(".screen-win");
+  const mac = layoutCanvas.querySelector(".screen-mac");
+  const beam = layoutCanvas.querySelector(".edge-glow");
+  const hint = layoutCanvas.querySelector(".canvas-hint");
+  const vertical = edge === "top" || edge === "bottom";
+  const macComesFirst = edge === "left" || edge === "top";
+
+  layoutCanvas.dataset.edge = edge;
+  layoutCanvas.style.flexDirection = vertical ? "column" : "row";
+  beam.style.width = vertical ? "160px" : "20px";
+  beam.style.height = vertical ? "20px" : "160px";
+  beam.querySelector("span").style.transform = vertical ? "none" : "rotate(-90deg)";
+
+  const order = macComesFirst ? [mac, beam, win] : [win, beam, mac];
+  order.forEach((element) => layoutCanvas.insertBefore(element, hint));
+  layoutDirectionButtons.forEach((button) => button.classList.toggle("is-selected", button.dataset.edge === edge));
+}
+
+layoutDirectionButtons.forEach((button) => button.addEventListener("click", () => setLayoutEdge(button.dataset.edge)));
+
+function edgeFromRects(macRect, winRect) {
+  const deltaX = macRect.left + macRect.width / 2 - (winRect.left + winRect.width / 2);
+  const deltaY = macRect.top + macRect.height / 2 - (winRect.top + winRect.height / 2);
+  if (Math.abs(deltaX) >= Math.abs(deltaY)) return deltaX < 0 ? "left" : "right";
+  return deltaY < 0 ? "top" : "bottom";
+}
+
+function setDropPreview(edge) {
+  layoutDirectionButtons.forEach((button) => button.classList.toggle("is-drop-preview", button.dataset.edge === edge));
+}
+
+document.querySelectorAll(".mini-screen").forEach((screen) => {
+  let drag;
+
+  screen.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    if (drag) {
+      finishDrag({ pointerId: drag.pointerId });
+      return;
+    }
+    drag = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, moved: false };
+    screen.classList.add("is-dragging");
+    layoutCanvas.classList.add("is-dragging");
   });
+
+  window.addEventListener("pointermove", (event) => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    const deltaX = event.clientX - drag.startX;
+    const deltaY = event.clientY - drag.startY;
+    drag.moved ||= Math.hypot(deltaX, deltaY) > 8;
+    screen.style.transform = `translate3d(${deltaX}px, ${deltaY}px, 0) scale(1.02)`;
+    const other = layoutCanvas.querySelector(screen.classList.contains("screen-mac") ? ".screen-win" : ".screen-mac");
+    const macRect = screen.classList.contains("screen-mac") ? screen.getBoundingClientRect() : other.getBoundingClientRect();
+    const winRect = screen.classList.contains("screen-win") ? screen.getBoundingClientRect() : other.getBoundingClientRect();
+    setDropPreview(edgeFromRects(macRect, winRect));
+  });
+
+  const finishDrag = (event) => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    const other = layoutCanvas.querySelector(screen.classList.contains("screen-mac") ? ".screen-win" : ".screen-mac");
+    const macRect = screen.classList.contains("screen-mac") ? screen.getBoundingClientRect() : other.getBoundingClientRect();
+    const winRect = screen.classList.contains("screen-win") ? screen.getBoundingClientRect() : other.getBoundingClientRect();
+    const edge = edgeFromRects(macRect, winRect);
+    const moved = drag.moved;
+
+    screen.style.transform = "";
+    screen.classList.remove("is-dragging");
+    layoutCanvas.classList.remove("is-dragging");
+    setDropPreview();
+    drag = undefined;
+    if (moved) {
+      setLayoutEdge(edge);
+      const labels = { left: "左侧", right: "右侧", top: "上方", bottom: "下方" };
+      showToast(`屏幕布局已调整为 ${labels[edge]}`);
+    }
+  };
+
+  window.addEventListener("pointerup", finishDrag, true);
+  window.addEventListener("pointercancel", finishDrag, true);
+  window.addEventListener("mouseup", () => {
+    if (drag) finishDrag({ pointerId: drag.pointerId });
+  }, true);
 });
 
 document.querySelectorAll(".save-button").forEach((button) => button.addEventListener("click", () => showToast("设置已保存（原型演示）")));
