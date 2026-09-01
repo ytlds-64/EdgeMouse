@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>EdgeMouse · UI 原型</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-window">
+      <aside class="sidebar" aria-label="主导航">
+        <div class="brand">
+          <img src="../assets/branding/edgemouse-app-icon.svg" alt="" />
+          <span>EdgeMouse</span>
+        </div>
+
+        <nav class="nav-list">
+          <button class="nav-item is-active" type="button" data-page="overview">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 11 9-8 9 8v9a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1v-9Z"/></svg>
+            <span>概览</span>
+          </button>
+          <button class="nav-item" type="button" data-page="layout">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="4" width="19" height="13" rx="1.5"/><path d="M8 21h8M12 17v4"/></svg>
+            <span>屏幕布局</span>
+          </button>
+          <button class="nav-item" type="button" data-page="input">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="2" width="14" height="20" rx="7"/><path d="M12 2v7"/></svg>
+            <span>输入</span>
+          </button>
+          <button class="nav-item" type="button" data-page="connection">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 14.5 5-5M7.2 17.8l-1 1a3.5 3.5 0 0 1-5-5l4-4a3.5 3.5 0 0 1 5 0M16.8 6.2l1-1a3.5 3.5 0 0 1 5 5l-4 4a3.5 3.5 0 0 1-5 0"/></svg>
+            <span>连接</span>
+          </button>
+          <button class="nav-item" type="button" data-page="diagnostics">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 13h4l2.2-7 4 13 2.5-8 2 4H22"/></svg>
+            <span>诊断</span>
+          </button>
+        </nav>
+
+        <nav class="nav-list nav-bottom">
+          <button class="nav-item" type="button" data-page="settings">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.8 1.8 0 0 0 .4 2l.1.1-2.8 2.8-.1-.1a1.8 1.8 0 0 0-2-.4 1.8 1.8 0 0 0-1.1 1.7V21h-4v-.1A1.8 1.8 0 0 0 8.8 19a1.8 1.8 0 0 0-2 .4l-.1.1-2.8-2.8.1-.1a1.8 1.8 0 0 0 .4-2A1.8 1.8 0 0 0 2.7 13H2V9h.7a1.8 1.8 0 0 0 1.7-1.1 1.8 1.8 0 0 0-.4-2l-.1-.1L6.7 3l.1.1a1.8 1.8 0 0 0 2 .4A1.8 1.8 0 0 0 9.9 2H14a1.8 1.8 0 0 0 1.1 1.5 1.8 1.8 0 0 0 2-.4l.1-.1L20 5.8l-.1.1a1.8 1.8 0 0 0-.4 2A1.8 1.8 0 0 0 21.2 9h.8v4h-.8a1.8 1.8 0 0 0-1.8 2Z"/></svg>
+            <span>设置</span>
+          </button>
+          <button class="nav-item" type="button" data-page="about">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 10v7M12 7h.01"/></svg>
+            <span>关于</span>
+          </button>
+        </nav>
+      </aside>
+
+      <div class="workspace">
+        <header class="titlebar" aria-label="窗口标题栏">
+          <div class="drag-region"></div>
+          <button type="button" aria-label="最小化">—</button>
+          <button type="button" aria-label="最大化">□</button>
+          <button class="close-button" type="button" aria-label="关闭">×</button>
+        </header>
+
+        <main class="content">
+          <section class="page is-active" id="page-overview" data-title="概览">
+            <div class="page-heading">
+              <div><h1>概览</h1><p>查看设备连接状态与关键设置</p></div>
+              <span class="prototype-pill">外观原型</span>
+            </div>
+
+            <div class="connection-stage dotted-surface">
+              <article class="device-card windows-device">
+                <div class="device-meta"><span class="windows-symbol"><i></i><i></i><i></i><i></i></span><span class="online"><b></b>已连接</span></div>
+                <div class="monitor-art"><div class="monitor-screen"><span></span></div><i class="monitor-neck"></i><i class="monitor-base"></i></div>
+                <h2>Windows PC</h2><p>自动发现 · 有线网络</p>
+              </article>
+
+              <div class="connection-beam" aria-label="双向连接">
+                <span>···</span><b>›</b><span>···</span><b>›</b><span>···</span><b>›</b>
+              </div>
+
+              <article class="device-card mac-device">
+                <div class="device-meta"><span class="apple-symbol">●</span><span class="online"><b></b>已连接</span></div>
+                <div class="laptop-art"><div class="laptop-screen"><span></span></div><i class="laptop-base"></i></div>
+                <h2>MacBook Air</h2><p>自动发现 · Wi‑Fi</p>
+              </article>
+              <div class="stage-tip"><span>☝</span> 将鼠标推过屏幕边缘即可切换控制</div>
+            </div>
+
+            <div class="overview-actions">
+              <article class="summary-card">
+                <span class="round-icon">⏻</span><div><strong>开机自动连接</strong><small class="teal-text">已启用</small></div>
+                <button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button>
+              </article>
+              <button class="summary-card summary-link" type="button" data-go="layout">
+                <span class="round-icon">→</span><div><strong>边缘切换</strong><small class="teal-text">Windows 右侧</small></div><b>›</b>
+              </button>
+              <button class="summary-card summary-link" type="button" data-go="diagnostics">
+                <span class="round-icon">◴</span><div><strong>网络延迟</strong><small class="teal-text">18 ms · 良好</small></div><b>›</b>
+              </button>
+              <article class="direction-card">
+                <div class="card-title">输入方向 <span class="info-dot">i</span></div>
+                <label><span>反转横向滚动</span><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></label>
+                <label><span>反转纵向滚动</span><button class="toggle" type="button" role="switch" aria-checked="false"><span></span></button></label>
+              </article>
+            </div>
+            <div class="page-footer"><span>设置会在两台设备下次连接时同步</span><button class="primary-button save-button" type="button">保存设置</button></div>
+          </section>
+
+          <section class="page" id="page-layout" data-title="屏幕布局">
+            <div class="page-heading"><div><h1>屏幕布局</h1><p>按实际摆放位置排列设备，边缘切换会自动匹配</p></div><button class="secondary-button detect-button" type="button">重新检测屏幕</button></div>
+            <div class="layout-grid">
+              <article class="panel layout-canvas dotted-surface">
+                <div class="mini-screen screen-win"><span class="screen-badge">主设备</span><div class="mini-desktop windows-wallpaper"></div><strong>Windows PC</strong><small>3840 × 2160 · 200%</small></div>
+                <div class="edge-glow"><span>穿越边缘</span></div>
+                <div class="mini-screen screen-mac"><span class="screen-badge connected">已连接</span><div class="mini-desktop mac-wallpaper"></div><strong>MacBook Air</strong><small>2940 × 1912 · Retina</small></div>
+                <p class="canvas-hint">拖动设备卡片，调整它们的相对位置</p>
+              </article>
+              <aside class="panel inspector">
+                <div class="panel-heading"><h2>布局设置</h2><span class="status-chip good">自动识别</span></div>
+                <div class="form-group"><label>Mac 位于 Windows 的</label><div class="segmented layout-direction" role="group"><button type="button" data-edge="left">左侧</button><button class="is-selected" type="button" data-edge="right">右侧</button><button type="button" data-edge="top">上方</button><button type="button" data-edge="bottom">下方</button></div></div>
+                <div class="setting-row"><div><strong>自动检测分辨率</strong><small>包含缩放、旋转和多显示器</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div>
+                <div class="setting-row"><div><strong>防止边缘误触</strong><small>越过边缘 8 px 后切换</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div>
+                <div class="screen-facts"><p><span>Windows 桌面</span><b>1 个屏幕 · 横向</b></p><p><span>macOS 桌面</span><b>2 个屏幕 · 自动布局</b></p><p><span>配置状态</span><b class="teal-text">两端一致</b></p></div>
+              </aside>
+            </div>
+            <div class="page-footer"><span>屏幕变化会在重新连接后自动更新</span><button class="primary-button save-button" type="button">保存布局</button></div>
+          </section>
+
+          <section class="page" id="page-input" data-title="输入">
+            <div class="page-heading"><div><h1>输入</h1><p>设置鼠标、触控板和键盘在另一台设备上的使用方式</p></div></div>
+            <div class="settings-columns">
+              <div class="column-stack">
+                <article class="panel setting-panel">
+                  <div class="panel-heading"><div class="heading-icon">⌁</div><div><h2>鼠标与触控板</h2><p>两台设备可分别使用不同方向</p></div></div>
+                  <div class="setting-row"><div><strong>反转横向滚动</strong><small>修正 macOS 触控板控制 Windows 时的方向</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div>
+                  <div class="setting-row"><div><strong>反转纵向滚动</strong><small>保持当前自然滚动方向</small></div><button class="toggle" type="button" role="switch" aria-checked="false"><span></span></button></div>
+                  <div class="range-row"><div><strong>远程指针平滑度</strong><small>平衡跟手性与网络抖动</small></div><input type="range" min="0" max="100" value="64" aria-label="远程指针平滑度"/><output>均衡</output></div>
+                </article>
+                <article class="panel setting-panel">
+                  <div class="panel-heading"><div class="heading-icon">⌨</div><div><h2>键盘</h2><p>键盘随当前鼠标一起切换</p></div></div>
+                  <div class="setting-row"><div><strong>键盘跟随鼠标</strong><small>进入另一台设备时自动转发按键</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div>
+                  <div class="shortcut-map"><span>Windows Ctrl</span><b>→</b><span>Mac Command</span><span>Mac Command</span><b>→</b><span>Windows Ctrl</span><span>Alt / Option</span><b>→</b><span>保持系统角色</span></div>
+                </article>
+              </div>
+              <div class="column-stack">
+                <article class="panel setting-panel">
+                  <div class="panel-heading"><div class="heading-icon">↔</div><div><h2>控制权切换</h2><p>决定何时把输入交给另一台设备</p></div></div>
+                  <div class="form-group"><label>边缘触发方式</label><div class="segmented"><button class="is-selected" type="button">推动穿越</button><button type="button">停留后切换</button></div></div>
+                  <div class="setting-row"><div><strong>本机反向抢回</strong><small>鼠标卡住时可从目标边缘抢回控制</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div>
+                  <div class="setting-row"><div><strong>拖拽时禁止切换</strong><small>避免拖动文件时误穿越屏幕</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div>
+                </article>
+                <article class="panel recovery-card">
+                  <div class="recovery-icon">!</div><div><h2>紧急恢复</h2><p>如果输入失去响应，同时按下以下组合键即可立即恢复本机控制。</p><kbd>Ctrl</kbd><i>+</i><kbd>Alt</kbd><i>+</i><kbd>Shift</kbd><i>+</i><kbd>Esc</kbd></div>
+                </article>
+              </div>
+            </div>
+            <div class="page-footer"><span>修改输入设置不会改变系统自身的鼠标设置</span><button class="primary-button save-button" type="button">保存输入设置</button></div>
+          </section>
+
+          <section class="page" id="page-connection" data-title="连接">
+            <div class="page-heading"><div><h1>连接</h1><p>管理自动发现、可信设备与安全配对</p></div><span class="status-chip good"><i></i>安全连接正常</span></div>
+            <div class="connection-layout">
+              <article class="panel trusted-device">
+                <div class="device-summary"><div class="device-avatar mac-avatar">M</div><div><span class="eyebrow">已配对设备</span><h2>MacBook Air</h2><p><span class="online-dot"></span>已连接 · Wi‑Fi</p></div><button class="more-button" type="button" aria-label="更多操作">•••</button></div>
+                <div class="detail-grid"><div><span>查找方式</span><b>局域网自动发现</b></div><div><span>当前地址</span><b>192.168.8.189</b></div><div><span>加密方式</span><b>双向 TLS</b></div><div><span>可信状态</span><b class="teal-text">证书已验证</b></div></div>
+                <div class="certificate-line"><span>设备指纹</span><code>85f2 6b5e 2662 1790 ··· d73d e36c 4e</code><button type="button">复制</button></div>
+              </article>
+              <aside class="panel connection-actions">
+                <div class="panel-heading"><h2>连接选项</h2></div>
+                <div class="setting-row"><div><strong>自动发现可信设备</strong><small>IP 变化后无需重新配对</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div>
+                <div class="setting-row"><div><strong>断开后自动重连</strong><small>网络恢复后自动继续连接</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div>
+                <button class="secondary-button full-button action-button" type="button">立即重新连接</button>
+                <button class="ghost-button full-button action-button" type="button">配对新设备</button>
+              </aside>
+            </div>
+            <article class="panel security-note"><div class="shield-icon">✓</div><div><h2>私钥始终保留在本机</h2><p>设备之间仅交换公开证书；局域网发现结果仍需通过已保存证书完成双向验证。</p></div><button class="text-button" data-go="about" type="button">了解安全设计 ›</button></article>
+          </section>
+
+          <section class="page" id="page-diagnostics" data-title="诊断">
+            <div class="page-heading"><div><h1>诊断</h1><p>检查连接质量、系统权限与最近运行情况</p></div><button class="secondary-button action-button" type="button">运行完整检查</button></div>
+            <div class="health-grid">
+              <article class="metric-card"><span class="metric-icon good">↔</span><div><small>连接状态</small><strong>正常</strong><p>已持续连接 18 分钟</p></div></article>
+              <article class="metric-card"><span class="metric-icon good">◴</span><div><small>当前延迟</small><strong>18 <i>ms</i></strong><p>适合流畅控制</p></div></article>
+              <article class="metric-card"><span class="metric-icon good">⌁</span><div><small>抖动</small><strong>3.2 <i>ms</i></strong><p>最近 5 秒平均值</p></div></article>
+              <article class="metric-card"><span class="metric-icon good">✓</span><div><small>系统权限</small><strong>已授权</strong><p>辅助功能与本地网络</p></div></article>
+            </div>
+            <div class="diagnostic-columns">
+              <article class="panel live-chart">
+                <div class="panel-heading"><div><h2>连接质量</h2><p>最近 60 秒</p></div><div class="legend"><i></i>延迟 <i></i>抖动</div></div>
+                <div class="chart-area"><span class="chart-line one"></span><span class="chart-line two"></span><div class="chart-labels"><b>60 秒前</b><b>现在</b></div></div>
+              </article>
+              <article class="panel checklist">
+                <div class="panel-heading"><h2>运行检查</h2><span class="status-chip good">全部通过</span></div>
+                <p><span class="check">✓</span><b>可信证书</b><small>双向验证正常</small></p>
+                <p><span class="check">✓</span><b>局域网发现</b><small>UDP 43892 可用</small></p>
+                <p><span class="check">✓</span><b>输入权限</b><small>捕获与注入可用</small></p>
+                <p><span class="check">✓</span><b>自动恢复</b><small>心跳和紧急快捷键正常</small></p>
+              </article>
+            </div>
+            <article class="panel log-panel"><div class="panel-heading"><div><h2>最近日志</h2><p>仅显示关键事件</p></div><button class="text-button action-button" type="button">打开日志文件夹</button></div><div class="log-lines"><p><time>16:42:08</time><span class="log-good">连接</span>Connected to macbook with mutual TLS</p><p><time>16:42:11</time><span>输入</span>Mouse control handed to peer</p><p><time>16:42:16</time><span>输入</span>Local mouse control restored</p><p><time>16:42:20</time><span>网络</span>RTT 18.0 ms · jitter 3.2 ms · stale 0</p></div></article>
+          </section>
+
+          <section class="page" id="page-settings" data-title="设置">
+            <div class="page-heading"><div><h1>设置</h1><p>调整 EdgeMouse 的启动、外观和后台行为</p></div></div>
+            <div class="settings-columns">
+              <div class="column-stack">
+                <article class="panel setting-panel"><div class="panel-heading"><h2>常规</h2></div><div class="setting-row"><div><strong>登录时启动 EdgeMouse</strong><small>进入桌面后自动连接可信设备</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div><div class="setting-row"><div><strong>关闭窗口后继续运行</strong><small>从菜单栏或系统托盘再次打开</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div><div class="setting-row"><div><strong>显示连接通知</strong><small>连接、断开和控制权变化时提醒</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div></article>
+                <article class="panel setting-panel"><div class="panel-heading"><h2>外观</h2></div><div class="form-group"><label>界面主题</label><div class="segmented"><button class="is-selected" type="button">跟随系统</button><button type="button">浅色</button><button type="button">深色</button></div></div><div class="form-group select-row"><label for="language">界面语言</label><select id="language"><option>简体中文</option><option>English</option></select></div></article>
+              </div>
+              <div class="column-stack">
+                <article class="panel setting-panel"><div class="panel-heading"><h2>更新</h2><span class="status-chip good">已是最新版</span></div><div class="update-version"><img src="../assets/branding/edgemouse-app-icon.svg" alt=""/><div><strong>EdgeMouse 0.5.0</strong><small>最后检查：刚刚</small></div></div><button class="secondary-button full-button action-button" type="button">检查更新</button></article>
+                <article class="panel setting-panel danger-panel"><div class="panel-heading"><h2>重置</h2></div><p>恢复界面和输入设置，不会删除设备证书。</p><button class="danger-button action-button" type="button">恢复默认设置</button></article>
+              </div>
+            </div>
+            <div class="page-footer"><span>部分设置会在应用重新启动后生效</span><button class="primary-button save-button" type="button">保存设置</button></div>
+          </section>
+
+          <section class="page" id="page-about" data-title="关于">
+            <div class="page-heading"><div><h1>关于</h1><p>EdgeMouse 版本、开源许可和产品信息</p></div></div>
+            <div class="about-layout">
+              <article class="panel about-hero"><img src="../assets/branding/edgemouse-mark.svg" alt="EdgeMouse"/><h2>EdgeMouse</h2><p class="version-text">版本 0.5.0</p><p>让 Windows 与 macOS 像一张连续的桌面一样自然协作。</p><div class="about-actions"><button class="primary-button action-button" type="button">检查更新</button><button class="secondary-button action-button" type="button">查看项目主页</button></div></article>
+              <div class="about-details">
+                <article class="panel"><div class="panel-heading"><h2>当前能力</h2></div><div class="feature-tags"><span>双向鼠标</span><span>键盘跟随</span><span>自动屏幕识别</span><span>局域网发现</span><span>安全配对</span><span>自动重连</span></div></article>
+                <article class="panel about-links"><button type="button"><span>开源许可</span><b>MIT License ›</b></button><button type="button"><span>第三方组件</span><b>查看清单 ›</b></button><button type="button"><span>问题反馈</span><b>GitHub Issues ›</b></button><button type="button"><span>诊断信息</span><b>复制版本信息 ›</b></button></article>
+                <p class="copyright">© 2026 EdgeMouse contributors · 为跨平台桌面协作而设计</p>
+              </div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+    <div class="toast" role="status" aria-live="polite"><span>✓</span><b>原型操作已完成</b></div>
+    <script src="./app.js"></script>
+  </body>
+</html>

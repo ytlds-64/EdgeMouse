@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 320" role="img" aria-labelledby="title description">
+  <title id="title">EdgeMouse logo</title>
+  <desc id="description">The EdgeMouse mark and wordmark.</desc>
+  <g transform="translate(24 0) scale(.625)">
+    <rect x="28" y="140" width="220" height="232" rx="42" fill="#0AAFA5"/>
+    <rect x="264" y="140" width="220" height="232" rx="42" fill="#14242A"/>
+    <path fill="#FFFFFF" transform="matrix(.82 0 0 .82 46.08 46.08)" d="M207 158c-5-3-11 1-10 7l9 157c0 6 7 8 11 4l28-34 28 59c2 5 8 7 13 4l25-12c5-3 7-9 4-14l-29-60 46-9c6-1 8-8 3-12L207 158Z"/>
+  </g>
+  <text x="360" y="208" font-family="Inter, SF Pro Display, Segoe UI, Arial, sans-serif" font-size="126" font-weight="700" letter-spacing="-5">
+    <tspan fill="#0AAFA5">Edge</tspan><tspan fill="#14242A">Mouse</tspan>
+  </text>
+</svg>
