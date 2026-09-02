@@ -1,0 +1,23 @@
+[package]
+name = "edgemouse-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Cross-platform EdgeMouse desktop application"
+
+[lib]
+name = "edgemouse_desktop"
+
+[[bin]]
+name = "edgemouse-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+edgemouse-agent = { path = "../edgemouse-agent" }
+serde = { version = "1.0.229", features = ["derive"] }
+tauri = { version = "2", features = [] }

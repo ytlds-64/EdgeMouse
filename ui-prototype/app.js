@@ -1,12 +1,21 @@
 const navItems = [...document.querySelectorAll(".nav-item")];
 const pages = [...document.querySelectorAll(".page")];
 const toast = document.querySelector(".toast");
-const appVersion = document.querySelector('meta[name="edgemouse-version"]')?.content ?? "0.5.0";
+let appVersion = document.querySelector('meta[name="edgemouse-version"]')?.content ?? "0.5.0";
 let toastTimer;
 
 document.querySelectorAll("[data-app-version]").forEach((element) => {
   element.textContent = appVersion;
 });
+
+window.setEdgeMouseAppVersion = (version) => {
+  if (!version) return;
+  appVersion = version;
+  document.querySelector('meta[name="edgemouse-version"]')?.setAttribute("content", version);
+  document.querySelectorAll("[data-app-version]").forEach((element) => {
+    element.textContent = version;
+  });
+};
 
 function showToast(message) {
   toast.querySelector("b").textContent = message;

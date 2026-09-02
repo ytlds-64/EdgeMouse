@@ -20,10 +20,12 @@ jobs:
           - name: macOS
             os: macos-14
             binary: target/release/edgemouse
+            desktop_binary: target/release/edgemouse-desktop
             example: examples/macos.toml
           - name: Windows
             os: windows-2022
             binary: target/release/edgemouse.exe
+            desktop_binary: target/release/edgemouse-desktop.exe
             example: examples/windows.toml
 
     steps:
@@ -47,6 +49,7 @@ jobs:
           $scriptPaths = @(
             'scripts/run-windows-with-log.ps1',
             'scripts/update-build-run-windows.ps1',
+            'scripts/build-run-desktop-windows.ps1',
             'scripts/manage-autostart-windows.ps1'
           )
           foreach ($scriptPath in $scriptPaths) {
@@ -72,8 +75,8 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
-      - name: Build release executable
-        run: cargo build --release -p edgemouse-agent
+      - name: Build release executables
+        run: cargo build --release -p edgemouse-agent -p edgemouse-desktop
 
       - name: Upload runnable package
         uses: actions/upload-artifact@v4
@@ -82,11 +85,13 @@ jobs:
           if-no-files-found: error
           path: |
             ${{ matrix.binary }}
+            ${{ matrix.desktop_binary }}
             ${{ matrix.example }}
             docs/EdgeMouse-Test-Guide.docx
             scripts/run-macos-with-log.sh
             scripts/run-windows-with-log.ps1
             scripts/update-build-run-windows.ps1
+            scripts/build-run-desktop-windows.ps1
             scripts/manage-autostart-macos.sh
             scripts/manage-autostart-windows.ps1
             README.md

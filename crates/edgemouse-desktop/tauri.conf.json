@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "EdgeMouse",
+  "identifier": "com.edgemouse.desktop",
+  "build": {
+    "frontendDist": "../../ui-prototype"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "EdgeMouse",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1040,
+        "minHeight": 700,
+        "center": true,
+        "decorations": false,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}

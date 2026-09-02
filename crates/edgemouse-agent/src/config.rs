@@ -22,6 +22,7 @@ pub struct LoadedConfig {
     pub peer_node: NodeId,
     pub local_screen: ScreenConfig,
     pub peer_screen: ScreenId,
+    pub peer_screen_name: String,
     pub peer_on: Edge,
     pub session: SessionConfig,
     pub windows_raw_input: bool,
@@ -179,6 +180,7 @@ impl RawConfig {
             return Err("local and peer screen ids must be different".into());
         }
         validate_screen_name(&self.peer.screen.name, "peer.screen.name")?;
+        let peer_screen_name = self.peer.screen.name;
         let peer_on = parse_edge(&self.layout.peer_on)?;
 
         let bind_address = parse_address(&self.local.listen, "local listen address")?;
@@ -210,6 +212,7 @@ impl RawConfig {
             peer_node,
             local_screen,
             peer_screen,
+            peer_screen_name,
             peer_on,
             session,
             windows_raw_input: self.session.windows_raw_input,

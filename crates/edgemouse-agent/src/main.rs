@@ -1,12 +1,6 @@
-mod config;
-mod control;
-mod discovery;
-mod network;
-mod pairing;
-mod platform;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-mod runtime;
-
+use edgemouse_agent::runtime;
+use edgemouse_agent::{config, control, discovery, pairing, platform};
 use edgemouse_core::{
     Edge, Effect, NodeId, PhysicalMouseEvent, Point, Rect, Screen, ScreenId, Session,
     SessionConfig, Topology, Vector,

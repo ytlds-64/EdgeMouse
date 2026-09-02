@@ -2,6 +2,7 @@
 members = [
     "crates/edgemouse-agent",
     "crates/edgemouse-core",
+    "crates/edgemouse-desktop",
     "crates/edgemouse-platform-macos",
     "crates/edgemouse-platform-windows",
     "crates/edgemouse-protocol",

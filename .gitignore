@@ -1,4 +1,5 @@
 /target/
+/crates/edgemouse-desktop/gen/
 /work/
 /outputs/
 /mac-identity/

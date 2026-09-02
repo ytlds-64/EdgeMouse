@@ -6,8 +6,9 @@ screen edge transfers mouse movement, buttons, scrolling, and the local keyboard
 crossing back restores local control.
 
 This repository contains a functional mouse MVP, bidirectional keyboard
-forwarding, and automatic desktop geometry exchange. It intentionally excludes
-clipboard sync, relay servers, tray UI, installers, and elevated Windows desktops.
+forwarding, automatic desktop geometry exchange, and the first integrated
+cross-platform desktop application. It intentionally excludes clipboard sync,
+relay servers, tray/menu-bar integration, installers, and elevated Windows desktops.
 
 ## Implemented
 
@@ -48,6 +49,10 @@ clipboard sync, relay servers, tray UI, installers, and elevated Windows desktop
 - Optional per-user login startup on macOS and Windows, with persistent logs.
 - Identity generation, configuration validation, diagnostics, and simulation
   commands.
+- A Tauri 2 desktop application that reuses the EdgeMouse UI on Windows and
+  macOS and reads the real agent version, local process state, configuration,
+  trusted node summary, platform permission state, and detected desktop geometry.
+- Working light/dark/system themes and Simplified Chinese/English UI switching.
 
 Windows uses a fixed mouse capture anchor while control is remote. Raw Input
 preserves high-polling-rate physical movement in that state, while the low-level
@@ -68,6 +73,32 @@ cargo build --release -p edgemouse-agent
 
 The executable is `target/release/edgemouse` on macOS and
 `target\release\edgemouse.exe` on Windows.
+
+### Desktop application
+
+The first desktop integration stage keeps the proven background agent separate
+from the window. This means opening or closing the window does not interrupt an
+active mouse/keyboard session. The connection, input, layout, and diagnostics
+controls that still say “prototype” remain demonstrations until their Rust
+commands are connected in the next stages.
+
+Build and open the desktop window on macOS from the repository root:
+
+```sh
+cargo build -p edgemouse-desktop
+./target/debug/edgemouse-desktop --config ./edgemouse.toml
+```
+
+On Windows, after pulling the latest `main`, use the included PowerShell script:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-run-desktop-windows.ps1
+```
+
+It creates `target\release\edgemouse-desktop.exe`, validates the existing
+`edgemouse.toml` when the agent binary is available, then opens the desktop
+window. Windows 11 already includes the WebView2 runtime used by Tauri; older
+Windows installations may need the current WebView2 Runtime installed first.
 
 ## One-command preparation
 
