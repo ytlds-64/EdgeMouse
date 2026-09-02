@@ -9,6 +9,7 @@ Set-StrictMode -Version Latest
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $DesktopBinary = Join-Path $ProjectRoot "target\release\edgemouse-desktop.exe"
 $AgentBinary = Join-Path $ProjectRoot "target\release\edgemouse.exe"
+$DesktopIcon = Join-Path $ProjectRoot "crates\edgemouse-desktop\icons\icon.ico"
 Set-Location $ProjectRoot
 
 if (-not (Get-Command "cargo" -ErrorAction SilentlyContinue)) {
@@ -23,6 +24,9 @@ if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
 
 if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
     throw "EdgeMouse configuration was not found: $ConfigPath"
+}
+if (-not (Test-Path -LiteralPath $DesktopIcon -PathType Leaf)) {
+    throw "EdgeMouse Windows application icon was not found: $DesktopIcon. Pull the latest source and rerun this script."
 }
 $ResolvedConfigPath = (Resolve-Path -LiteralPath $ConfigPath).Path
 
