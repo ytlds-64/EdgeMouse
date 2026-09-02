@@ -333,6 +333,7 @@ pairingModal?.addEventListener("click", (event) => {
 });
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !pairingModal.hidden) closePairingModal();
+  else if (event.key === "Escape" && !diagnosticsModal?.hidden) closeDiagnosticsModal();
 });
 
 pairingModeButtons.forEach((button) => button.addEventListener("click", () => setPairingMode(button.dataset.pairingMode)));
@@ -359,6 +360,133 @@ document.querySelector(".pairing-confirm-button")?.addEventListener("click", (ev
 document.querySelector(".pairing-finish-button")?.addEventListener("click", () => {
   closePairingModal();
   showToast("安全配对完成，已保存可信证书");
+});
+
+const runDiagnosticsButton = document.querySelector(".run-diagnostics-button");
+const diagnosticRows = [...document.querySelectorAll(".diagnostic-check")];
+const diagnosticsOverall = document.querySelector(".diagnostics-overall");
+const diagnosticLastRun = document.querySelector(".diagnostic-last-run");
+const liveChart = document.querySelector(".live-chart");
+const diagnosticsModal = document.querySelector(".diagnostics-modal");
+const diagnosticsExportSteps = [...document.querySelectorAll(".diagnostics-export-step")];
+let diagnosticsRunId = 0;
+let exportTimer;
+
+const diagnosticDefinitions = {
+  certificate: { running: "正在验证双方证书…", complete: "双向验证正常", tag: "安全", log: "Trusted peer certificate verified" },
+  discovery: { running: "正在测试 UDP 43892…", complete: "UDP 43892 可用", tag: "发现", log: "Discovery announcement and response succeeded" },
+  permissions: { running: "正在检查捕获与注入…", complete: "捕获与注入可用", tag: "权限", log: "Input capture and injection permissions available" },
+  recovery: { running: "正在模拟心跳中断…", complete: "心跳和紧急快捷键正常", tag: "恢复", log: "Local control recovery path passed" },
+};
+
+function diagnosticDelay(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function setDiagnosticRow(row, state) {
+  const icon = row.querySelector(".check");
+  const detail = row.querySelector("small");
+  const definition = diagnosticDefinitions[row.dataset.check];
+  row.classList.toggle("is-running", state === "running");
+  icon.classList.toggle("is-waiting", state === "waiting");
+  icon.classList.toggle("is-running", state === "running");
+  icon.textContent = state === "complete" ? "✓" : state === "running" ? "…" : "·";
+  detail.textContent = state === "complete" ? definition.complete : state === "running" ? definition.running : "等待检查";
+}
+
+function appendDiagnosticLog(tag, message) {
+  const line = document.createElement("p");
+  line.className = "is-new";
+  const timestamp = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+  line.innerHTML = `<time>${timestamp}</time><span class="log-good">${tag}</span>${message}`;
+  const logLines = document.querySelector(".log-lines");
+  logLines.append(line);
+  while (logLines.children.length > 8) logLines.firstElementChild.remove();
+}
+
+runDiagnosticsButton?.addEventListener("click", async () => {
+  const currentRun = ++diagnosticsRunId;
+  runDiagnosticsButton.disabled = true;
+  diagnosticsOverall.classList.remove("good");
+  diagnosticsOverall.classList.add("pending");
+  diagnosticsOverall.textContent = "正在检查";
+  liveChart.classList.add("is-testing");
+  document.querySelectorAll(".metric-card").forEach((card) => card.classList.add("is-testing"));
+  document.querySelector('[data-metric="connection"] strong').textContent = "检查中";
+  diagnosticRows.forEach((row) => setDiagnosticRow(row, "waiting"));
+
+  for (const [index, row] of diagnosticRows.entries()) {
+    if (currentRun !== diagnosticsRunId) return;
+    setDiagnosticRow(row, "running");
+    runDiagnosticsButton.textContent = `检查中 ${index + 1} / ${diagnosticRows.length}`;
+    await diagnosticDelay(420);
+    if (currentRun !== diagnosticsRunId) return;
+    setDiagnosticRow(row, "complete");
+    const definition = diagnosticDefinitions[row.dataset.check];
+    appendDiagnosticLog(definition.tag, definition.log);
+  }
+
+  await diagnosticDelay(220);
+  if (currentRun !== diagnosticsRunId) return;
+  runDiagnosticsButton.disabled = false;
+  runDiagnosticsButton.textContent = "再次运行检查";
+  diagnosticsOverall.classList.remove("pending");
+  diagnosticsOverall.classList.add("good");
+  diagnosticsOverall.textContent = "全部通过";
+  liveChart.classList.remove("is-testing");
+  document.querySelectorAll(".metric-card").forEach((card) => card.classList.remove("is-testing"));
+  document.querySelector('[data-metric="connection"] strong').textContent = "正常";
+  document.querySelector('[data-metric="latency"] strong').innerHTML = '16 <i>ms</i>';
+  document.querySelector('[data-metric="jitter"] strong').innerHTML = '2.7 <i>ms</i>';
+  document.querySelector(".chart-value b").textContent = "16 ms";
+  diagnosticLastRun.textContent = "上次检查：刚刚";
+  showToast("完整检查已通过");
+});
+
+function setDiagnosticsExportStep(stepName) {
+  diagnosticsExportSteps.forEach((step) => step.classList.toggle("is-active", step.classList.contains(`diagnostics-export-${stepName}`)));
+}
+
+function updateGenerateButton() {
+  document.querySelector(".generate-diagnostics-button").disabled = !document.querySelector('.export-options input:checked');
+}
+
+function openDiagnosticsModal() {
+  window.clearTimeout(exportTimer);
+  diagnosticsModal.hidden = false;
+  setDiagnosticsExportStep("options");
+  document.querySelectorAll(".export-options input").forEach((input) => { input.checked = true; });
+  updateGenerateButton();
+  document.querySelector(".diagnostics-modal-close").focus();
+}
+
+function closeDiagnosticsModal() {
+  window.clearTimeout(exportTimer);
+  diagnosticsModal.hidden = true;
+  document.querySelector(".export-diagnostics-button").focus();
+}
+
+document.querySelector(".copy-diagnostics-button")?.addEventListener("click", () => showToast("诊断摘要已复制（原型演示）"));
+document.querySelector(".open-logs-button")?.addEventListener("click", () => showToast("已打开日志文件夹（原型演示）"));
+document.querySelector(".export-diagnostics-button")?.addEventListener("click", openDiagnosticsModal);
+document.querySelector(".diagnostics-modal-close")?.addEventListener("click", closeDiagnosticsModal);
+document.querySelector(".diagnostics-cancel-button")?.addEventListener("click", closeDiagnosticsModal);
+diagnosticsModal?.addEventListener("click", (event) => {
+  if (event.target === diagnosticsModal) closeDiagnosticsModal();
+});
+document.querySelectorAll(".export-options input").forEach((input) => input.addEventListener("change", updateGenerateButton));
+document.querySelector(".generate-diagnostics-button")?.addEventListener("click", () => {
+  setDiagnosticsExportStep("generating");
+  const stamp = new Date().toISOString().slice(0, 10).replaceAll("-", "");
+  document.querySelector(".export-file-name").textContent = `edgemouse-diagnostics-${stamp}.zip`;
+  exportTimer = window.setTimeout(() => {
+    setDiagnosticsExportStep("success");
+    document.querySelector(".diagnostics-finish-button").focus();
+  }, 1000);
+});
+document.querySelector(".diagnostics-finish-button")?.addEventListener("click", () => {
+  closeDiagnosticsModal();
+  showToast("诊断包已生成（原型演示）");
 });
 
 const layoutCanvas = document.querySelector(".layout-canvas");

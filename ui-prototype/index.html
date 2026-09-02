@@ -188,27 +188,27 @@
           </section>
 
           <section class="page" id="page-diagnostics" data-title="诊断">
-            <div class="page-heading"><div><h1>诊断</h1><p>检查连接质量、系统权限与最近运行情况</p></div><button class="secondary-button action-button" type="button">运行完整检查</button></div>
+            <div class="page-heading"><div><h1>诊断</h1><p>检查连接质量、系统权限与最近运行情况</p></div><div class="diagnostic-heading-actions"><span class="diagnostic-last-run">上次检查：18 分钟前</span><button class="secondary-button run-diagnostics-button" type="button">运行完整检查</button></div></div>
             <div class="health-grid">
-              <article class="metric-card"><span class="metric-icon good">↔</span><div><small>连接状态</small><strong>正常</strong><p>已持续连接 18 分钟</p></div></article>
-              <article class="metric-card"><span class="metric-icon good">◴</span><div><small>当前延迟</small><strong>18 <i>ms</i></strong><p>适合流畅控制</p></div></article>
-              <article class="metric-card"><span class="metric-icon good">⌁</span><div><small>抖动</small><strong>3.2 <i>ms</i></strong><p>最近 5 秒平均值</p></div></article>
-              <article class="metric-card"><span class="metric-icon good">✓</span><div><small>系统权限</small><strong>已授权</strong><p>辅助功能与本地网络</p></div></article>
+              <article class="metric-card" data-metric="connection"><span class="metric-icon good">↔</span><div><small>连接状态</small><strong>正常</strong><p>已持续连接 18 分钟</p></div></article>
+              <article class="metric-card" data-metric="latency"><span class="metric-icon good">◴</span><div><small>当前延迟</small><strong>18 <i>ms</i></strong><p>适合流畅控制</p></div></article>
+              <article class="metric-card" data-metric="jitter"><span class="metric-icon good">⌁</span><div><small>抖动</small><strong>3.2 <i>ms</i></strong><p>最近 5 秒平均值</p></div></article>
+              <article class="metric-card" data-metric="permissions"><span class="metric-icon good">✓</span><div><small>系统权限</small><strong>已授权</strong><p>辅助功能与本地网络</p></div></article>
             </div>
             <div class="diagnostic-columns">
               <article class="panel live-chart">
-                <div class="panel-heading"><div><h2>连接质量</h2><p>最近 60 秒</p></div><div class="legend"><i></i>延迟 <i></i>抖动</div></div>
-                <div class="chart-area"><span class="chart-line one"></span><span class="chart-line two"></span><div class="chart-labels"><b>60 秒前</b><b>现在</b></div></div>
+                <div class="panel-heading"><div><h2>连接质量</h2><p class="chart-caption">最近 60 秒</p></div><div class="legend"><i></i>延迟 <i></i>抖动</div></div>
+                <div class="chart-area"><span class="chart-line one"></span><span class="chart-line two"></span><span class="chart-scanline"></span><div class="chart-value"><b>18 ms</b><small>当前</small></div><div class="chart-labels"><b>60 秒前</b><b>现在</b></div></div>
               </article>
               <article class="panel checklist">
-                <div class="panel-heading"><h2>运行检查</h2><span class="status-chip good">全部通过</span></div>
-                <p><span class="check">✓</span><b>可信证书</b><small>双向验证正常</small></p>
-                <p><span class="check">✓</span><b>局域网发现</b><small>UDP 43892 可用</small></p>
-                <p><span class="check">✓</span><b>输入权限</b><small>捕获与注入可用</small></p>
-                <p><span class="check">✓</span><b>自动恢复</b><small>心跳和紧急快捷键正常</small></p>
+                <div class="panel-heading"><h2>运行检查</h2><span class="status-chip good diagnostics-overall">全部通过</span></div>
+                <p class="diagnostic-check" data-check="certificate"><span class="check">✓</span><b>可信证书</b><small>双向验证正常</small></p>
+                <p class="diagnostic-check" data-check="discovery"><span class="check">✓</span><b>局域网发现</b><small>UDP 43892 可用</small></p>
+                <p class="diagnostic-check" data-check="permissions"><span class="check">✓</span><b>输入权限</b><small>捕获与注入可用</small></p>
+                <p class="diagnostic-check" data-check="recovery"><span class="check">✓</span><b>自动恢复</b><small>心跳和紧急快捷键正常</small></p>
               </article>
             </div>
-            <article class="panel log-panel"><div class="panel-heading"><div><h2>最近日志</h2><p>仅显示关键事件</p></div><button class="text-button action-button" type="button">打开日志文件夹</button></div><div class="log-lines"><p><time>16:42:08</time><span class="log-good">连接</span>Connected to macbook with mutual TLS</p><p><time>16:42:11</time><span>输入</span>Mouse control handed to peer</p><p><time>16:42:16</time><span>输入</span>Local mouse control restored</p><p><time>16:42:20</time><span>网络</span>RTT 18.0 ms · jitter 3.2 ms · stale 0</p></div></article>
+            <article class="panel log-panel"><div class="panel-heading"><div><h2>最近日志</h2><p>敏感字段会在导出时自动隐藏</p></div><div class="log-actions"><button class="text-button copy-diagnostics-button" type="button">复制摘要</button><button class="text-button open-logs-button" type="button">打开日志文件夹</button><button class="primary-button export-diagnostics-button" type="button">导出诊断包</button></div></div><div class="log-lines"><p><time>16:42:08</time><span class="log-good">连接</span>Connected to macbook with mutual TLS</p><p><time>16:42:11</time><span>输入</span>Mouse control handed to peer</p><p><time>16:42:16</time><span>输入</span>Local mouse control restored</p><p><time>16:42:20</time><span>网络</span>RTT 18.0 ms · jitter 3.2 ms · stale 0</p></div></article>
           </section>
 
           <section class="page" id="page-settings" data-title="设置">
@@ -264,6 +264,27 @@
         </div>
         <div class="pairing-step pairing-step-success">
           <div class="pairing-success-icon">✓</div><h3>安全配对完成</h3><p>证书已经保存。以后 IP 地址发生变化时，EdgeMouse 仍会自动找到并验证这台设备。</p><button class="primary-button pairing-finish-button" type="button">完成</button>
+        </div>
+      </section>
+    </div>
+    <div class="modal-backdrop diagnostics-modal" hidden>
+      <section class="modal-dialog diagnostics-dialog" role="dialog" aria-modal="true" aria-labelledby="diagnostics-export-title">
+        <header class="modal-header"><div><span class="modal-eyebrow">故障排查</span><h2 id="diagnostics-export-title">导出诊断包</h2></div><button class="modal-close diagnostics-modal-close" type="button" aria-label="关闭诊断包窗口">×</button></header>
+        <div class="diagnostics-export-step diagnostics-export-options is-active">
+          <p class="export-intro">选择要打包的信息。私钥、配对码、完整证书和键盘内容始终不会导出。</p>
+          <div class="export-options">
+            <label><input type="checkbox" value="logs" checked/><span><b>最近运行日志</b><small>连接、切换和错误事件，最多 2 MB</small></span><em>已脱敏</em></label>
+            <label><input type="checkbox" value="network" checked/><span><b>连接质量记录</b><small>最近 5 分钟延迟、抖动与重连次数</small></span><em>推荐</em></label>
+            <label><input type="checkbox" value="system" checked/><span><b>系统与配置摘要</b><small>版本、屏幕布局、权限状态和设备类型</small></span><em>无密钥</em></label>
+          </div>
+          <div class="privacy-note"><span>✓</span><p><b>导出前自动保护隐私</b><small>IP 地址只保留网段，设备指纹仅保留首尾各 4 位。</small></p></div>
+          <div class="modal-actions"><button class="ghost-button diagnostics-cancel-button" type="button">取消</button><button class="primary-button generate-diagnostics-button" type="button">生成诊断包</button></div>
+        </div>
+        <div class="diagnostics-export-step diagnostics-export-generating">
+          <span class="export-spinner"></span><h3>正在整理诊断信息</h3><p>正在脱敏日志并汇总连接质量…</p><div class="export-progress"><i></i></div>
+        </div>
+        <div class="diagnostics-export-step diagnostics-export-success">
+          <div class="pairing-success-icon">✓</div><h3>诊断包已生成</h3><p>文件已保存在下载目录，可以直接发给开发人员分析。</p><div class="export-file"><span>ZIP</span><div><b class="export-file-name">edgemouse-diagnostics.zip</b><small>约 186 KB · 已脱敏</small></div></div><button class="primary-button diagnostics-finish-button" type="button">完成</button>
         </div>
       </section>
     </div>
