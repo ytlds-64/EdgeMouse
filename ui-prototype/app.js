@@ -197,6 +197,170 @@ document.querySelector(".input-save-button")?.addEventListener("click", () => {
 renderInputProfile();
 syncOverviewInputSettings();
 
+const connectionStatusChip = document.querySelector(".connection-status-chip");
+const connectionDeviceStatus = document.querySelector(".connection-device-status");
+const reconnectButton = document.querySelector(".reconnect-button");
+const autoDiscoveryToggle = document.querySelector(".auto-discovery-toggle");
+const discoveryState = document.querySelector(".discovery-state");
+const moreButton = document.querySelector(".more-button");
+const deviceMenu = document.querySelector(".device-menu");
+const pairingModal = document.querySelector(".pairing-modal");
+const pairingModeButtons = [...document.querySelectorAll("[data-pairing-mode]")];
+const pairingPanels = [...document.querySelectorAll(".pairing-panel")];
+const pairingSteps = [...document.querySelectorAll(".pairing-step")];
+const discoveredDevice = document.querySelector(".discovered-device");
+const manualAddress = document.querySelector("#manual-peer-address");
+let discoveryTimer;
+let pairingVerificationTimer;
+
+function setConnectionState(state) {
+  const connecting = state === "connecting";
+  connectionStatusChip.classList.toggle("good", !connecting);
+  connectionStatusChip.classList.toggle("pending", connecting);
+  connectionStatusChip.querySelector("b").textContent = connecting ? "正在重新连接" : "安全连接正常";
+  connectionDeviceStatus.classList.toggle("is-connecting", connecting);
+  connectionDeviceStatus.querySelector("b").textContent = connecting ? "正在寻找可信设备…" : "已连接 · Wi‑Fi";
+}
+
+function setPairingStep(stepName) {
+  pairingSteps.forEach((step) => step.classList.toggle("is-active", step.classList.contains(`pairing-step-${stepName}`)));
+}
+
+function setPairingMode(mode) {
+  pairingModeButtons.forEach((button) => {
+    const selected = button.dataset.pairingMode === mode;
+    button.classList.toggle("is-selected", selected);
+    button.setAttribute("aria-selected", String(selected));
+  });
+  pairingPanels.forEach((panel) => panel.classList.toggle("is-active", panel.classList.contains(`pairing-${mode}`)));
+  if (mode === "manual") window.setTimeout(() => manualAddress.focus(), 0);
+}
+
+function startPairingDiscovery() {
+  window.clearTimeout(discoveryTimer);
+  discoveredDevice.hidden = true;
+  discoveryTimer = window.setTimeout(() => {
+    discoveredDevice.hidden = false;
+    document.querySelector(".scan-status strong").textContent = "发现 1 台可配对设备";
+    document.querySelector(".scan-status small").textContent = "已通过局域网广播验证设备响应";
+  }, 650);
+}
+
+function openPairingModal() {
+  window.clearTimeout(pairingVerificationTimer);
+  pairingModal.hidden = false;
+  setPairingStep("discover");
+  setPairingMode("auto");
+  manualAddress.value = "";
+  document.querySelector(".field-error").hidden = true;
+  document.querySelector(".scan-status strong").textContent = "正在查找附近设备…";
+  document.querySelector(".scan-status small").textContent = "请确保另一台设备已打开 EdgeMouse";
+  document.querySelector(".pairing-confirm-button").disabled = false;
+  document.querySelector(".pairing-confirm-button").textContent = "配对码一致";
+  startPairingDiscovery();
+  document.querySelector(".modal-close").focus();
+}
+
+function closePairingModal() {
+  window.clearTimeout(discoveryTimer);
+  window.clearTimeout(pairingVerificationTimer);
+  document.querySelector(".pairing-confirm-button").disabled = false;
+  document.querySelector(".pairing-confirm-button").textContent = "配对码一致";
+  pairingModal.hidden = true;
+  document.querySelector(".pair-device-button").focus();
+}
+
+function showPairingCode(name, address, method) {
+  document.querySelector(".pairing-target-name").textContent = name;
+  document.querySelector(".pairing-target-address").textContent = `${method} · ${address}`;
+  setPairingStep("code");
+  document.querySelector(".pairing-confirm-button").focus();
+}
+
+function validIpv4(value) {
+  const parts = value.trim().split(".");
+  return parts.length === 4 && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
+}
+
+reconnectButton?.addEventListener("click", () => {
+  reconnectButton.disabled = true;
+  reconnectButton.textContent = "正在重新连接…";
+  setConnectionState("connecting");
+  window.setTimeout(() => {
+    setConnectionState("connected");
+    reconnectButton.disabled = false;
+    reconnectButton.textContent = "立即重新连接";
+    document.querySelector(".peer-address").textContent = "自动获取 · 192.168.8.202";
+    showToast("已通过自动发现重新连接可信设备");
+  }, 900);
+});
+
+autoDiscoveryToggle?.addEventListener("click", () => {
+  const enabled = autoDiscoveryToggle.classList.contains("is-on");
+  discoveryState.classList.toggle("is-paused", !enabled);
+  discoveryState.querySelector("strong").textContent = enabled ? "正在监听可信设备" : "自动发现已暂停";
+  discoveryState.querySelector("small").textContent = enabled ? "UDP 43892 · 地址变化自动更新" : "将继续使用最后一次已知地址";
+  document.querySelector(".discovery-detail").textContent = enabled ? "局域网自动发现" : "使用最后已知地址";
+});
+
+moreButton?.addEventListener("click", () => {
+  const open = deviceMenu.hidden;
+  deviceMenu.hidden = !open;
+  moreButton.setAttribute("aria-expanded", String(open));
+});
+
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".device-more")) {
+    deviceMenu.hidden = true;
+    moreButton?.setAttribute("aria-expanded", "false");
+  }
+});
+
+document.querySelectorAll("[data-device-action]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const messages = { copy: "连接信息已复制（原型演示）", verify: "可信证书验证通过", forget: "解除配对需要再次确认（原型演示）" };
+    if (button.dataset.deviceAction === "verify") document.querySelector(".trust-detail").textContent = "刚刚重新验证";
+    showToast(messages[button.dataset.deviceAction]);
+    deviceMenu.hidden = true;
+    moreButton.setAttribute("aria-expanded", "false");
+  });
+});
+
+document.querySelector(".pair-device-button")?.addEventListener("click", openPairingModal);
+document.querySelector(".modal-close")?.addEventListener("click", closePairingModal);
+pairingModal?.addEventListener("click", (event) => {
+  if (event.target === pairingModal) closePairingModal();
+});
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !pairingModal.hidden) closePairingModal();
+});
+
+pairingModeButtons.forEach((button) => button.addEventListener("click", () => setPairingMode(button.dataset.pairingMode)));
+discoveredDevice?.addEventListener("click", () => showPairingCode("MacBook Air", "192.168.8.189", "通过自动发现"));
+document.querySelector(".manual-connect-button")?.addEventListener("click", () => {
+  const address = manualAddress.value.trim();
+  const error = document.querySelector(".field-error");
+  error.hidden = validIpv4(address);
+  if (!error.hidden) return;
+  showPairingCode("手动地址设备", address, "通过手动地址");
+});
+document.querySelector(".pairing-back-button")?.addEventListener("click", () => setPairingStep("discover"));
+document.querySelector(".pairing-confirm-button")?.addEventListener("click", (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  button.textContent = "正在验证证书…";
+  pairingVerificationTimer = window.setTimeout(() => {
+    button.disabled = false;
+    button.textContent = "配对码一致";
+    setPairingStep("success");
+    document.querySelector(".pairing-finish-button").focus();
+  }, 750);
+});
+document.querySelector(".pairing-finish-button")?.addEventListener("click", () => {
+  closePairingModal();
+  showToast("安全配对完成，已保存可信证书");
+});
+
 const layoutCanvas = document.querySelector(".layout-canvas");
 const layoutDirectionButtons = [...document.querySelectorAll(".layout-direction button")];
 const dragBeam = layoutCanvas.querySelector(".drag-beam");

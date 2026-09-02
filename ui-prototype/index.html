@@ -168,19 +168,20 @@
           </section>
 
           <section class="page" id="page-connection" data-title="连接">
-            <div class="page-heading"><div><h1>连接</h1><p>管理自动发现、可信设备与安全配对</p></div><span class="status-chip good"><i></i>安全连接正常</span></div>
+            <div class="page-heading"><div><h1>连接</h1><p>管理自动发现、可信设备与安全配对</p></div><span class="status-chip good connection-status-chip"><i></i><b>安全连接正常</b></span></div>
             <div class="connection-layout">
               <article class="panel trusted-device">
-                <div class="device-summary"><div class="device-avatar mac-avatar">M</div><div><span class="eyebrow">已配对设备</span><h2>MacBook Air</h2><p><span class="online-dot"></span>已连接 · Wi‑Fi</p></div><button class="more-button" type="button" aria-label="更多操作">•••</button></div>
-                <div class="detail-grid"><div><span>查找方式</span><b>局域网自动发现</b></div><div><span>当前地址</span><b>192.168.8.189</b></div><div><span>加密方式</span><b>双向 TLS</b></div><div><span>可信状态</span><b class="teal-text">证书已验证</b></div></div>
+                <div class="device-summary"><div class="device-avatar mac-avatar">M</div><div><span class="eyebrow">已配对设备</span><h2>MacBook Air</h2><p class="connection-device-status"><span class="online-dot"></span><b>已连接 · Wi‑Fi</b></p></div><div class="device-more"><button class="more-button" type="button" aria-label="更多操作" aria-expanded="false">•••</button><div class="device-menu" hidden><button type="button" data-device-action="copy">复制连接信息</button><button type="button" data-device-action="verify">重新验证证书</button><button class="menu-danger" type="button" data-device-action="forget">解除配对…</button></div></div></div>
+                <div class="detail-grid"><div><span>查找方式</span><b class="discovery-detail">局域网自动发现</b></div><div><span>当前地址</span><b class="peer-address">自动获取 · 192.168.8.189</b></div><div><span>加密方式</span><b>双向 TLS</b></div><div><span>可信状态</span><b class="teal-text trust-detail">证书已验证</b></div></div>
                 <div class="certificate-line"><span>设备指纹</span><code>85f2 6b5e 2662 1790 ··· d73d e36c 4e</code><button type="button">复制</button></div>
               </article>
               <aside class="panel connection-actions">
                 <div class="panel-heading"><h2>连接选项</h2></div>
-                <div class="setting-row"><div><strong>自动发现可信设备</strong><small>IP 变化后无需重新配对</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div>
+                <div class="setting-row"><div><strong>自动发现可信设备</strong><small>IP 变化后无需重新配对</small></div><button class="toggle is-on auto-discovery-toggle" type="button" role="switch" aria-checked="true"><span></span></button></div>
                 <div class="setting-row"><div><strong>断开后自动重连</strong><small>网络恢复后自动继续连接</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div>
-                <button class="secondary-button full-button action-button" type="button">立即重新连接</button>
-                <button class="ghost-button full-button action-button" type="button">配对新设备</button>
+                <div class="discovery-state"><span class="discovery-radar"><i></i></span><div><strong>正在监听可信设备</strong><small>UDP 43892 · 地址变化自动更新</small></div></div>
+                <button class="secondary-button full-button reconnect-button" type="button">立即重新连接</button>
+                <button class="ghost-button full-button pair-device-button" type="button">配对新设备</button>
               </aside>
             </div>
             <article class="panel security-note"><div class="shield-icon">✓</div><div><h2>私钥始终保留在本机</h2><p>设备之间仅交换公开证书；局域网发现结果仍需通过已保存证书完成双向验证。</p></div><button class="text-button" data-go="about" type="button">了解安全设计 ›</button></article>
@@ -238,6 +239,33 @@
           </section>
         </main>
       </div>
+    </div>
+    <div class="modal-backdrop pairing-modal" hidden>
+      <section class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="pairing-title">
+        <header class="modal-header"><div><span class="modal-eyebrow">安全配对</span><h2 id="pairing-title">配对新设备</h2></div><button class="modal-close" type="button" aria-label="关闭配对窗口">×</button></header>
+        <div class="pairing-step pairing-step-discover is-active">
+          <div class="pairing-mode segmented" role="tablist" aria-label="查找设备方式"><button class="is-selected" type="button" role="tab" aria-selected="true" data-pairing-mode="auto">自动发现</button><button type="button" role="tab" aria-selected="false" data-pairing-mode="manual">手动地址</button></div>
+          <div class="pairing-panel pairing-auto is-active">
+            <div class="scan-status"><span class="scan-rings"><i></i></span><div><strong>正在查找附近设备…</strong><small>请确保另一台设备已打开 EdgeMouse</small></div></div>
+            <button class="discovered-device" type="button" hidden><span class="profile-device mac-profile">M</span><span><b>MacBook Air</b><small>自动发现 · <em>192.168.8.189</em></small></span><i>配对 ›</i></button>
+          </div>
+          <div class="pairing-panel pairing-manual">
+            <label for="manual-peer-address">另一台设备的局域网地址</label>
+            <div class="address-field"><input id="manual-peer-address" type="text" inputmode="decimal" placeholder="例如 192.168.8.189" autocomplete="off"/><span>:43893</span></div>
+            <p class="field-help">自动发现不可用时，可输入对方当前 IP；配对完成后仍会自动追踪地址变化。</p>
+            <p class="field-error" hidden>请输入正确的 IPv4 地址</p>
+            <button class="primary-button manual-connect-button" type="button">连接此设备</button>
+          </div>
+        </div>
+        <div class="pairing-step pairing-step-code">
+          <div class="pairing-code-icon">↔</div><h3>确认两台设备显示相同配对码</h3><p>这可以防止局域网中的其他设备冒充你的电脑。</p><div class="pairing-code" aria-label="配对码">9274&nbsp;–&nbsp;7922</div>
+          <div class="pairing-target"><span class="profile-device mac-profile">M</span><div><strong class="pairing-target-name">MacBook Air</strong><small class="pairing-target-address">通过自动发现 · 192.168.8.189</small></div><span class="status-chip good">证书待确认</span></div>
+          <div class="modal-actions"><button class="ghost-button pairing-back-button" type="button">返回</button><button class="primary-button pairing-confirm-button" type="button">配对码一致</button></div>
+        </div>
+        <div class="pairing-step pairing-step-success">
+          <div class="pairing-success-icon">✓</div><h3>安全配对完成</h3><p>证书已经保存。以后 IP 地址发生变化时，EdgeMouse 仍会自动找到并验证这台设备。</p><button class="primary-button pairing-finish-button" type="button">完成</button>
+        </div>
+      </section>
     </div>
     <div class="toast" role="status" aria-live="polite"><span>✓</span><b>原型操作已完成</b></div>
     <script src="./app.js"></script>
