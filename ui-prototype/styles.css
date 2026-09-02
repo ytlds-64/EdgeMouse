@@ -41,9 +41,16 @@ button { color: inherit; }
 .workspace { position: relative; min-width: 0; min-height: 100vh; }
 .titlebar { height: 54px; display: flex; align-items: center; justify-content: flex-end; background: rgba(250, 251, 249, .86); }
 .drag-region { flex: 1; height: 100%; }
-.titlebar button { width: 48px; height: 100%; border: 0; background: transparent; font-size: 20px; cursor: default; }
+.titlebar button { display: grid; flex: 0 0 48px; place-items: center; width: 48px; height: 54px; padding: 0; border: 0; color: inherit; background: transparent; cursor: default; }
 .titlebar button:hover { background: #eef1ef; }
 .titlebar .close-button:hover { color: white; background: #e24b50; }
+.window-icon { position: relative; display: block; width: 14px; height: 14px; pointer-events: none; }
+.window-icon-minimize::before { position: absolute; top: 6px; right: 1px; left: 1px; height: 1.5px; border-radius: 2px; background: currentColor; content: ""; }
+.window-icon-maximize::before { position: absolute; inset: 1px; border: 1.5px solid currentColor; border-radius: 1px; content: ""; }
+.window-icon-close::before,
+.window-icon-close::after { position: absolute; top: .5px; left: 6.25px; width: 1.5px; height: 13px; border-radius: 2px; background: currentColor; content: ""; }
+.window-icon-close::before { transform: rotate(45deg); }
+.window-icon-close::after { transform: rotate(-45deg); }
 .content { height: calc(100vh - 54px); overflow: auto; padding: 24px 38px 34px; }
 .page { display: none; max-width: 1280px; min-height: calc(100vh - 112px); margin: 0 auto; animation: page-in .22s ease both; }
 .page.is-active { display: block; }
@@ -471,11 +478,12 @@ html[data-theme="dark"] body { background: radial-gradient(circle at 50% 0%, #1a
 html[data-theme="dark"] .app-window { background: var(--canvas); }
 html[data-theme="dark"] .sidebar { background: rgba(19, 31, 36, .97); }
 html[data-theme="dark"] .titlebar { background: rgba(17, 28, 32, .94); }
-html[data-theme="dark"] .titlebar button:hover,
+html[data-theme="dark"] .titlebar button:not(.close-button):hover,
 html[data-theme="dark"] .nav-item:hover,
 html[data-theme="dark"] .more-button:hover,
 html[data-theme="dark"] .more-button[aria-expanded="true"],
 html[data-theme="dark"] .device-menu button:hover { background: #223238; }
+html[data-theme="dark"] .titlebar .close-button:hover { color: white; background: #e24b50; }
 html[data-theme="dark"] .nav-item svg { stroke: #9aabad; }
 html[data-theme="dark"] .nav-item:first-child svg { fill: #9aabad; }
 html[data-theme="dark"] .nav-item.is-active { background: linear-gradient(90deg, #163b3b, #183232); }
