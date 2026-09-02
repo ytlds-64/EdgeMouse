@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
+    <meta name="edgemouse-version" content="0.5.0" />
     <title>EdgeMouse · UI 原型</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
@@ -215,24 +216,25 @@
             <div class="page-heading"><div><h1>设置</h1><p>调整 EdgeMouse 的启动、外观和后台行为</p></div></div>
             <div class="settings-columns">
               <div class="column-stack">
-                <article class="panel setting-panel"><div class="panel-heading"><h2>常规</h2></div><div class="setting-row"><div><strong>登录时启动 EdgeMouse</strong><small>进入桌面后自动连接可信设备</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div><div class="setting-row"><div><strong>关闭窗口后继续运行</strong><small>从菜单栏或系统托盘再次打开</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div><div class="setting-row"><div><strong>显示连接通知</strong><small>连接、断开和控制权变化时提醒</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div></article>
-                <article class="panel setting-panel"><div class="panel-heading"><h2>外观</h2></div><div class="form-group"><label>界面主题</label><div class="segmented"><button class="is-selected" type="button">跟随系统</button><button type="button">浅色</button><button type="button">深色</button></div></div><div class="form-group select-row"><label for="language">界面语言</label><select id="language"><option>简体中文</option><option>English</option></select></div></article>
+                <article class="panel setting-panel"><div class="panel-heading"><h2>常规</h2><span class="status-chip good">后台服务正常</span></div><div class="setting-row"><div><strong>登录时启动 EdgeMouse</strong><small>进入桌面后自动连接可信设备</small></div><button class="toggle is-on" data-general-setting="autostart" type="button" role="switch" aria-checked="true"><span></span></button></div><div class="setting-row"><div><strong>关闭窗口后继续运行</strong><small>从菜单栏或系统托盘再次打开</small></div><button class="toggle is-on" data-general-setting="background" type="button" role="switch" aria-checked="true"><span></span></button></div><div class="setting-row"><div><strong>显示连接通知</strong><small>连接、断开和控制权变化时提醒</small></div><button class="toggle is-on" data-general-setting="notifications" type="button" role="switch" aria-checked="true"><span></span></button></div></article>
+                <article class="panel setting-panel appearance-panel"><div class="panel-heading"><h2>外观</h2><span class="theme-current">跟随系统 · 浅色</span></div><div class="form-group"><label>界面主题</label><div class="theme-options" role="radiogroup" aria-label="界面主题"><button class="theme-option is-selected" type="button" role="radio" aria-checked="true" data-theme="system"><span class="theme-preview system-preview"><i></i><i></i></span><b>跟随系统</b><small>当前为浅色</small></button><button class="theme-option" type="button" role="radio" aria-checked="false" data-theme="light"><span class="theme-preview light-preview"><i></i><i></i></span><b>浅色</b><small>始终使用浅色</small></button><button class="theme-option" type="button" role="radio" aria-checked="false" data-theme="dark"><span class="theme-preview dark-preview"><i></i><i></i></span><b>深色</b><small>适合暗光环境</small></button></div></div><div class="form-group select-row"><label for="language">界面语言</label><select id="language"><option value="zh-CN">简体中文</option><option value="en">English</option></select></div></article>
               </div>
               <div class="column-stack">
-                <article class="panel setting-panel"><div class="panel-heading"><h2>更新</h2><span class="status-chip good">已是最新版</span></div><div class="update-version"><img src="../assets/branding/edgemouse-app-icon.svg" alt=""/><div><strong>EdgeMouse 0.5.0</strong><small>最后检查：刚刚</small></div></div><button class="secondary-button full-button action-button" type="button">检查更新</button></article>
-                <article class="panel setting-panel danger-panel"><div class="panel-heading"><h2>重置</h2></div><p>恢复界面和输入设置，不会删除设备证书。</p><button class="danger-button action-button" type="button">恢复默认设置</button></article>
+                <article class="panel setting-panel update-panel"><div class="panel-heading"><h2>更新</h2><span class="status-chip good update-status">已是最新版</span></div><div class="update-version"><img src="../assets/branding/edgemouse-app-icon.svg" alt=""/><div><strong>EdgeMouse <span data-app-version>0.5.0</span></strong><small class="update-last-check">最后检查：刚刚</small></div></div><div class="form-group select-row update-channel-row"><label for="update-channel">更新通道</label><select id="update-channel"><option value="stable">稳定版</option><option value="preview">预览版</option></select></div><button class="secondary-button full-button check-updates-button" type="button">检查更新</button></article>
+                <article class="panel setting-panel danger-panel"><div class="panel-heading"><h2>重置</h2><span class="status-chip">保留证书</span></div><p>恢复界面、输入和连接偏好，不会删除设备身份、私钥或可信证书。</p><button class="danger-button reset-settings-button" type="button">恢复默认设置…</button></article>
               </div>
             </div>
-            <div class="page-footer"><span>部分设置会在应用重新启动后生效</span><button class="primary-button save-button" type="button">保存设置</button></div>
+            <div class="page-footer"><span class="settings-save-status">部分设置会在应用重新启动后生效</span><button class="primary-button save-button settings-save-button" type="button">保存设置</button></div>
           </section>
 
           <section class="page" id="page-about" data-title="关于">
             <div class="page-heading"><div><h1>关于</h1><p>EdgeMouse 版本、开源许可和产品信息</p></div></div>
             <div class="about-layout">
-              <article class="panel about-hero"><img src="../assets/branding/edgemouse-mark.svg" alt="EdgeMouse"/><h2>EdgeMouse</h2><p class="version-text">版本 0.5.0</p><p>让 Windows 与 macOS 像一张连续的桌面一样自然协作。</p><div class="about-actions"><button class="primary-button action-button" type="button">检查更新</button><button class="secondary-button action-button" type="button">查看项目主页</button></div></article>
+              <article class="panel about-hero"><img src="../assets/branding/edgemouse-mark.svg" alt="EdgeMouse"/><h2>EdgeMouse</h2><p class="version-text">版本 <span data-app-version>0.5.0</span> · 稳定版</p><p>让 Windows 与 macOS 像一张连续的桌面一样自然协作。</p><div class="about-actions"><button class="primary-button check-updates-button" type="button">检查更新</button><button class="secondary-button project-home-button" type="button">查看项目主页</button></div></article>
               <div class="about-details">
-                <article class="panel"><div class="panel-heading"><h2>当前能力</h2></div><div class="feature-tags"><span>双向鼠标</span><span>键盘跟随</span><span>自动屏幕识别</span><span>局域网发现</span><span>安全配对</span><span>自动重连</span></div></article>
-                <article class="panel about-links"><button type="button"><span>开源许可</span><b>MIT License ›</b></button><button type="button"><span>第三方组件</span><b>查看清单 ›</b></button><button type="button"><span>问题反馈</span><b>GitHub Issues ›</b></button><button type="button"><span>诊断信息</span><b>复制版本信息 ›</b></button></article>
+                <article class="panel"><div class="panel-heading"><h2>当前能力</h2><span class="status-chip good">MVP 已就绪</span></div><div class="feature-tags"><span>双向鼠标</span><span>键盘跟随</span><span>自动屏幕识别</span><span>局域网发现</span><span>安全配对</span><span>自动重连</span><span>诊断导出</span></div></article>
+                <article class="panel build-info"><div class="panel-heading"><h2>构建信息</h2></div><p><span>版本</span><b data-app-version>0.5.0</b></p><p><span>平台</span><b>Windows 11 · macOS 15+</b></p><p><span>传输</span><b>QUIC · 双向 TLS</b></p><p><span>项目</span><b>开源 · MIT License</b></p></article>
+                <article class="panel about-links"><button type="button" data-about-action="license"><span>开源许可</span><b>MIT License ›</b></button><button type="button" data-about-action="dependencies"><span>第三方组件</span><b>查看清单 ›</b></button><button type="button" data-about-action="issues"><span>问题反馈</span><b>GitHub Issues ›</b></button><button type="button" data-about-action="version"><span>诊断信息</span><b>复制版本信息 ›</b></button></article>
                 <p class="copyright">© 2026 EdgeMouse contributors · 为跨平台桌面协作而设计</p>
               </div>
             </div>
@@ -286,6 +288,18 @@
         <div class="diagnostics-export-step diagnostics-export-success">
           <div class="pairing-success-icon">✓</div><h3>诊断包已生成</h3><p>文件已保存在下载目录，可以直接发给开发人员分析。</p><div class="export-file"><span>ZIP</span><div><b class="export-file-name">edgemouse-diagnostics.zip</b><small>约 186 KB · 已脱敏</small></div></div><button class="primary-button diagnostics-finish-button" type="button">完成</button>
         </div>
+      </section>
+    </div>
+    <div class="modal-backdrop reset-settings-modal" hidden>
+      <section class="modal-dialog compact-dialog" role="dialog" aria-modal="true" aria-labelledby="reset-settings-title">
+        <header class="modal-header"><div><span class="modal-eyebrow danger-eyebrow">恢复默认值</span><h2 id="reset-settings-title">确认重置设置？</h2></div><button class="modal-close reset-modal-close" type="button" aria-label="关闭重置窗口">×</button></header>
+        <div class="reset-content"><div class="reset-warning-icon">↺</div><p>以下偏好会恢复为推荐值：</p><ul><li>界面主题与语言</li><li>双向鼠标、键盘映射与平滑度</li><li>自动发现、重连和通知选项</li></ul><div class="certificate-safe-note"><span>✓</span><p><b>设备证书不会删除</b><small>完成后无需重新配对 Windows 与 Mac。</small></p></div><div class="modal-actions"><button class="ghost-button reset-cancel-button" type="button">取消</button><button class="danger-button confirm-reset-button" type="button">恢复默认设置</button></div></div>
+      </section>
+    </div>
+    <div class="modal-backdrop info-modal" hidden>
+      <section class="modal-dialog compact-dialog" role="dialog" aria-modal="true" aria-labelledby="info-modal-title">
+        <header class="modal-header"><div><span class="modal-eyebrow info-modal-eyebrow">开源信息</span><h2 id="info-modal-title">开源许可</h2></div><button class="modal-close info-modal-close" type="button" aria-label="关闭信息窗口">×</button></header>
+        <div class="info-modal-content"></div><div class="info-modal-footer"><button class="primary-button info-modal-finish" type="button">完成</button></div>
       </section>
     </div>
     <div class="toast" role="status" aria-live="polite"><span>✓</span><b>原型操作已完成</b></div>

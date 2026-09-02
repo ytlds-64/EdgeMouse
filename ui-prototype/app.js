@@ -1,7 +1,12 @@
 const navItems = [...document.querySelectorAll(".nav-item")];
 const pages = [...document.querySelectorAll(".page")];
 const toast = document.querySelector(".toast");
+const appVersion = document.querySelector('meta[name="edgemouse-version"]')?.content ?? "0.5.0";
 let toastTimer;
+
+document.querySelectorAll("[data-app-version]").forEach((element) => {
+  element.textContent = appVersion;
+});
 
 function showToast(message) {
   toast.querySelector("b").textContent = message;
@@ -489,6 +494,179 @@ document.querySelector(".diagnostics-finish-button")?.addEventListener("click", 
   showToast("诊断包已生成（原型演示）");
 });
 
+const settingsSaveStatus = document.querySelector(".settings-save-status");
+const themeOptions = [...document.querySelectorAll(".theme-option")];
+const languageSelect = document.querySelector("#language");
+const updateChannelSelect = document.querySelector("#update-channel");
+const resetSettingsModal = document.querySelector(".reset-settings-modal");
+const infoModal = document.querySelector(".info-modal");
+const defaultInputProfiles = JSON.parse(JSON.stringify(inputProfiles));
+
+function markSettingsDirty(message = "有尚未保存的设置") {
+  settingsSaveStatus.textContent = message;
+  settingsSaveStatus.classList.add("is-dirty");
+}
+
+function selectTheme(theme, shouldMarkDirty = true) {
+  const labels = {
+    system: "跟随系统 · 浅色",
+    light: "始终使用浅色",
+    dark: "始终使用深色",
+  };
+  themeOptions.forEach((button) => {
+    const selected = button.dataset.theme === theme;
+    button.classList.toggle("is-selected", selected);
+    button.setAttribute("aria-checked", String(selected));
+  });
+  document.querySelector(".theme-current").textContent = labels[theme];
+  if (shouldMarkDirty) markSettingsDirty();
+}
+
+document.querySelectorAll("[data-general-setting]").forEach((toggle) => {
+  toggle.addEventListener("click", () => markSettingsDirty());
+});
+
+themeOptions.forEach((button) => {
+  button.addEventListener("click", () => selectTheme(button.dataset.theme));
+});
+
+languageSelect?.addEventListener("change", () => {
+  markSettingsDirty("界面语言更改将在重新启动后生效");
+});
+
+updateChannelSelect?.addEventListener("change", () => markSettingsDirty());
+
+document.querySelector(".settings-save-button")?.addEventListener("click", () => {
+  settingsSaveStatus.textContent = "所有设置均已保存";
+  settingsSaveStatus.classList.remove("is-dirty");
+  showToast("设置已保存（原型演示）");
+});
+
+async function checkForUpdates() {
+  const buttons = [...document.querySelectorAll(".check-updates-button")];
+  const updateStatus = document.querySelector(".update-status");
+  buttons.forEach((button) => {
+    button.disabled = true;
+    button.dataset.originalLabel = button.textContent;
+    button.textContent = "正在检查…";
+  });
+  updateStatus.classList.remove("good");
+  updateStatus.classList.add("pending");
+  updateStatus.textContent = "正在检查";
+  await diagnosticDelay(850);
+  buttons.forEach((button) => {
+    button.disabled = false;
+    button.textContent = button.dataset.originalLabel;
+    delete button.dataset.originalLabel;
+  });
+  updateStatus.classList.remove("pending");
+  updateStatus.classList.add("good");
+  updateStatus.textContent = "已是最新版";
+  document.querySelector(".update-last-check").textContent = "最后检查：刚刚";
+  showToast(`EdgeMouse ${appVersion} 已是最新版`);
+}
+
+document.querySelectorAll(".check-updates-button").forEach((button) => {
+  button.addEventListener("click", checkForUpdates);
+});
+
+function openResetSettingsModal() {
+  resetSettingsModal.hidden = false;
+  document.querySelector(".reset-modal-close").focus();
+}
+
+function closeResetSettingsModal() {
+  resetSettingsModal.hidden = true;
+  document.querySelector(".reset-settings-button").focus();
+}
+
+function restoreDefaultSettings() {
+  document.querySelectorAll("[data-general-setting]").forEach((toggle) => setToggleState(toggle, true));
+  Object.entries(defaultInputProfiles).forEach(([name, profile]) => Object.assign(inputProfiles[name], profile));
+  activeInputProfile = "mac-to-windows";
+  inputSettingsDirty = false;
+  inputSaveStatus.textContent = "两个控制方向已恢复为推荐值";
+  inputSaveStatus.classList.remove("is-dirty");
+  renderInputProfile();
+  syncOverviewInputSettings();
+  selectTheme("system", false);
+  languageSelect.value = "zh-CN";
+  updateChannelSelect.value = "stable";
+  setToggleState(autoDiscoveryToggle, true);
+  discoveryState.classList.remove("is-paused");
+  discoveryState.querySelector("strong").textContent = "正在监听可信设备";
+  discoveryState.querySelector("small").textContent = "UDP 43892 · 地址变化自动更新";
+  document.querySelector(".discovery-detail").textContent = "局域网自动发现";
+  settingsSaveStatus.textContent = "默认设置已恢复并保存";
+  settingsSaveStatus.classList.remove("is-dirty");
+  closeResetSettingsModal();
+  showToast("已恢复默认设置，设备证书保持不变");
+}
+
+document.querySelector(".reset-settings-button")?.addEventListener("click", openResetSettingsModal);
+document.querySelector(".reset-modal-close")?.addEventListener("click", closeResetSettingsModal);
+document.querySelector(".reset-cancel-button")?.addEventListener("click", closeResetSettingsModal);
+document.querySelector(".confirm-reset-button")?.addEventListener("click", restoreDefaultSettings);
+resetSettingsModal?.addEventListener("click", (event) => {
+  if (event.target === resetSettingsModal) closeResetSettingsModal();
+});
+
+const infoModalContent = {
+  license: {
+    eyebrow: "开源信息",
+    title: "MIT License",
+    body: `<h3>自由使用，也保留署名</h3><p>EdgeMouse 采用 MIT 许可证。你可以使用、复制、修改、合并和分发软件，但需要保留原始版权与许可声明。</p><div class="info-note"><b>Copyright © 2026 EdgeMouse contributors</b><span>软件按“原样”提供，不附带任何形式的保证。</span></div>`,
+  },
+  dependencies: {
+    eyebrow: "第三方组件",
+    title: "核心依赖清单",
+    body: `<h3>跨平台与安全传输</h3><ul><li><b>Tokio</b><span>异步运行时与任务调度</span></li><li><b>Quinn</b><span>低延迟 QUIC 连接</span></li><li><b>rustls</b><span>双向 TLS 与证书验证</span></li><li><b>Windows API</b><span>Windows 输入捕获与注入</span></li><li><b>Core Graphics</b><span>macOS 指针与键盘事件</span></li></ul>`,
+  },
+};
+
+function openInfoModal(kind) {
+  const info = infoModalContent[kind];
+  if (!info) return;
+  document.querySelector(".info-modal-eyebrow").textContent = info.eyebrow;
+  document.querySelector("#info-modal-title").textContent = info.title;
+  document.querySelector(".info-modal-content").innerHTML = info.body;
+  infoModal.hidden = false;
+  document.querySelector(".info-modal-close").focus();
+}
+
+function closeInfoModal() {
+  infoModal.hidden = true;
+}
+
+document.querySelectorAll("[data-about-action]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const action = button.dataset.aboutAction;
+    if (action === "license" || action === "dependencies") {
+      openInfoModal(action);
+    } else if (action === "issues") {
+      showToast("将在 GitHub Issues 中打开问题反馈（原型演示）");
+    } else if (action === "version") {
+      const versionInfo = `EdgeMouse ${appVersion} · QUIC · mutual TLS · Windows 11 / macOS 15+`;
+      navigator.clipboard?.writeText(versionInfo).catch(() => {});
+      showToast("版本与诊断信息已复制");
+    }
+  });
+});
+
+document.querySelector(".project-home-button")?.addEventListener("click", () => {
+  showToast("将在浏览器中打开 EdgeMouse 项目主页（原型演示）");
+});
+document.querySelector(".info-modal-close")?.addEventListener("click", closeInfoModal);
+document.querySelector(".info-modal-finish")?.addEventListener("click", closeInfoModal);
+infoModal?.addEventListener("click", (event) => {
+  if (event.target === infoModal) closeInfoModal();
+});
+window.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (!resetSettingsModal.hidden) closeResetSettingsModal();
+  else if (!infoModal.hidden) closeInfoModal();
+});
+
 const layoutCanvas = document.querySelector(".layout-canvas");
 const layoutDirectionButtons = [...document.querySelectorAll(".layout-direction button")];
 const dragBeam = layoutCanvas.querySelector(".drag-beam");
@@ -627,7 +805,7 @@ document.querySelectorAll(".mini-screen").forEach((screen) => {
   }, true);
 });
 
-document.querySelectorAll(".save-button:not(.input-save-button)").forEach((button) => button.addEventListener("click", () => showToast("设置已保存（原型演示）")));
+document.querySelectorAll(".save-button:not(.input-save-button):not(.settings-save-button)").forEach((button) => button.addEventListener("click", () => showToast("设置已保存（原型演示）")));
 document.querySelectorAll(".action-button").forEach((button) => button.addEventListener("click", () => showToast(`${button.textContent.trim()}（原型演示）`)));
 document.querySelector(".detect-button")?.addEventListener("click", (event) => {
   event.currentTarget.textContent = "检测中…";
@@ -637,6 +815,6 @@ document.querySelector(".detect-button")?.addEventListener("click", (event) => {
   }, 800);
 });
 
-document.querySelectorAll(".about-links button, .certificate-line button").forEach((button) => {
+document.querySelectorAll(".certificate-line button").forEach((button) => {
   button.addEventListener("click", () => showToast("内容已复制（原型演示）"));
 });
