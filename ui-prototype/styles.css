@@ -450,6 +450,106 @@ select { min-width: 150px; height: 38px; padding: 0 12px; border: 1px solid var(
 .toast.is-visible { opacity: 1; transform: translate(-50%, 0); }
 .toast span { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; color: #163239; background: #55d8a1; font-size: 10px; }
 
+html[data-theme="dark"] {
+  --teal: #27c5ba;
+  --teal-dark: #69ded5;
+  --teal-soft: #153c3b;
+  --ink: #e6eff0;
+  --muted: #9aa9ab;
+  --line: #35454a;
+  --panel: rgba(27, 40, 45, .95);
+  --canvas: #111b1f;
+  --sidebar: #142126;
+  --green: #51d875;
+  --danger: #ff8187;
+  --shadow: 0 12px 34px rgba(0, 0, 0, .32), 0 2px 6px rgba(0, 0, 0, .24);
+  color-scheme: dark;
+  color: var(--ink);
+  background: #0a1114;
+}
+html[data-theme="dark"] body { background: radial-gradient(circle at 50% 0%, #1a282d 0, #0a1114 66%); }
+html[data-theme="dark"] .app-window { background: var(--canvas); }
+html[data-theme="dark"] .sidebar { background: rgba(19, 31, 36, .97); }
+html[data-theme="dark"] .titlebar { background: rgba(17, 28, 32, .94); }
+html[data-theme="dark"] .titlebar button:hover,
+html[data-theme="dark"] .nav-item:hover,
+html[data-theme="dark"] .more-button:hover,
+html[data-theme="dark"] .more-button[aria-expanded="true"],
+html[data-theme="dark"] .device-menu button:hover { background: #223238; }
+html[data-theme="dark"] .nav-item svg { stroke: #9aabad; }
+html[data-theme="dark"] .nav-item:first-child svg { fill: #9aabad; }
+html[data-theme="dark"] .nav-item.is-active { background: linear-gradient(90deg, #163b3b, #183232); }
+html[data-theme="dark"] .nav-item.is-active:first-child svg { fill: var(--teal); }
+html[data-theme="dark"] .prototype-pill,
+html[data-theme="dark"] .feature-tags span { border-color: #315c59; background: #153532; }
+html[data-theme="dark"] .dotted-surface { background-color: #152126; background-image: radial-gradient(#3a494d 1px, transparent 1px); }
+html[data-theme="dark"] .connection-stage { border-color: #35454a; }
+html[data-theme="dark"] .device-card { border-color: #3b4b50; background: linear-gradient(145deg, #203138, #172429); }
+html[data-theme="dark"] .apple-symbol { color: #eef4f5; }
+html[data-theme="dark"] .apple-symbol::after { background: #eef4f5; }
+html[data-theme="dark"] .stage-tip { border-color: #526165; color: #b1bdbf; background: rgba(20, 33, 38, .9); }
+html[data-theme="dark"] .panel,
+html[data-theme="dark"] .summary-card,
+html[data-theme="dark"] .direction-card,
+html[data-theme="dark"] .metric-card { border-color: var(--line); background: var(--panel); }
+html[data-theme="dark"] .direction-card label,
+html[data-theme="dark"] .setting-row,
+html[data-theme="dark"] .range-row { border-color: #35454a; }
+html[data-theme="dark"] .secondary-button { border-color: #3d6b68; color: var(--teal-dark); background: #1a292e; }
+html[data-theme="dark"] .secondary-button:hover { background: #203a3a; }
+html[data-theme="dark"] .ghost-button { border-color: var(--line); color: #c1cdcf; background: #1a292e; }
+html[data-theme="dark"] .danger-button { border-color: #70474b; color: var(--danger); background: #321f23; }
+html[data-theme="dark"] .mini-screen,
+html[data-theme="dark"] .segmented button.is-selected,
+html[data-theme="dark"] .input-profile-button.is-selected,
+html[data-theme="dark"] .shortcut-map span,
+html[data-theme="dark"] .discovered-device,
+html[data-theme="dark"] .address-field,
+html[data-theme="dark"] .export-options,
+html[data-theme="dark"] .theme-option,
+html[data-theme="dark"] select { border-color: #3b4c50; color: var(--ink); background: #1b2a30; }
+html[data-theme="dark"] .edge-glow span,
+html[data-theme="dark"] .drag-beam span { border-color: #3d5558; color: var(--teal-dark); background: rgba(22, 37, 42, .97); }
+html[data-theme="dark"] .segmented,
+html[data-theme="dark"] .profile-switcher,
+html[data-theme="dark"] .screen-facts,
+html[data-theme="dark"] .shortcut-map,
+html[data-theme="dark"] .certificate-line,
+html[data-theme="dark"] .discovery-state,
+html[data-theme="dark"] .pairing-target,
+html[data-theme="dark"] .export-file,
+html[data-theme="dark"] .update-version,
+html[data-theme="dark"] .reset-content ul { background: #18272c; }
+html[data-theme="dark"] .detail-grid { border-color: #35454a; background: #35454a; }
+html[data-theme="dark"] .detail-grid div { background: #19282d; }
+html[data-theme="dark"] .device-menu { border-color: var(--line); background: #17262b; }
+html[data-theme="dark"] .certificate-line code,
+html[data-theme="dark"] .discovery-state,
+html[data-theme="dark"] .form-group > label,
+html[data-theme="dark"] .theme-option,
+html[data-theme="dark"] select { color: #c5d0d2; }
+html[data-theme="dark"] .recovery-card { border-color: #665337; background: #2b261d; }
+html[data-theme="dark"] .recovery-icon { color: #f0b85e; background: #43351f; }
+html[data-theme="dark"] .recovery-card p { color: #c0ab8b; }
+html[data-theme="dark"] kbd { border-color: #6b604c; color: #e4d7c2; background: #241f19; }
+html[data-theme="dark"] .modal-dialog { border-color: #425258; background: #152329; }
+html[data-theme="dark"] .modal-header,
+html[data-theme="dark"] .info-modal-footer { border-color: #35454a; background: #18272c; }
+html[data-theme="dark"] .scan-status { border-color: #3d5c5b; background: #192b2f; }
+html[data-theme="dark"] .export-options label { border-color: #35454a; background: #19282d; }
+html[data-theme="dark"] .chart-area { background: repeating-linear-gradient(to bottom, #18262b 0 37px, #314147 38px); }
+html[data-theme="dark"] .chart-value { border-color: #3b5053; background: rgba(24, 40, 45, .93); }
+html[data-theme="dark"] .info-modal-content li,
+html[data-theme="dark"] .dependency-list p { border-color: #35454a; background: #19282d; }
+html[data-theme="dark"] .about-links button { border-color: #35454a; }
+html[data-theme="dark"] .certificate-safe-note,
+html[data-theme="dark"] .privacy-note { background: #173322; }
+html[data-theme="dark"] .danger-panel .status-chip { color: #d3b7ba; background: #382a2d; }
+html[data-theme="dark"] .status-chip.good { color: #72e18c; background: #173823; }
+html[data-theme="dark"] .status-chip.pending { color: #e6b76a; background: #3b2f1d; }
+html[data-theme="dark"] .theme-option.is-selected { border-color: #4fcfc5; box-shadow: 0 0 0 2px rgba(39, 197, 186, .16); }
+html[data-theme="dark"] .toast { background: #e1eeee; color: #132329; }
+
 @media (max-width: 1180px) {
   .app-window { grid-template-columns: 210px 1fr; }
   .content { padding-inline: 26px; }

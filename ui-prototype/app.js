@@ -501,6 +501,8 @@ const updateChannelSelect = document.querySelector("#update-channel");
 const resetSettingsModal = document.querySelector(".reset-settings-modal");
 const infoModal = document.querySelector(".info-modal");
 const defaultInputProfiles = JSON.parse(JSON.stringify(inputProfiles));
+const systemColorPreference = window.matchMedia("(prefers-color-scheme: dark)");
+let activeTheme = "system";
 
 function markSettingsDirty(message = "有尚未保存的设置") {
   settingsSaveStatus.textContent = message;
@@ -508,18 +510,31 @@ function markSettingsDirty(message = "有尚未保存的设置") {
 }
 
 function selectTheme(theme, shouldMarkDirty = true) {
+  activeTheme = ["system", "light", "dark"].includes(theme) ? theme : "system";
+  const resolvedTheme = activeTheme === "system" ? (systemColorPreference.matches ? "dark" : "light") : activeTheme;
   const labels = {
-    system: "跟随系统 · 浅色",
+    system: `跟随系统 · ${resolvedTheme === "dark" ? "深色" : "浅色"}`,
     light: "始终使用浅色",
     dark: "始终使用深色",
   };
   themeOptions.forEach((button) => {
-    const selected = button.dataset.theme === theme;
+    const selected = button.dataset.theme === activeTheme;
     button.classList.toggle("is-selected", selected);
     button.setAttribute("aria-checked", String(selected));
   });
-  document.querySelector(".theme-current").textContent = labels[theme];
+  document.documentElement.dataset.theme = resolvedTheme;
+  document.querySelector('meta[name="color-scheme"]').content = resolvedTheme;
+  document.querySelector(".theme-current").textContent = labels[activeTheme];
+  window.localStorage.setItem("edgemouse-theme", activeTheme);
   if (shouldMarkDirty) markSettingsDirty();
+}
+
+function applyLanguage(language, shouldMarkDirty = true) {
+  const nextLanguage = language === "en" ? "en" : "zh-CN";
+  languageSelect.value = nextLanguage;
+  window.EdgeMouseI18n.apply(nextLanguage);
+  window.localStorage.setItem("edgemouse-language", nextLanguage);
+  if (shouldMarkDirty) markSettingsDirty("界面语言已切换，保存后会在下次启动继续使用");
 }
 
 document.querySelectorAll("[data-general-setting]").forEach((toggle) => {
@@ -531,7 +546,7 @@ themeOptions.forEach((button) => {
 });
 
 languageSelect?.addEventListener("change", () => {
-  markSettingsDirty("界面语言更改将在重新启动后生效");
+  applyLanguage(languageSelect.value);
 });
 
 updateChannelSelect?.addEventListener("change", () => markSettingsDirty());
@@ -590,7 +605,7 @@ function restoreDefaultSettings() {
   renderInputProfile();
   syncOverviewInputSettings();
   selectTheme("system", false);
-  languageSelect.value = "zh-CN";
+  applyLanguage("zh-CN", false);
   updateChannelSelect.value = "stable";
   setToggleState(autoDiscoveryToggle, true);
   discoveryState.classList.remove("is-paused");
@@ -602,6 +617,16 @@ function restoreDefaultSettings() {
   closeResetSettingsModal();
   showToast("已恢复默认设置，设备证书保持不变");
 }
+
+systemColorPreference.addEventListener("change", () => {
+  if (activeTheme === "system") selectTheme("system", false);
+});
+
+const savedTheme = window.localStorage.getItem("edgemouse-theme") ?? "system";
+const savedLanguage = window.localStorage.getItem("edgemouse-language") ?? "zh-CN";
+selectTheme(savedTheme, false);
+applyLanguage(savedLanguage, false);
+window.EdgeMouseI18n.startObserving();
 
 document.querySelector(".reset-settings-button")?.addEventListener("click", openResetSettingsModal);
 document.querySelector(".reset-modal-close")?.addEventListener("click", closeResetSettingsModal);
