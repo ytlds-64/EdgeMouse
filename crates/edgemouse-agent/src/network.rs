@@ -414,7 +414,10 @@ async fn run_network(
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mouse_flush = tokio::time::sleep(MOUSE_FLUSH_INTERVAL_FAST);
     tokio::pin!(mouse_flush);
-    let mut metrics = tokio::time::interval(METRICS_INTERVAL);
+    let mut metrics = tokio::time::interval_at(
+        tokio::time::Instant::now() + METRICS_INTERVAL,
+        METRICS_INTERVAL,
+    );
     metrics.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut sent_moves = 0_u64;
     let mut skipped_moves = 0_u64;
@@ -504,32 +507,26 @@ async fn run_network(
                         break;
                     }
                 };
-                if sent_moves > 0
-                    || skipped_moves > 0
-                    || coalesced_moves > 0
-                    || incoming_metrics.received > 0
-                {
-                    let rtt_ms = sender.smoothed_rtt().as_secs_f64() * 1_000.0;
-                    let send_interval_ms = u64::try_from(
-                        adaptive_mouse_interval(sender.smoothed_rtt()).as_millis(),
-                    ).unwrap_or(u64::MAX);
-                    if events.send(NetworkEvent::Metrics {
-                        rtt_ms,
-                        send_interval_ms,
-                        sent_moves,
-                        skipped_moves,
-                        coalesced_moves,
-                        received_moves: incoming_metrics.received,
-                        stale_moves: incoming_metrics.stale,
-                        arrival_jitter_ms: incoming_metrics.arrival_jitter_ms,
-                        max_arrival_gap_ms: incoming_metrics.max_arrival_gap_ms,
-                        superseded_moves: incoming_metrics.superseded,
-                    }).is_err() {
-                        break;
-                    }
-                    sent_moves = 0;
-                    skipped_moves = 0;
+                let rtt_ms = sender.smoothed_rtt().as_secs_f64() * 1_000.0;
+                let send_interval_ms = u64::try_from(
+                    adaptive_mouse_interval(sender.smoothed_rtt()).as_millis(),
+                ).unwrap_or(u64::MAX);
+                if events.send(NetworkEvent::Metrics {
+                    rtt_ms,
+                    send_interval_ms,
+                    sent_moves,
+                    skipped_moves,
+                    coalesced_moves,
+                    received_moves: incoming_metrics.received,
+                    stale_moves: incoming_metrics.stale,
+                    arrival_jitter_ms: incoming_metrics.arrival_jitter_ms,
+                    max_arrival_gap_ms: incoming_metrics.max_arrival_gap_ms,
+                    superseded_moves: incoming_metrics.superseded,
+                }).is_err() {
+                    break;
                 }
+                sent_moves = 0;
+                skipped_moves = 0;
             },
             message = receiver.receive() => match message {
                 Ok(WireMessage::Goodbye { .. }) => {

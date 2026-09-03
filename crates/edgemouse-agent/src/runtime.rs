@@ -1,5 +1,5 @@
 use crate::config::{LoadedConfig, PeerAddress, ResolvedScreen};
-use crate::control::ControlServer;
+use crate::control::{ControlServer, LinkMetrics, RuntimeTelemetry};
 use crate::discovery::{
     DISCOVERY_PORT, DiscoveryRequest, discover_trusted_peer, respond_to_trusted_peer,
 };
@@ -179,7 +179,8 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         edgemouse_transport::format_node_id(config.peer_node)
     );
     let stopping = install_shutdown_handler()?;
-    let _control_server = ControlServer::start(Arc::clone(&stopping))?;
+    let telemetry = RuntimeTelemetry::default();
+    let _control_server = ControlServer::start(Arc::clone(&stopping), telemetry.clone())?;
     let mut reconnecting = false;
     let mut backoff = ReconnectBackoff::default();
 
@@ -209,6 +210,7 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         } else {
             println!("Connecting to the trusted peer…");
         }
+        telemetry.begin_connecting(reconnecting);
         let mut transport = config.transport.clone();
         let mut discovery_responder = None;
         if config.peer_address == PeerAddress::Auto {
@@ -287,6 +289,7 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         } else {
             println!("Connected to {} with mutual TLS", network.peer_name);
         }
+        telemetry.connected(&network.peer_name);
         backoff.reset();
 
         let topology = config.topology(local.screen.clone(), &network.peer_screen)?;
@@ -312,9 +315,11 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
             initial_pointer,
             session_id,
             &stopping,
+            &telemetry,
         )? {
             ConnectionEnd::Stopped => return Ok(()),
             ConnectionEnd::Disconnected(reason) => {
+                telemetry.disconnected();
                 reconnecting = true;
                 let delay = backoff.next_delay();
                 eprintln!(
@@ -355,6 +360,7 @@ fn finish_discovery_responder(responder: Option<DiscoveryResponder>) -> Result<(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_connected(
     config: &LoadedConfig,
     local: &ResolvedScreen,
@@ -363,6 +369,7 @@ fn run_connected(
     initial_pointer: Point,
     session_id: u64,
     stopping: &AtomicBool,
+    telemetry: &RuntimeTelemetry,
 ) -> Result<ConnectionEnd, Box<dyn Error>> {
     let mut capture = platform::start_capture(
         local.screen.bounds,
@@ -402,6 +409,7 @@ fn run_connected(
         session_id,
         stopping,
         clock,
+        telemetry,
     );
 
     let effects = session.disconnect_peer(config.peer_node);
@@ -481,6 +489,7 @@ fn run_loop(
     session_id: u64,
     stopping: &AtomicBool,
     clock: Instant,
+    telemetry: &RuntimeTelemetry,
 ) -> Result<ConnectionEnd, Box<dyn Error>> {
     let mut takeover = LocalTakeoverGesture::new(takeover_edge);
     while !stopping.load(Ordering::Acquire) {
@@ -641,9 +650,28 @@ fn run_loop(
                     max_arrival_gap_ms,
                     superseded_moves,
                 } => {
-                    println!(
-                        "Mouse link: RTT {rtt_ms:.1} ms; interval {send_interval_ms} ms; sent {sent_moves}; skipped {skipped_moves}; merged {coalesced_moves}; received {received_moves}; stale {stale_moves}; superseded {superseded_moves}; arrival jitter {arrival_jitter_ms:.1} ms; max gap {max_arrival_gap_ms:.1} ms"
-                    );
+                    telemetry.update_link(LinkMetrics {
+                        rtt_ms,
+                        jitter_ms: arrival_jitter_ms,
+                        send_interval_ms,
+                        sent_moves,
+                        skipped_moves,
+                        coalesced_moves,
+                        received_moves,
+                        stale_moves,
+                        superseded_moves,
+                    });
+                    if sent_moves > 0
+                        || skipped_moves > 0
+                        || coalesced_moves > 0
+                        || received_moves > 0
+                        || stale_moves > 0
+                        || superseded_moves > 0
+                    {
+                        println!(
+                            "Mouse link: RTT {rtt_ms:.1} ms; interval {send_interval_ms} ms; sent {sent_moves}; skipped {skipped_moves}; merged {coalesced_moves}; received {received_moves}; stale {stale_moves}; superseded {superseded_moves}; arrival jitter {arrival_jitter_ms:.1} ms; max gap {max_arrival_gap_ms:.1} ms"
+                        );
+                    }
                 }
                 NetworkEvent::Disconnected(reason) => {
                     drop(keyboard_injector.release_all());

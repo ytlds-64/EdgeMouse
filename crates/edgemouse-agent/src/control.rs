@@ -2,10 +2,10 @@ use std::error::Error;
 use std::fmt;
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const CONTROL_ADDRESS: &str = "127.0.0.1:43894";
 const REQUEST_MAGIC: &[u8; 8] = b"EDGMCTL1";
@@ -13,8 +13,15 @@ const RESPONSE_MAGIC: &[u8; 8] = b"EDGMACK1";
 const REQUEST_LENGTH: usize = REQUEST_MAGIC.len() + 1;
 const RESPONSE_HEADER_LENGTH: usize = RESPONSE_MAGIC.len() + 1 + 4 + 1;
 const MAX_VERSION_LENGTH: usize = 63;
+const MAX_PEER_NAME_LENGTH: usize = 63;
+const TELEMETRY_VERSION: u8 = 1;
+const TELEMETRY_FIXED_LENGTH: usize = 1 + 1 + 1 + 4 + 8 + 8 + 4 + 4 + 4 + (8 * 6) + 1;
+const MAX_RESPONSE_LENGTH: usize =
+    RESPONSE_HEADER_LENGTH + MAX_VERSION_LENGTH + TELEMETRY_FIXED_LENGTH + MAX_PEER_NAME_LENGTH;
 const CLIENT_TIMEOUT: Duration = Duration::from_millis(500);
 const SERVER_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const FLAG_CONNECTED_SINCE: u8 = 1 << 0;
+const FLAG_LINK_METRICS: u8 = 1 << 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -33,10 +40,157 @@ impl Command {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ConnectionPhase {
+    #[default]
+    Starting = 0,
+    Connecting = 1,
+    Connected = 2,
+    Reconnecting = 3,
+}
+
+impl ConnectionPhase {
+    fn from_byte(value: u8) -> Option<Self> {
+        match value {
+            value if value == Self::Starting as u8 => Some(Self::Starting),
+            value if value == Self::Connecting as u8 => Some(Self::Connecting),
+            value if value == Self::Connected as u8 => Some(Self::Connected),
+            value if value == Self::Reconnecting as u8 => Some(Self::Reconnecting),
+            _ => None,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Connecting => "connecting",
+            Self::Connected => "connected",
+            Self::Reconnecting => "reconnecting",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ConnectionTelemetry {
+    pub phase: ConnectionPhase,
+    pub peer_name: Option<String>,
+    pub connected_since_unix_ms: Option<u64>,
+    pub metrics_updated_unix_ms: Option<u64>,
+    pub reconnect_count: u32,
+    pub rtt_ms: Option<f32>,
+    pub jitter_ms: Option<f32>,
+    pub send_interval_ms: Option<u32>,
+    pub sent_moves: u64,
+    pub skipped_moves: u64,
+    pub coalesced_moves: u64,
+    pub received_moves: u64,
+    pub stale_moves: u64,
+    pub superseded_moves: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LinkMetrics {
+    pub rtt_ms: f64,
+    pub jitter_ms: f64,
+    pub send_interval_ms: u64,
+    pub sent_moves: u64,
+    pub skipped_moves: u64,
+    pub coalesced_moves: u64,
+    pub received_moves: u64,
+    pub stale_moves: u64,
+    pub superseded_moves: u64,
+}
+
+#[derive(Clone, Default)]
+pub struct RuntimeTelemetry {
+    inner: Arc<Mutex<ConnectionTelemetry>>,
+}
+
+impl RuntimeTelemetry {
+    pub fn begin_connecting(&self, reconnecting: bool) {
+        let mut status = self.lock();
+        status.phase = if reconnecting {
+            ConnectionPhase::Reconnecting
+        } else {
+            ConnectionPhase::Connecting
+        };
+    }
+
+    pub fn connected(&self, peer_name: &str) {
+        let mut status = self.lock();
+        status.phase = ConnectionPhase::Connected;
+        status.peer_name = Some(peer_name.to_owned());
+        status.connected_since_unix_ms = Some(unix_time_ms());
+        clear_link_metrics(&mut status);
+    }
+
+    pub fn disconnected(&self) {
+        let mut status = self.lock();
+        if status.phase == ConnectionPhase::Connected {
+            status.reconnect_count = status.reconnect_count.saturating_add(1);
+        }
+        status.phase = ConnectionPhase::Reconnecting;
+        status.connected_since_unix_ms = None;
+        clear_link_metrics(&mut status);
+    }
+
+    pub fn update_link(&self, metrics: LinkMetrics) {
+        let mut status = self.lock();
+        status.metrics_updated_unix_ms = Some(unix_time_ms());
+        status.rtt_ms = finite_f32(metrics.rtt_ms);
+        status.jitter_ms = finite_f32(metrics.jitter_ms);
+        status.send_interval_ms = Some(u32::try_from(metrics.send_interval_ms).unwrap_or(u32::MAX));
+        status.sent_moves = metrics.sent_moves;
+        status.skipped_moves = metrics.skipped_moves;
+        status.coalesced_moves = metrics.coalesced_moves;
+        status.received_moves = metrics.received_moves;
+        status.stale_moves = metrics.stale_moves;
+        status.superseded_moves = metrics.superseded_moves;
+    }
+
+    fn snapshot(&self) -> ConnectionTelemetry {
+        self.lock().clone()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ConnectionTelemetry> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+fn clear_link_metrics(status: &mut ConnectionTelemetry) {
+    status.metrics_updated_unix_ms = None;
+    status.rtt_ms = None;
+    status.jitter_ms = None;
+    status.send_interval_ms = None;
+    status.sent_moves = 0;
+    status.skipped_moves = 0;
+    status.coalesced_moves = 0;
+    status.received_moves = 0;
+    status.stale_moves = 0;
+    status.superseded_moves = 0;
+}
+
+fn finite_f32(value: f64) -> Option<f32> {
+    value
+        .is_finite()
+        .then(|| value.clamp(0.0, f64::from(f32::MAX)) as f32)
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct RunningStatus {
     pub process_id: u32,
     pub version: String,
+    pub connection: ConnectionTelemetry,
 }
 
 #[derive(Debug)]
@@ -63,14 +217,21 @@ pub struct ControlServer {
 }
 
 impl ControlServer {
-    pub fn start(stopping: Arc<AtomicBool>) -> Result<Self, ControlError> {
+    pub fn start(
+        stopping: Arc<AtomicBool>,
+        telemetry: RuntimeTelemetry,
+    ) -> Result<Self, ControlError> {
         let address = CONTROL_ADDRESS
             .parse()
             .map_err(|error| ControlError::new(format!("invalid control address: {error}")))?;
-        Self::start_on(address, stopping)
+        Self::start_on(address, stopping, telemetry)
     }
 
-    fn start_on(address: SocketAddr, stopping: Arc<AtomicBool>) -> Result<Self, ControlError> {
+    fn start_on(
+        address: SocketAddr,
+        stopping: Arc<AtomicBool>,
+        telemetry: RuntimeTelemetry,
+    ) -> Result<Self, ControlError> {
         let socket = UdpSocket::bind(address).map_err(|error| {
             if error.kind() == io::ErrorKind::AddrInUse {
                 ControlError::new(
@@ -97,7 +258,7 @@ impl ControlServer {
         let worker_closing = Arc::clone(&closing);
         let thread = thread::Builder::new()
             .name("edgemouse-control".to_owned())
-            .spawn(move || serve(socket, &stopping, &worker_closing))
+            .spawn(move || serve(socket, &stopping, &worker_closing, &telemetry))
             .map_err(|error| {
                 ControlError::new(format!("failed to start local control channel: {error}"))
             })?;
@@ -142,7 +303,7 @@ fn request(address: &str, command: Command) -> Result<Option<RunningStatus>, Con
         .send_to(&encode_request(command), address)
         .map_err(|error| ControlError::new(format!("failed to contact EdgeMouse: {error}")))?;
 
-    let mut response = [0_u8; RESPONSE_HEADER_LENGTH + MAX_VERSION_LENGTH];
+    let mut response = [0_u8; MAX_RESPONSE_LENGTH];
     match socket.recv_from(&mut response) {
         Ok((length, source)) => {
             if !source.ip().is_loopback() {
@@ -159,11 +320,12 @@ fn request(address: &str, command: Command) -> Result<Option<RunningStatus>, Con
     }
 }
 
-fn serve(socket: UdpSocket, stopping: &AtomicBool, closing: &AtomicBool) {
-    let status = RunningStatus {
-        process_id: std::process::id(),
-        version: env!("CARGO_PKG_VERSION").to_owned(),
-    };
+fn serve(
+    socket: UdpSocket,
+    stopping: &AtomicBool,
+    closing: &AtomicBool,
+    telemetry: &RuntimeTelemetry,
+) {
     let mut request = [0_u8; 64];
 
     while !closing.load(Ordering::Acquire) {
@@ -174,6 +336,11 @@ fn serve(socket: UdpSocket, stopping: &AtomicBool, closing: &AtomicBool) {
                 }
                 let Some(command) = decode_request(&request[..length]) else {
                     continue;
+                };
+                let status = RunningStatus {
+                    process_id: std::process::id(),
+                    version: env!("CARGO_PKG_VERSION").to_owned(),
+                    connection: telemetry.snapshot(),
                 };
                 let response = encode_response(command, &status);
                 drop(socket.send_to(&response, source));
@@ -204,12 +371,77 @@ fn decode_request(request: &[u8]) -> Option<Command> {
 fn encode_response(command: Command, status: &RunningStatus) -> Vec<u8> {
     let version = status.version.as_bytes();
     let version_length = version.len().min(MAX_VERSION_LENGTH);
-    let mut response = Vec::with_capacity(RESPONSE_HEADER_LENGTH + version_length);
+    let peer_name = status
+        .connection
+        .peer_name
+        .as_deref()
+        .unwrap_or("")
+        .as_bytes();
+    let peer_name_length = peer_name.len().min(MAX_PEER_NAME_LENGTH);
+    let mut response = Vec::with_capacity(
+        RESPONSE_HEADER_LENGTH + version_length + TELEMETRY_FIXED_LENGTH + peer_name_length,
+    );
     response.extend_from_slice(RESPONSE_MAGIC);
     response.push(command as u8);
     response.extend_from_slice(&status.process_id.to_be_bytes());
     response.push(u8::try_from(version_length).expect("maximum version length fits in a byte"));
     response.extend_from_slice(&version[..version_length]);
+    response.push(TELEMETRY_VERSION);
+    response.push(status.connection.phase as u8);
+    let mut flags = 0_u8;
+    if status.connection.connected_since_unix_ms.is_some() {
+        flags |= FLAG_CONNECTED_SINCE;
+    }
+    if status.connection.metrics_updated_unix_ms.is_some() {
+        flags |= FLAG_LINK_METRICS;
+    }
+    response.push(flags);
+    response.extend_from_slice(&status.connection.reconnect_count.to_be_bytes());
+    response.extend_from_slice(
+        &status
+            .connection
+            .connected_since_unix_ms
+            .unwrap_or_default()
+            .to_be_bytes(),
+    );
+    response.extend_from_slice(
+        &status
+            .connection
+            .metrics_updated_unix_ms
+            .unwrap_or_default()
+            .to_be_bytes(),
+    );
+    response.extend_from_slice(
+        &status
+            .connection
+            .rtt_ms
+            .unwrap_or_default()
+            .to_bits()
+            .to_be_bytes(),
+    );
+    response.extend_from_slice(
+        &status
+            .connection
+            .jitter_ms
+            .unwrap_or_default()
+            .to_bits()
+            .to_be_bytes(),
+    );
+    response.extend_from_slice(
+        &status
+            .connection
+            .send_interval_ms
+            .unwrap_or_default()
+            .to_be_bytes(),
+    );
+    response.extend_from_slice(&status.connection.sent_moves.to_be_bytes());
+    response.extend_from_slice(&status.connection.skipped_moves.to_be_bytes());
+    response.extend_from_slice(&status.connection.coalesced_moves.to_be_bytes());
+    response.extend_from_slice(&status.connection.received_moves.to_be_bytes());
+    response.extend_from_slice(&status.connection.stale_moves.to_be_bytes());
+    response.extend_from_slice(&status.connection.superseded_moves.to_be_bytes());
+    response.push(u8::try_from(peer_name_length).expect("maximum peer name length fits in a byte"));
+    response.extend_from_slice(&peer_name[..peer_name_length]);
     response
 }
 
@@ -238,23 +470,134 @@ fn decode_response(
             .expect("checked response header length"),
     );
     let version_length = usize::from(response[process_offset + 4]);
-    if version_length > MAX_VERSION_LENGTH
-        || response.len() != RESPONSE_HEADER_LENGTH + version_length
-    {
+    let version_end = RESPONSE_HEADER_LENGTH + version_length;
+    if version_length > MAX_VERSION_LENGTH || response.len() < version_end {
         return Err(ControlError::new(
             "EdgeMouse sent an invalid control response length",
         ));
     }
-    let version = std::str::from_utf8(&response[RESPONSE_HEADER_LENGTH..])
+    let version = std::str::from_utf8(&response[RESPONSE_HEADER_LENGTH..version_end])
         .map_err(|_| ControlError::new("EdgeMouse sent an invalid version string"))?
         .to_owned();
     if version.is_empty() {
         return Err(ControlError::new("EdgeMouse sent an empty version string"));
     }
+
+    let connection = if response.len() == version_end {
+        ConnectionTelemetry::default()
+    } else {
+        decode_telemetry(&response[version_end..])?
+    };
     Ok(RunningStatus {
         process_id,
         version,
+        connection,
     })
+}
+
+fn decode_telemetry(data: &[u8]) -> Result<ConnectionTelemetry, ControlError> {
+    let mut decoder = Decoder::new(data);
+    let telemetry_version = decoder.u8()?;
+    if telemetry_version != TELEMETRY_VERSION {
+        return Err(ControlError::new(format!(
+            "EdgeMouse sent unsupported telemetry version {telemetry_version}"
+        )));
+    }
+    let phase = ConnectionPhase::from_byte(decoder.u8()?)
+        .ok_or_else(|| ControlError::new("EdgeMouse sent an invalid connection phase"))?;
+    let flags = decoder.u8()?;
+    let reconnect_count = decoder.u32()?;
+    let connected_since = decoder.u64()?;
+    let metrics_updated = decoder.u64()?;
+    let rtt_ms = f32::from_bits(decoder.u32()?);
+    let jitter_ms = f32::from_bits(decoder.u32()?);
+    let send_interval_ms = decoder.u32()?;
+    let sent_moves = decoder.u64()?;
+    let skipped_moves = decoder.u64()?;
+    let coalesced_moves = decoder.u64()?;
+    let received_moves = decoder.u64()?;
+    let stale_moves = decoder.u64()?;
+    let superseded_moves = decoder.u64()?;
+    let peer_name_length = usize::from(decoder.u8()?);
+    if peer_name_length > MAX_PEER_NAME_LENGTH {
+        return Err(ControlError::new(
+            "EdgeMouse sent an invalid peer name length",
+        ));
+    }
+    let peer_name_bytes = decoder.bytes(peer_name_length)?;
+    if !decoder.is_finished() {
+        return Err(ControlError::new(
+            "EdgeMouse sent trailing control response data",
+        ));
+    }
+    let peer_name = std::str::from_utf8(peer_name_bytes)
+        .map_err(|_| ControlError::new("EdgeMouse sent an invalid peer name"))?;
+    let metrics_present = flags & FLAG_LINK_METRICS != 0;
+    if metrics_present && (!rtt_ms.is_finite() || !jitter_ms.is_finite()) {
+        return Err(ControlError::new(
+            "EdgeMouse sent invalid connection metrics",
+        ));
+    }
+    Ok(ConnectionTelemetry {
+        phase,
+        peer_name: (!peer_name.is_empty()).then(|| peer_name.to_owned()),
+        connected_since_unix_ms: (flags & FLAG_CONNECTED_SINCE != 0).then_some(connected_since),
+        metrics_updated_unix_ms: metrics_present.then_some(metrics_updated),
+        reconnect_count,
+        rtt_ms: metrics_present.then_some(rtt_ms),
+        jitter_ms: metrics_present.then_some(jitter_ms),
+        send_interval_ms: metrics_present.then_some(send_interval_ms),
+        sent_moves,
+        skipped_moves,
+        coalesced_moves,
+        received_moves,
+        stale_moves,
+        superseded_moves,
+    })
+}
+
+struct Decoder<'a> {
+    data: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> Decoder<'a> {
+    const fn new(data: &'a [u8]) -> Self {
+        Self { data, offset: 0 }
+    }
+
+    fn bytes(&mut self, length: usize) -> Result<&'a [u8], ControlError> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .filter(|end| *end <= self.data.len())
+            .ok_or_else(|| ControlError::new("EdgeMouse sent truncated telemetry data"))?;
+        let bytes = &self.data[self.offset..end];
+        self.offset = end;
+        Ok(bytes)
+    }
+
+    fn array<const LENGTH: usize>(&mut self) -> Result<[u8; LENGTH], ControlError> {
+        self.bytes(LENGTH)?
+            .try_into()
+            .map_err(|_| ControlError::new("EdgeMouse sent malformed telemetry data"))
+    }
+
+    fn u8(&mut self) -> Result<u8, ControlError> {
+        Ok(self.array::<1>()?[0])
+    }
+
+    fn u32(&mut self) -> Result<u32, ControlError> {
+        Ok(u32::from_be_bytes(self.array()?))
+    }
+
+    fn u64(&mut self) -> Result<u64, ControlError> {
+        Ok(u64::from_be_bytes(self.array()?))
+    }
+
+    const fn is_finished(&self) -> bool {
+        self.offset == self.data.len()
+    }
 }
 
 fn is_no_response(error: &io::Error) -> bool {
@@ -287,6 +630,22 @@ mod tests {
         let status = RunningStatus {
             process_id: 42,
             version: "test-version".to_owned(),
+            connection: ConnectionTelemetry {
+                phase: ConnectionPhase::Connected,
+                peer_name: Some("test-peer".to_owned()),
+                connected_since_unix_ms: Some(1_000),
+                metrics_updated_unix_ms: Some(2_000),
+                reconnect_count: 3,
+                rtt_ms: Some(18.5),
+                jitter_ms: Some(2.25),
+                send_interval_ms: Some(4),
+                sent_moves: 10,
+                skipped_moves: 1,
+                coalesced_moves: 2,
+                received_moves: 20,
+                stale_moves: 3,
+                superseded_moves: 4,
+            },
         };
         let response = encode_response(Command::Status, &status);
         assert_eq!(decode_response(&response, Command::Status).unwrap(), status);
@@ -312,12 +671,18 @@ mod tests {
     #[test]
     fn status_and_stop_use_the_loopback_control_channel() {
         let stopping = Arc::new(AtomicBool::new(false));
-        let server = ControlServer::start_on(loopback_ephemeral(), Arc::clone(&stopping)).unwrap();
+        let telemetry = RuntimeTelemetry::default();
+        telemetry.connected("test-peer");
+        let server =
+            ControlServer::start_on(loopback_ephemeral(), Arc::clone(&stopping), telemetry)
+                .unwrap();
         let address = server.address.to_string();
 
         let status = request(&address, Command::Status).unwrap().unwrap();
         assert_eq!(status.process_id, std::process::id());
         assert_eq!(status.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(status.connection.phase, ConnectionPhase::Connected);
+        assert_eq!(status.connection.peer_name.as_deref(), Some("test-peer"));
         assert!(!stopping.load(Ordering::Acquire));
 
         assert!(request(&address, Command::Stop).unwrap().is_some());
@@ -330,9 +695,64 @@ mod tests {
 
     #[test]
     fn a_second_server_cannot_take_the_same_address() {
-        let first = ControlServer::start_on(loopback_ephemeral(), Arc::new(AtomicBool::new(false)))
-            .unwrap();
-        let second = ControlServer::start_on(first.address, Arc::new(AtomicBool::new(false)));
+        let first = ControlServer::start_on(
+            loopback_ephemeral(),
+            Arc::new(AtomicBool::new(false)),
+            RuntimeTelemetry::default(),
+        )
+        .unwrap();
+        let second = ControlServer::start_on(
+            first.address,
+            Arc::new(AtomicBool::new(false)),
+            RuntimeTelemetry::default(),
+        );
         assert!(second.is_err());
+    }
+
+    #[test]
+    fn legacy_status_responses_remain_readable() {
+        let mut response = Vec::new();
+        response.extend_from_slice(RESPONSE_MAGIC);
+        response.push(Command::Status as u8);
+        response.extend_from_slice(&42_u32.to_be_bytes());
+        response.push(5);
+        response.extend_from_slice(b"0.1.0");
+
+        let status = decode_response(&response, Command::Status).unwrap();
+        assert_eq!(status.process_id, 42);
+        assert_eq!(status.version, "0.1.0");
+        assert_eq!(status.connection, ConnectionTelemetry::default());
+    }
+
+    #[test]
+    fn runtime_telemetry_tracks_connection_and_link_quality() {
+        let telemetry = RuntimeTelemetry::default();
+        telemetry.begin_connecting(false);
+        assert_eq!(telemetry.snapshot().phase, ConnectionPhase::Connecting);
+        telemetry.connected("macbook");
+        telemetry.update_link(LinkMetrics {
+            rtt_ms: 19.25,
+            jitter_ms: 2.5,
+            send_interval_ms: 4,
+            sent_moves: 10,
+            skipped_moves: 1,
+            coalesced_moves: 2,
+            received_moves: 20,
+            stale_moves: 3,
+            superseded_moves: 4,
+        });
+        let connected = telemetry.snapshot();
+        assert_eq!(connected.phase, ConnectionPhase::Connected);
+        assert_eq!(connected.peer_name.as_deref(), Some("macbook"));
+        assert_eq!(connected.rtt_ms, Some(19.25));
+        assert_eq!(connected.jitter_ms, Some(2.5));
+        assert!(connected.metrics_updated_unix_ms.is_some());
+
+        telemetry.disconnected();
+        let disconnected = telemetry.snapshot();
+        assert_eq!(disconnected.phase, ConnectionPhase::Reconnecting);
+        assert_eq!(disconnected.reconnect_count, 1);
+        assert_eq!(disconnected.rtt_ms, None);
+        assert_eq!(disconnected.sent_moves, 0);
     }
 }

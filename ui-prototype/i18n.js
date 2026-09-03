@@ -135,6 +135,30 @@
     "设备之间仅交换公开证书；局域网发现结果仍需通过已保存证书完成双向验证。": "Devices exchange public certificates only; discovered peers must still pass mutual verification with saved certificates.",
     "了解安全设计 ›": "Learn about security ›",
     "检查连接质量、系统权限与最近运行情况": "Check connection quality, system permissions, and recent activity",
+    "桌面应用 · 实时状态": "Desktop app · Live status",
+    "正在启动": "Starting",
+    "正在连接": "Connecting",
+    "正在重连": "Reconnecting",
+    "未运行": "Not running",
+    "未知": "Unknown",
+    "本机控制保持可用": "Local control remains available",
+    "等待真实链路数据": "Waiting for live link data",
+    "连接质量良好": "Connection quality is good",
+    "连接质量一般": "Connection quality is fair",
+    "延迟较高": "Latency is high",
+    "请检查系统输入权限": "Check system input permissions",
+    "捕获与注入权限": "Capture and injection permissions",
+    "最近 60 秒 · 每秒刷新": "Last 60 seconds · Updated every second",
+    "等待连接质量数据…": "Waiting for connection quality data…",
+    "实时监控正常": "Live monitoring healthy",
+    "等待连接": "Waiting to connect",
+    "等待数据": "Waiting for data",
+    "可信设备已连接": "Trusted device connected",
+    "本机运行中": "Running locally",
+    "本机服务未启动": "Local service is not running",
+    "后台服务未启动": "Background service is not running",
+    "自动发现与重连已启动": "Auto discovery and reconnection are active",
+    "等待 EdgeMouse 后台服务": "Waiting for the EdgeMouse background service",
     "上次检查：18 分钟前": "Last check: 18 minutes ago",
     "运行完整检查": "Run full check",
     "连接状态": "Connection status",
@@ -356,6 +380,24 @@
   function translateDynamic(value) {
     const checks = value.match(/^检查中 (\d+) \/ (\d+)$/);
     if (checks) return `Checking ${checks[1]} / ${checks[2]}`;
+    const connectedTo = value.match(/^已连接 (.+)$/);
+    if (connectedTo) return `Connected to ${connectedTo[1]}`;
+    const justConnected = value.match(/^刚刚连接 · 重连 (\d+) 次$/);
+    if (justConnected) return `Just connected · ${justConnected[1]} reconnects`;
+    const securePeer = value.match(/^(.+) · 双向 TLS$/);
+    if (securePeer) return `${securePeer[1]} · Mutual TLS`;
+    const connectedSeconds = value.match(/^已持续连接 (\d+) 秒 · 重连 (\d+) 次$/);
+    if (connectedSeconds) return `Connected for ${connectedSeconds[1]} seconds · ${connectedSeconds[2]} reconnects`;
+    const connectedMinutes = value.match(/^已持续连接 (\d+) 分钟 · 重连 (\d+) 次$/);
+    if (connectedMinutes) return `Connected for ${connectedMinutes[1]} minutes · ${connectedMinutes[2]} reconnects`;
+    const connectedHours = value.match(/^已持续连接 (\d+) 小时 (\d+) 分钟 · 重连 (\d+) 次$/);
+    if (connectedHours) return `Connected for ${connectedHours[1]}h ${connectedHours[2]}m · ${connectedHours[3]} reconnects`;
+    const recentStale = value.match(/^最近 5 秒 · (\d+) 个过期事件$/);
+    if (recentStale) return `Last 5 seconds · ${recentStale[1]} stale events`;
+    const liveReconnects = value.match(/^实时监控 · 重连 (\d+) 次$/);
+    if (liveReconnects) return `Live monitoring · ${liveReconnects[1]} reconnects`;
+    const quality = value.match(/^([\d.]+) ms · (良好|一般|较高)$/);
+    if (quality) return `${quality[1]} ms · ${{ 良好: "Good", 一般: "Fair", 较高: "High" }[quality[2]]}`;
     const found = value.match(/^已识别 (\d+) 个显示区域$/);
     if (found) return `${found[1]} display regions detected`;
     const layout = value.match(/^屏幕布局已调整为 (.+)$/);

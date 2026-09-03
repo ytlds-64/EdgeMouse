@@ -14,7 +14,48 @@ struct AgentSnapshot {
     running: bool,
     process_id: Option<u32>,
     version: String,
+    connection: Option<ConnectionSnapshot>,
     error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectionSnapshot {
+    state: String,
+    peer_name: Option<String>,
+    connected_since_unix_ms: Option<u64>,
+    metrics_updated_unix_ms: Option<u64>,
+    reconnect_count: u32,
+    rtt_ms: Option<f32>,
+    jitter_ms: Option<f32>,
+    send_interval_ms: Option<u32>,
+    sent_moves: u64,
+    skipped_moves: u64,
+    coalesced_moves: u64,
+    received_moves: u64,
+    stale_moves: u64,
+    superseded_moves: u64,
+}
+
+impl From<control::ConnectionTelemetry> for ConnectionSnapshot {
+    fn from(telemetry: control::ConnectionTelemetry) -> Self {
+        Self {
+            state: telemetry.phase.as_str().to_owned(),
+            peer_name: telemetry.peer_name,
+            connected_since_unix_ms: telemetry.connected_since_unix_ms,
+            metrics_updated_unix_ms: telemetry.metrics_updated_unix_ms,
+            reconnect_count: telemetry.reconnect_count,
+            rtt_ms: telemetry.rtt_ms,
+            jitter_ms: telemetry.jitter_ms,
+            send_interval_ms: telemetry.send_interval_ms,
+            sent_moves: telemetry.sent_moves,
+            skipped_moves: telemetry.skipped_moves,
+            coalesced_moves: telemetry.coalesced_moves,
+            received_moves: telemetry.received_moves,
+            stale_moves: telemetry.stale_moves,
+            superseded_moves: telemetry.superseded_moves,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -60,12 +101,19 @@ struct AppSnapshot {
 }
 
 #[tauri::command]
-fn get_app_snapshot(state: tauri::State<'_, AppState>) -> AppSnapshot {
+async fn get_app_snapshot(state: tauri::State<'_, AppState>) -> Result<AppSnapshot, String> {
+    let config_path = state.config_path.clone();
+    tauri::async_runtime::spawn_blocking(move || build_app_snapshot(config_path.as_deref()))
+        .await
+        .map_err(|error| format!("failed to read EdgeMouse desktop status: {error}"))
+}
+
+fn build_app_snapshot(config_path: Option<&Path>) -> AppSnapshot {
     AppSnapshot {
         desktop_version: env!("CARGO_PKG_VERSION").to_owned(),
         agent: agent_snapshot(),
         platform: platform_snapshot(),
-        config: config_snapshot(state.config_path.as_deref()),
+        config: config_snapshot(config_path),
     }
 }
 
@@ -93,18 +141,21 @@ fn agent_snapshot() -> AgentSnapshot {
             running: true,
             process_id: Some(status.process_id),
             version: status.version,
+            connection: Some(status.connection.into()),
             error: None,
         },
         Ok(None) => AgentSnapshot {
             running: false,
             process_id: None,
             version: env!("CARGO_PKG_VERSION").to_owned(),
+            connection: None,
             error: None,
         },
         Err(error) => AgentSnapshot {
             running: false,
             process_id: None,
             version: env!("CARGO_PKG_VERSION").to_owned(),
+            connection: None,
             error: Some(error.to_string()),
         },
     }

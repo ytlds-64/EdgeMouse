@@ -51,7 +51,8 @@ relay servers, tray/menu-bar integration, installers, and elevated Windows deskt
   commands.
 - A Tauri 2 desktop application that reuses the EdgeMouse UI on Windows and
   macOS and reads the real agent version, local process state, configuration,
-  trusted node summary, platform permission state, and detected desktop geometry.
+  trusted node summary, platform permission state, detected desktop geometry,
+  current connection phase, reconnect count, latency, jitter, and input counters.
 - Working light/dark/system themes and Simplified Chinese/English UI switching.
 
 Windows uses a fixed mouse capture anchor while control is remote. Raw Input
@@ -76,11 +77,11 @@ The executable is `target/release/edgemouse` on macOS and
 
 ### Desktop application
 
-The first desktop integration stage keeps the proven background agent separate
+The desktop application keeps the proven background agent separate
 from the window. This means opening or closing the window does not interrupt an
-active mouse/keyboard session. The connection, input, layout, and diagnostics
-controls that still say “prototype” remain demonstrations until their Rust
-commands are connected in the next stages.
+active mouse/keyboard session. Connection state and the diagnostics quality chart
+are live; configuration controls that still say “prototype” remain demonstrations
+until their Rust commands are connected in the next stages.
 
 Build and open the desktop window on macOS from the repository root:
 
@@ -95,10 +96,11 @@ On Windows, after pulling the latest `main`, use the included PowerShell script:
 powershell -ExecutionPolicy Bypass -File .\scripts\build-run-desktop-windows.ps1
 ```
 
-It creates `target\release\edgemouse-desktop.exe`, validates the existing
-`edgemouse.toml` when the agent binary is available, then opens the desktop
-window. Windows 11 already includes the WebView2 runtime used by Tauri; older
-Windows installations may need the current WebView2 Runtime installed first.
+It safely restarts and rebuilds both the background service and desktop app,
+validates the existing `edgemouse.toml`, starts the updated background service,
+then opens the desktop window. Windows 11 already includes the WebView2 runtime
+used by Tauri; older Windows installations may need the current WebView2 Runtime
+installed first.
 
 ## One-command preparation
 
@@ -380,6 +382,9 @@ control.
 EdgeMouse 0.5.0 adds Windows Raw Input movement and ordered raw button/wheel
 capture after handoff. The existing low-level hook remains active as the safety
 suppression and automatic fallback layer. Protocol v5 is unchanged.
+EdgeMouse 0.5.1 adds live local telemetry for the desktop app: connection phase,
+reconnect count, five-second RTT and arrival-jitter samples, and recent movement
+counters. The UI plots the latest 60 seconds without parsing runtime log text.
 
 ## Verify the source tree
 
