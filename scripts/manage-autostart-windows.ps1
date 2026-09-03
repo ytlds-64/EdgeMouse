@@ -14,6 +14,8 @@ Set-StrictMode -Version Latest
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $BinaryPath = Join-Path $ProjectRoot "target\release\edgemouse.exe"
 $RunnerPath = Join-Path $PSScriptRoot "run-windows-with-log.ps1"
+$HiddenRunnerPath = Join-Path $PSScriptRoot "run-windows-hidden.vbs"
+$WscriptPath = Join-Path $env:SystemRoot "System32\wscript.exe"
 if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
     $ConfigPath = Join-Path $ProjectRoot "edgemouse.toml"
 } elseif (-not [System.IO.Path]::IsPathRooted($ConfigPath)) {
@@ -30,6 +32,12 @@ function Test-EdgeMouseFiles {
     }
     if (-not (Test-Path -LiteralPath $RunnerPath -PathType Leaf)) {
         throw "EdgeMouse log runner not found: $RunnerPath"
+    }
+    if (-not (Test-Path -LiteralPath $HiddenRunnerPath -PathType Leaf)) {
+        throw "EdgeMouse hidden runner not found: $HiddenRunnerPath"
+    }
+    if (-not (Test-Path -LiteralPath $WscriptPath -PathType Leaf)) {
+        throw "Windows Script Host was not found: $WscriptPath"
     }
     if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
         throw "EdgeMouse configuration not found: $ConfigPath"
@@ -64,18 +72,31 @@ function Show-EdgeMouseStatus {
     Write-Host "Log: $CurrentLog"
 }
 
+function Set-EdgeMouseStartupShortcut {
+    $Shell = New-Object -ComObject WScript.Shell
+    $Shortcut = $Shell.CreateShortcut($ShortcutPath)
+    $Shortcut.TargetPath = $WscriptPath
+    $Shortcut.Arguments = "`"$HiddenRunnerPath`" `"$ConfigPath`""
+    $Shortcut.WorkingDirectory = $ProjectRoot
+    $Shortcut.WindowStyle = 1
+    $Shortcut.Description = "Start EdgeMouse silently with logging after Windows sign-in"
+    $Shortcut.Save()
+}
+
 function Start-EdgeMouse {
     Test-EdgeMouseFiles
+    if (Test-Path -LiteralPath $ShortcutPath -PathType Leaf) {
+        Set-EdgeMouseStartupShortcut
+    }
     if (Test-EdgeMouseRunning) {
         Write-Host "EdgeMouse is already running"
         return
     }
 
-    $Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$RunnerPath`" -ConfigPath `"$ConfigPath`""
-    Start-Process -FilePath "powershell.exe" `
+    $Arguments = "`"$HiddenRunnerPath`" `"$ConfigPath`""
+    Start-Process -FilePath $WscriptPath `
         -ArgumentList $Arguments `
-        -WorkingDirectory $ProjectRoot `
-        -WindowStyle Minimized | Out-Null
+        -WorkingDirectory $ProjectRoot | Out-Null
 
     $Deadline = (Get-Date).AddSeconds(10)
     do {
@@ -113,14 +134,7 @@ switch ($Action) {
         }
         Stop-EdgeMouse
 
-        $Shell = New-Object -ComObject WScript.Shell
-        $Shortcut = $Shell.CreateShortcut($ShortcutPath)
-        $Shortcut.TargetPath = "powershell.exe"
-        $Shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$RunnerPath`" -ConfigPath `"$ConfigPath`""
-        $Shortcut.WorkingDirectory = $ProjectRoot
-        $Shortcut.WindowStyle = 7
-        $Shortcut.Description = "Start EdgeMouse with logging after Windows sign-in"
-        $Shortcut.Save()
+        Set-EdgeMouseStartupShortcut
         Write-Host "EdgeMouse login startup installed"
         Start-EdgeMouse
         Show-EdgeMouseStatus

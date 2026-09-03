@@ -420,6 +420,12 @@ host so display scaling cannot expose a dark seam around the rounded corners.
 It also replaces the improvised macOS device mark with a crisp vector Apple
 silhouette. Protocol v6 is unchanged and remains connection-compatible with
 0.5.3.
+EdgeMouse 0.5.7 replaces that approximate device mark with the standardized
+Simple Icons Apple vector and starts the Windows background agent through
+Windows Script Host without opening a PowerShell window. Runtime output is
+still written to the current and archived log files, while the visible runner
+remains available for manual diagnostics. Protocol v6 is unchanged and remains
+connection-compatible with 0.5.3.
 
 ## Verify the source tree
 
