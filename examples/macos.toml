@@ -29,5 +29,8 @@ peer_on = "left"
 hysteresis = 8
 timeout_ms = 1500
 connect_timeout_seconds = 30
+# These preferences apply while this Mac controls the Windows peer.
+reverse_scroll_horizontal = false
+reverse_scroll_vertical = false
 # Kept in the shared configuration schema; only the Windows agent uses this.
 windows_raw_input = true

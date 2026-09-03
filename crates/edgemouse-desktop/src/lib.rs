@@ -1,6 +1,7 @@
 use edgemouse_agent::config::{LoadedConfig, PeerAddress};
 use edgemouse_agent::{control, platform};
 use serde::Serialize;
+use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
@@ -89,6 +90,8 @@ struct ConfigSnapshot {
     peer_on: Option<String>,
     entry_hysteresis: Option<f64>,
     peer_timeout_ms: Option<u64>,
+    reverse_scroll_horizontal: Option<bool>,
+    reverse_scroll_vertical: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -100,12 +103,46 @@ struct AppSnapshot {
     config: ConfigSnapshot,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedScrollSettings {
+    applied_live: bool,
+    warning: Option<String>,
+}
+
 #[tauri::command]
 async fn get_app_snapshot(state: tauri::State<'_, AppState>) -> Result<AppSnapshot, String> {
     let config_path = state.config_path.clone();
     tauri::async_runtime::spawn_blocking(move || build_app_snapshot(config_path.as_deref()))
         .await
         .map_err(|error| format!("failed to read EdgeMouse desktop status: {error}"))
+}
+
+#[tauri::command]
+async fn save_scroll_settings(
+    state: tauri::State<'_, AppState>,
+    reverse_horizontal: bool,
+    reverse_vertical: bool,
+) -> Result<SavedScrollSettings, String> {
+    let path = state
+        .config_path
+        .clone()
+        .ok_or_else(|| "未找到 edgemouse.toml；无法保存滚动方向".to_owned())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        persist_scroll_settings(&path, reverse_horizontal, reverse_vertical)?;
+        let (applied_live, warning) =
+            match control::update_scroll_settings(reverse_horizontal, reverse_vertical) {
+                Ok(Some(_)) => (true, None),
+                Ok(None) => (false, Some("设置已保存；后台服务下次启动时生效".to_owned())),
+                Err(error) => (false, Some(format!("设置已保存；实时更新失败：{error}"))),
+            };
+        Ok(SavedScrollSettings {
+            applied_live,
+            warning,
+        })
+    })
+    .await
+    .map_err(|error| format!("保存滚动方向的后台任务失败：{error}"))?
 }
 
 fn build_app_snapshot(config_path: Option<&Path>) -> AppSnapshot {
@@ -210,6 +247,8 @@ fn config_snapshot(path: Option<&Path>) -> ConfigSnapshot {
             peer_on: Some(format!("{:?}", config.peer_on).to_ascii_lowercase()),
             entry_hysteresis: Some(config.session.entry_hysteresis),
             peer_timeout_ms: Some(config.session.peer_timeout_ms),
+            reverse_scroll_horizontal: Some(config.reverse_scroll_horizontal),
+            reverse_scroll_vertical: Some(config.reverse_scroll_vertical),
         },
         Err(error) => empty_config(Some(path), &error.to_string()),
     }
@@ -233,7 +272,92 @@ fn empty_config(path: Option<&Path>, error: &str) -> ConfigSnapshot {
         peer_on: None,
         entry_hysteresis: None,
         peer_timeout_ms: None,
+        reverse_scroll_horizontal: None,
+        reverse_scroll_vertical: None,
     }
+}
+
+fn persist_scroll_settings(
+    path: &Path,
+    reverse_horizontal: bool,
+    reverse_vertical: bool,
+) -> Result<(), String> {
+    let original = fs::read_to_string(path)
+        .map_err(|error| format!("读取 {} 失败：{error}", path.display()))?;
+    let updated = scroll_settings_source(&original, reverse_horizontal, reverse_vertical);
+    fs::write(path, updated).map_err(|error| format!("写入 {} 失败：{error}", path.display()))?;
+    if let Err(error) = LoadedConfig::load(path) {
+        let restore_error = fs::write(path, original).err();
+        return Err(match restore_error {
+            Some(restore_error) => {
+                format!("保存后的配置无效：{error}；恢复原配置也失败：{restore_error}")
+            }
+            None => format!("保存后的配置无效，已恢复原配置：{error}"),
+        });
+    }
+    Ok(())
+}
+
+fn scroll_settings_source(
+    source: &str,
+    reverse_horizontal: bool,
+    reverse_vertical: bool,
+) -> String {
+    let newline = if source.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let had_trailing_newline = source.ends_with('\n');
+    let mut lines = source.lines().map(str::to_owned).collect::<Vec<_>>();
+    let session_start = lines.iter().position(|line| line.trim() == "[session]");
+    let start = match session_start {
+        Some(index) => index,
+        None => {
+            if !lines.is_empty() && !lines.last().is_some_and(|line| line.trim().is_empty()) {
+                lines.push(String::new());
+            }
+            lines.push("[session]".to_owned());
+            lines.len() - 1
+        }
+    };
+    let mut end = lines
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find_map(|(index, line)| {
+            let line = line.trim();
+            (line.starts_with('[') && line.ends_with(']')).then_some(index)
+        })
+        .unwrap_or(lines.len());
+    let mut insertion_index = end;
+    while insertion_index > start + 1 && lines[insertion_index - 1].trim().is_empty() {
+        insertion_index -= 1;
+    }
+
+    for (key, enabled) in [
+        ("reverse_scroll_horizontal", reverse_horizontal),
+        ("reverse_scroll_vertical", reverse_vertical),
+    ] {
+        let existing = lines[start + 1..end].iter().position(|line| {
+            line.split_once('=')
+                .is_some_and(|(candidate, _)| candidate.trim() == key)
+        });
+        let replacement = format!("{key} = {enabled}");
+        if let Some(offset) = existing {
+            lines[start + 1 + offset] = replacement;
+        } else {
+            lines.insert(insertion_index, replacement);
+            insertion_index += 1;
+            end += 1;
+        }
+    }
+
+    let mut updated = lines.join(newline);
+    if had_trailing_newline || source.is_empty() {
+        updated.push_str(newline);
+    }
+    updated
 }
 
 fn format_node(value: u128) -> String {
@@ -268,7 +392,44 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_app_snapshot, window_action])
+        .invoke_handler(tauri::generate_handler![
+            get_app_snapshot,
+            save_scroll_settings,
+            window_action
+        ])
         .run(tauri::generate_context!())
         .expect("failed to run EdgeMouse desktop application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scroll_settings_source;
+
+    #[test]
+    fn scroll_settings_are_inserted_without_reformatting_other_tables() {
+        let source = "[local]\r\nname = \"Windows\"\r\n\r\n[session]\r\ntimeout_ms = 1500\r\n\r\n[layout]\r\npeer_on = \"right\"\r\n";
+        let updated = scroll_settings_source(source, true, false);
+        assert!(updated.contains("timeout_ms = 1500\r\nreverse_scroll_horizontal = true\r\nreverse_scroll_vertical = false\r\n\r\n[layout]"));
+        assert!(updated.contains("[local]\r\nname = \"Windows\""));
+    }
+
+    #[test]
+    fn scroll_settings_replace_existing_values() {
+        let source =
+            "[session]\nreverse_scroll_horizontal = false\nreverse_scroll_vertical = true\n";
+        let updated = scroll_settings_source(source, true, false);
+        assert_eq!(
+            updated,
+            "[session]\nreverse_scroll_horizontal = true\nreverse_scroll_vertical = false\n"
+        );
+    }
+
+    #[test]
+    fn missing_session_table_is_added() {
+        let source = "[layout]\npeer_on = \"right\"\n";
+        let updated = scroll_settings_source(source, false, true);
+        assert!(updated.ends_with(
+            "\n[session]\nreverse_scroll_horizontal = false\nreverse_scroll_vertical = true\n"
+        ));
+    }
 }

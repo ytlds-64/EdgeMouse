@@ -27,6 +27,8 @@
     "18 ms · 良好": "18 ms · Good",
     "反转横向滚动": "Reverse horizontal scrolling",
     "反转纵向滚动": "Reverse vertical scrolling",
+    "反转滚轮方向": "Reverse wheel direction",
+    "反转滚轮与触控板的纵向滚动": "Reverse vertical mouse-wheel and trackpad scrolling",
     "设置会在两台设备下次连接时同步": "Settings sync the next time both devices connect",
     "保存设置": "Save settings",
     "按实际摆放位置排列设备，边缘切换会自动匹配": "Arrange devices to match their physical positions",
@@ -148,6 +150,9 @@
     "延迟较高": "Latency is high",
     "请检查系统输入权限": "Check system input permissions",
     "捕获与注入权限": "Capture and injection permissions",
+    "无需授权": "No permission required",
+    "Windows 输入接口可用": "Windows input interface available",
+    "辅助功能与输入监控": "Accessibility and Input Monitoring",
     "最近 60 秒 · 每秒刷新": "Last 60 seconds · Updated every second",
     "等待连接质量数据…": "Waiting for connection quality data…",
     "实时监控正常": "Live monitoring healthy",
@@ -326,6 +331,11 @@
     "有尚未保存的输入设置": "There are unsaved input settings",
     "两个控制方向的设置已分别保存": "Both control directions have been saved",
     "两个控制方向已恢复为推荐值": "Both control directions restored to recommended values",
+    "正在读取本机配置，请稍后重试": "Reading local configuration; try again shortly",
+    "请在另一台设备上设置这个控制方向": "Configure this control direction on the other device",
+    "滚动方向已保存并立即生效": "Scroll direction saved and applied immediately",
+    "滚动方向已保存；其他输入选项仍为界面预览": "Scroll direction saved; other input options are still interface previews",
+    "设置已保存；后台服务下次启动时生效": "Settings saved; they will apply when the background service next starts",
     "等待检查": "Waiting",
     "检查中": "Checking",
     "正在检查": "Checking",
@@ -392,8 +402,10 @@
     if (connectedMinutes) return `Connected for ${connectedMinutes[1]} minutes · ${connectedMinutes[2]} reconnects`;
     const connectedHours = value.match(/^已持续连接 (\d+) 小时 (\d+) 分钟 · 重连 (\d+) 次$/);
     if (connectedHours) return `Connected for ${connectedHours[1]}h ${connectedHours[2]}m · ${connectedHours[3]} reconnects`;
-    const recentStale = value.match(/^最近 5 秒 · (\d+) 个过期事件$/);
-    if (recentStale) return `Last 5 seconds · ${recentStale[1]} stale events`;
+    const recentStale = value.match(/^RTT 变化 · (\d+) 个过期事件$/);
+    if (recentStale) return `RTT variation · ${recentStale[1]} stale events`;
+    const saveScrollError = value.match(/^无法保存滚动方向：(.+)$/);
+    if (saveScrollError) return `Unable to save scroll direction: ${saveScrollError[1]}`;
     const liveReconnects = value.match(/^实时监控 · 重连 (\d+) 次$/);
     if (liveReconnects) return `Live monitoring · ${liveReconnects[1]} reconnects`;
     const quality = value.match(/^([\d.]+) ms · (良好|一般|较高)$/);

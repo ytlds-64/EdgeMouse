@@ -26,6 +26,8 @@ pub struct LoadedConfig {
     pub peer_on: Edge,
     pub session: SessionConfig,
     pub windows_raw_input: bool,
+    pub reverse_scroll_horizontal: bool,
+    pub reverse_scroll_vertical: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -152,6 +154,8 @@ struct RawSession {
     timeout_ms: u64,
     connect_timeout_seconds: u64,
     windows_raw_input: bool,
+    reverse_scroll_horizontal: bool,
+    reverse_scroll_vertical: bool,
 }
 
 impl Default for RawSession {
@@ -161,6 +165,8 @@ impl Default for RawSession {
             timeout_ms: 1_500,
             connect_timeout_seconds: 30,
             windows_raw_input: true,
+            reverse_scroll_horizontal: false,
+            reverse_scroll_vertical: false,
         }
     }
 }
@@ -216,6 +222,8 @@ impl RawConfig {
             peer_on,
             session,
             windows_raw_input: self.session.windows_raw_input,
+            reverse_scroll_horizontal: self.session.reverse_scroll_horizontal,
+            reverse_scroll_vertical: self.session.reverse_scroll_vertical,
         })
     }
 }
@@ -385,6 +393,8 @@ mod tests {
         assert_eq!(session.timeout_ms, 1_500);
         assert_eq!(session.connect_timeout_seconds, 30);
         assert!(session.windows_raw_input);
+        assert!(!session.reverse_scroll_horizontal);
+        assert!(!session.reverse_scroll_vertical);
     }
 
     #[test]

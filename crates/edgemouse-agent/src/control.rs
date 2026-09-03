@@ -11,6 +11,7 @@ const CONTROL_ADDRESS: &str = "127.0.0.1:43894";
 const REQUEST_MAGIC: &[u8; 8] = b"EDGMCTL1";
 const RESPONSE_MAGIC: &[u8; 8] = b"EDGMACK1";
 const REQUEST_LENGTH: usize = REQUEST_MAGIC.len() + 1;
+const SCROLL_REQUEST_LENGTH: usize = REQUEST_LENGTH + 1;
 const RESPONSE_HEADER_LENGTH: usize = RESPONSE_MAGIC.len() + 1 + 4 + 1;
 const MAX_VERSION_LENGTH: usize = 63;
 const MAX_PEER_NAME_LENGTH: usize = 63;
@@ -28,6 +29,7 @@ const FLAG_LINK_METRICS: u8 = 1 << 1;
 enum Command {
     Status = 1,
     Stop = 2,
+    SetScroll = 3,
 }
 
 impl Command {
@@ -35,9 +37,22 @@ impl Command {
         match value {
             value if value == Self::Status as u8 => Some(Self::Status),
             value if value == Self::Stop as u8 => Some(Self::Stop),
+            value if value == Self::SetScroll as u8 => Some(Self::SetScroll),
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScrollSettings {
+    pub reverse_horizontal: bool,
+    pub reverse_vertical: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ControlRequest {
+    command: Command,
+    scroll: Option<ScrollSettings>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -102,12 +117,42 @@ pub struct LinkMetrics {
     pub superseded_moves: u64,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RuntimeTelemetry {
     inner: Arc<Mutex<ConnectionTelemetry>>,
+    reverse_scroll_horizontal: Arc<AtomicBool>,
+    reverse_scroll_vertical: Arc<AtomicBool>,
+}
+
+impl Default for RuntimeTelemetry {
+    fn default() -> Self {
+        Self::with_scroll_settings(false, false)
+    }
 }
 
 impl RuntimeTelemetry {
+    pub fn with_scroll_settings(reverse_horizontal: bool, reverse_vertical: bool) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(ConnectionTelemetry::default())),
+            reverse_scroll_horizontal: Arc::new(AtomicBool::new(reverse_horizontal)),
+            reverse_scroll_vertical: Arc::new(AtomicBool::new(reverse_vertical)),
+        }
+    }
+
+    pub fn set_scroll_settings(&self, settings: ScrollSettings) {
+        self.reverse_scroll_horizontal
+            .store(settings.reverse_horizontal, Ordering::Release);
+        self.reverse_scroll_vertical
+            .store(settings.reverse_vertical, Ordering::Release);
+    }
+
+    pub fn scroll_settings(&self) -> ScrollSettings {
+        ScrollSettings {
+            reverse_horizontal: self.reverse_scroll_horizontal.load(Ordering::Acquire),
+            reverse_vertical: self.reverse_scroll_vertical.load(Ordering::Acquire),
+        }
+    }
+
     pub fn begin_connecting(&self, reconnecting: bool) {
         let mut status = self.lock();
         status.phase = if reconnecting {
@@ -291,7 +336,27 @@ pub fn request_stop() -> Result<Option<RunningStatus>, ControlError> {
     request(CONTROL_ADDRESS, Command::Stop)
 }
 
+pub fn update_scroll_settings(
+    reverse_horizontal: bool,
+    reverse_vertical: bool,
+) -> Result<Option<RunningStatus>, ControlError> {
+    let settings = ScrollSettings {
+        reverse_horizontal,
+        reverse_vertical,
+    };
+    let packet = encode_scroll_request(settings);
+    request_packet(CONTROL_ADDRESS, Command::SetScroll, &packet)
+}
+
 fn request(address: &str, command: Command) -> Result<Option<RunningStatus>, ControlError> {
+    request_packet(address, command, &encode_request(command))
+}
+
+fn request_packet(
+    address: &str,
+    command: Command,
+    packet: &[u8],
+) -> Result<Option<RunningStatus>, ControlError> {
     let socket = UdpSocket::bind("127.0.0.1:0")
         .map_err(|error| ControlError::new(format!("failed to open control client: {error}")))?;
     socket
@@ -300,7 +365,7 @@ fn request(address: &str, command: Command) -> Result<Option<RunningStatus>, Con
             ControlError::new(format!("failed to configure control client: {error}"))
         })?;
     socket
-        .send_to(&encode_request(command), address)
+        .send_to(packet, address)
         .map_err(|error| ControlError::new(format!("failed to contact EdgeMouse: {error}")))?;
 
     let mut response = [0_u8; MAX_RESPONSE_LENGTH];
@@ -334,17 +399,20 @@ fn serve(
                 if !source.ip().is_loopback() {
                     continue;
                 }
-                let Some(command) = decode_request(&request[..length]) else {
+                let Some(request) = decode_request(&request[..length]) else {
                     continue;
                 };
+                if let Some(settings) = request.scroll {
+                    telemetry.set_scroll_settings(settings);
+                }
                 let status = RunningStatus {
                     process_id: std::process::id(),
                     version: env!("CARGO_PKG_VERSION").to_owned(),
                     connection: telemetry.snapshot(),
                 };
-                let response = encode_response(command, &status);
+                let response = encode_response(request.command, &status);
                 drop(socket.send_to(&response, source));
-                if command == Command::Stop {
+                if request.command == Command::Stop {
                     stopping.store(true, Ordering::Release);
                 }
             }
@@ -361,11 +429,35 @@ fn encode_request(command: Command) -> [u8; REQUEST_LENGTH] {
     request
 }
 
-fn decode_request(request: &[u8]) -> Option<Command> {
-    if request.len() != REQUEST_LENGTH || &request[..REQUEST_MAGIC.len()] != REQUEST_MAGIC {
+fn encode_scroll_request(settings: ScrollSettings) -> [u8; SCROLL_REQUEST_LENGTH] {
+    let mut request = [0_u8; SCROLL_REQUEST_LENGTH];
+    request[..REQUEST_MAGIC.len()].copy_from_slice(REQUEST_MAGIC);
+    request[REQUEST_MAGIC.len()] = Command::SetScroll as u8;
+    request[REQUEST_LENGTH] =
+        u8::from(settings.reverse_horizontal) | (u8::from(settings.reverse_vertical) << 1);
+    request
+}
+
+fn decode_request(request: &[u8]) -> Option<ControlRequest> {
+    if request.len() < REQUEST_LENGTH || &request[..REQUEST_MAGIC.len()] != REQUEST_MAGIC {
         return None;
     }
-    Command::from_byte(request[REQUEST_MAGIC.len()])
+    let command = Command::from_byte(request[REQUEST_MAGIC.len()])?;
+    let scroll = match command {
+        Command::Status | Command::Stop if request.len() == REQUEST_LENGTH => None,
+        Command::SetScroll if request.len() == SCROLL_REQUEST_LENGTH => {
+            let flags = request[REQUEST_LENGTH];
+            if flags & !0b11 != 0 {
+                return None;
+            }
+            Some(ScrollSettings {
+                reverse_horizontal: flags & 0b01 != 0,
+                reverse_vertical: flags & 0b10 != 0,
+            })
+        }
+        _ => return None,
+    };
+    Some(ControlRequest { command, scroll })
 }
 
 fn encode_response(command: Command, status: &RunningStatus) -> Vec<u8> {
@@ -627,6 +719,20 @@ mod tests {
         request[0] ^= 0xff;
         assert_eq!(decode_request(&request), None);
 
+        let status_request = decode_request(&encode_request(Command::Status)).unwrap();
+        assert_eq!(status_request.command, Command::Status);
+        assert_eq!(status_request.scroll, None);
+        let scroll = ScrollSettings {
+            reverse_horizontal: true,
+            reverse_vertical: false,
+        };
+        let scroll_request = decode_request(&encode_scroll_request(scroll)).unwrap();
+        assert_eq!(scroll_request.command, Command::SetScroll);
+        assert_eq!(scroll_request.scroll, Some(scroll));
+        let mut invalid_scroll = encode_scroll_request(scroll);
+        invalid_scroll[REQUEST_LENGTH] |= 0b100;
+        assert_eq!(decode_request(&invalid_scroll), None);
+
         let status = RunningStatus {
             process_id: 42,
             version: "test-version".to_owned(),
@@ -673,9 +779,12 @@ mod tests {
         let stopping = Arc::new(AtomicBool::new(false));
         let telemetry = RuntimeTelemetry::default();
         telemetry.connected("test-peer");
-        let server =
-            ControlServer::start_on(loopback_ephemeral(), Arc::clone(&stopping), telemetry)
-                .unwrap();
+        let server = ControlServer::start_on(
+            loopback_ephemeral(),
+            Arc::clone(&stopping),
+            telemetry.clone(),
+        )
+        .unwrap();
         let address = server.address.to_string();
 
         let status = request(&address, Command::Status).unwrap().unwrap();
@@ -684,6 +793,17 @@ mod tests {
         assert_eq!(status.connection.phase, ConnectionPhase::Connected);
         assert_eq!(status.connection.peer_name.as_deref(), Some("test-peer"));
         assert!(!stopping.load(Ordering::Acquire));
+
+        let scroll = ScrollSettings {
+            reverse_horizontal: true,
+            reverse_vertical: true,
+        };
+        assert!(
+            request_packet(&address, Command::SetScroll, &encode_scroll_request(scroll),)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(telemetry.scroll_settings(), scroll);
 
         assert!(request(&address, Command::Stop).unwrap().is_some());
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -727,6 +847,13 @@ mod tests {
     #[test]
     fn runtime_telemetry_tracks_connection_and_link_quality() {
         let telemetry = RuntimeTelemetry::default();
+        assert_eq!(telemetry.scroll_settings(), ScrollSettings::default());
+        let scroll = ScrollSettings {
+            reverse_horizontal: true,
+            reverse_vertical: false,
+        };
+        telemetry.set_scroll_settings(scroll);
+        assert_eq!(telemetry.scroll_settings(), scroll);
         telemetry.begin_connecting(false);
         assert_eq!(telemetry.snapshot().phase, ConnectionPhase::Connecting);
         telemetry.connected("macbook");

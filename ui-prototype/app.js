@@ -24,6 +24,8 @@ function showToast(message) {
   toastTimer = window.setTimeout(() => toast.classList.remove("is-visible"), 1800);
 }
 
+window.showEdgeMouseToast = showToast;
+
 function showPage(name) {
   navItems.forEach((item) => item.classList.toggle("is-active", item.dataset.page === name));
   pages.forEach((page) => page.classList.toggle("is-active", page.id === `page-${name}`));
@@ -202,11 +204,35 @@ document.querySelectorAll('[data-input-choice="trigger"] button').forEach((butto
 });
 
 document.querySelector(".input-save-button")?.addEventListener("click", () => {
+  if (window.__TAURI__?.core?.invoke) return;
   inputSettingsDirty = false;
   inputSaveStatus.textContent = "两个控制方向的设置已分别保存";
   inputSaveStatus.classList.remove("is-dirty");
   showToast("双向输入设置已保存（原型演示）");
 });
+
+window.EdgeMouseInputSettings = {
+  getActiveProfile() {
+    return activeInputProfile;
+  },
+  getProfile(name) {
+    const profile = inputProfiles[name];
+    return profile ? { ...profile } : undefined;
+  },
+  applyLocalProfile(name, settings) {
+    const profile = inputProfiles[name];
+    if (!profile || inputSettingsDirty) return;
+    if (typeof settings.horizontal === "boolean") profile.horizontal = settings.horizontal;
+    if (typeof settings.vertical === "boolean") profile.vertical = settings.vertical;
+    if (activeInputProfile === name) renderInputProfile();
+    syncOverviewInputSettings();
+  },
+  markSaved(message) {
+    inputSettingsDirty = false;
+    inputSaveStatus.textContent = message;
+    inputSaveStatus.classList.remove("is-dirty");
+  },
+};
 
 renderInputProfile();
 syncOverviewInputSettings();

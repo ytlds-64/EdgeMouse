@@ -15,6 +15,8 @@ relay servers, tray/menu-bar integration, installers, and elevated Windows deskt
 - Left, right, top, or bottom edge switching with entry hysteresis.
 - Primary, secondary, middle, back, and forward buttons.
 - Vertical and horizontal scrolling.
+- Independent horizontal and wheel/vertical scroll reversal for each control
+  direction, saved locally on the computer that owns the physical input.
 - Bidirectional keyboard forwarding while the local mouse owns the peer,
   including modifiers, navigation, function keys, numpad keys, and key repeat.
 - Cross-platform shortcut mapping: Windows `Ctrl` becomes Mac `Command` and Mac
@@ -53,6 +55,8 @@ relay servers, tray/menu-bar integration, installers, and elevated Windows deskt
   macOS and reads the real agent version, local process state, configuration,
   trusted node summary, platform permission state, detected desktop geometry,
   current connection phase, reconnect count, latency, jitter, and input counters.
+- Live desktop scroll-direction controls that persist to `edgemouse.toml` and
+  update an already-running background agent without reconnecting.
 - Working light/dark/system themes and Simplified Chinese/English UI switching.
 
 Windows uses a fixed mouse capture anchor while control is remote. Raw Input
@@ -80,8 +84,10 @@ The executable is `target/release/edgemouse` on macOS and
 The desktop application keeps the proven background agent separate
 from the window. This means opening or closing the window does not interrupt an
 active mouse/keyboard session. Connection state and the diagnostics quality chart
-are live; configuration controls that still say “prototype” remain demonstrations
-until their Rust commands are connected in the next stages.
+are live. The horizontal and wheel-direction switches on the Input page are
+connected to the local background agent; configuration controls that still say
+“prototype” remain demonstrations until their Rust commands are connected in
+the next stages.
 
 Build and open the desktop window on macOS from the repository root:
 
@@ -385,6 +391,11 @@ suppression and automatic fallback layer. Protocol v5 is unchanged.
 EdgeMouse 0.5.1 adds live local telemetry for the desktop app: connection phase,
 reconnect count, five-second RTT and arrival-jitter samples, and recent movement
 counters. The UI plots the latest 60 seconds without parsing runtime log text.
+EdgeMouse 0.5.2 reports smoothed RTT variation consistently in both control
+directions, clarifies that Windows needs no macOS-style input permission, and
+makes the Input page's horizontal and wheel-direction switches persistent and
+live. Each computer stores the preferences for the physical input attached to
+that computer; existing configurations default both switches to off.
 
 ## Verify the source tree
 

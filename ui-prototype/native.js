@@ -50,6 +50,7 @@
   const chartHeight = 150;
   const chartPointCount = 60;
   let lastQualitySecond;
+  let latestSnapshot;
 
   const connectionLabels = {
     starting: "正在启动",
@@ -153,7 +154,12 @@
     document.querySelector("[data-chart-jitter]")?.setAttribute("d", chartLinePath("jitter", maximum));
     document.querySelector("[data-chart-fill]")?.setAttribute("d", chartFillPath(maximum));
     const empty = document.querySelector(".chart-empty");
-    if (empty) empty.hidden = !values.length;
+    if (empty) {
+      const hasValues = values.length > 0;
+      empty.hidden = hasValues;
+      empty.style.display = hasValues ? "none" : "";
+      empty.setAttribute("aria-hidden", String(hasValues));
+    }
   }
 
   function recordQualitySample(connection, connected) {
@@ -196,13 +202,22 @@
     setMetricHealth("latency", connected && rtt !== null);
 
     setMetricValue("jitter", jitter === null ? "—" : jitter.toFixed(1), jitter === null ? "" : "ms");
-    setText('[data-metric="jitter"] p', jitter === null ? "等待真实链路数据" : `最近 5 秒 · ${Number(connection?.staleMoves ?? 0)} 个过期事件`);
+    setText('[data-metric="jitter"] p', jitter === null ? "等待真实链路数据" : `RTT 变化 · ${Number(connection?.staleMoves ?? 0)} 个过期事件`);
     setMetricHealth("jitter", connected && jitter !== null);
 
     const permission = snapshot.platform.permissionGranted;
-    setMetricValue("permissions", permission === true ? "已授权" : permission === false ? "未授权" : "待确认");
-    setText('[data-metric="permissions"] p', permission === false ? "请检查系统输入权限" : "捕获与注入权限");
-    setMetricHealth("permissions", permission !== false);
+    const windowsLocal = snapshot.platform.operatingSystem.toLowerCase().includes("windows");
+    if (windowsLocal) {
+      setMetricValue("permissions", "无需授权");
+      setText('[data-metric="permissions"] p', "Windows 输入接口可用");
+      setText('[data-check="permissions"] small', "Windows 输入接口可用");
+      setMetricHealth("permissions", true);
+    } else {
+      setMetricValue("permissions", permission === true ? "已授权" : permission === false ? "未授权" : "待确认");
+      setText('[data-metric="permissions"] p', permission === false ? "请检查系统输入权限" : "辅助功能与输入监控");
+      setText('[data-check="permissions"] small', permission === false ? "请检查系统输入权限" : "捕获与注入可用");
+      setMetricHealth("permissions", permission !== false);
+    }
 
     setText(".chart-caption", "最近 60 秒 · 每秒刷新");
     setText(".chart-value b", rtt === null ? "—" : `${rtt.toFixed(1)} ms`);
@@ -241,11 +256,19 @@
   }
 
   function applySnapshot(snapshot) {
+    latestSnapshot = snapshot;
     const running = snapshot.agent.running;
     const configValid = snapshot.config.valid;
     const state = connectionState(snapshot);
     const connected = state === "connected";
     const peerName = snapshot.agent.connection?.peerName ?? snapshot.config.peerScreenName ?? "可信设备";
+    const localInputProfile = snapshot.platform.operatingSystem.toLowerCase().includes("windows")
+      ? "windows-to-mac"
+      : "mac-to-windows";
+    window.EdgeMouseInputSettings?.applyLocalProfile(localInputProfile, {
+      horizontal: snapshot.config.reverseScrollHorizontal,
+      vertical: snapshot.config.reverseScrollVertical,
+    });
     window.setEdgeMouseAppVersion?.(running ? snapshot.agent.version : snapshot.desktopVersion);
     setText("[data-native-mode]", "桌面应用 · 实时状态");
 
@@ -311,6 +334,40 @@
       refreshing = false;
     }
   }
+
+  document.querySelector(".input-save-button")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    if (!latestSnapshot) {
+      window.showEdgeMouseToast?.("正在读取本机配置，请稍后重试");
+      return;
+    }
+    const localProfile = latestSnapshot.platform.operatingSystem.toLowerCase().includes("windows")
+      ? "windows-to-mac"
+      : "mac-to-windows";
+    const settingsApi = window.EdgeMouseInputSettings;
+    if (settingsApi?.getActiveProfile() !== localProfile) {
+      window.showEdgeMouseToast?.("请在另一台设备上设置这个控制方向");
+      return;
+    }
+    const settings = settingsApi?.getProfile(localProfile);
+    if (!settings) return;
+    button.disabled = true;
+    try {
+      const result = await invoke("save_scroll_settings", {
+        reverseHorizontal: Boolean(settings.horizontal),
+        reverseVertical: Boolean(settings.vertical),
+      });
+      const message = result.warning ?? "滚动方向已保存并立即生效";
+      settingsApi.markSaved(result.warning ? message : "滚动方向已保存；其他输入选项仍为界面预览");
+      window.showEdgeMouseToast?.(message);
+      await refreshSnapshot();
+    } catch (error) {
+      console.error("Unable to save scroll settings", error);
+      window.showEdgeMouseToast?.(`无法保存滚动方向：${error}`);
+    } finally {
+      button.disabled = false;
+    }
+  });
 
   refreshSnapshot();
   window.setInterval(refreshSnapshot, 1000);

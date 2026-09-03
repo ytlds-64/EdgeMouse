@@ -16,6 +16,7 @@ const MOUSE_FLUSH_INTERVAL_FAST: Duration = Duration::from_millis(4);
 const METRICS_INTERVAL: Duration = Duration::from_secs(5);
 const ACTIVE_MOVEMENT_GAP_MAX: Duration = Duration::from_millis(100);
 const ARRIVAL_JITTER_WEIGHT: f64 = 1.0 / 16.0;
+const RTT_JITTER_WEIGHT: f64 = 1.0 / 4.0;
 #[cfg(target_os = "macos")]
 const INCOMING_MOVE_CAPACITY: usize = 32;
 #[cfg(not(target_os = "macos"))]
@@ -67,6 +68,7 @@ pub enum NetworkEvent {
     },
     Metrics {
         rtt_ms: f64,
+        rtt_jitter_ms: f64,
         send_interval_ms: u64,
         sent_moves: u64,
         skipped_moves: u64,
@@ -422,6 +424,8 @@ async fn run_network(
     let mut sent_moves = 0_u64;
     let mut skipped_moves = 0_u64;
     let mut last_reliable_sequence = 0_u64;
+    let mut previous_rtt_ms = None;
+    let mut rtt_jitter_ms = 0.0;
 
     loop {
         tokio::select! {
@@ -508,11 +512,17 @@ async fn run_network(
                     }
                 };
                 let rtt_ms = sender.smoothed_rtt().as_secs_f64() * 1_000.0;
+                update_rtt_jitter(
+                    &mut previous_rtt_ms,
+                    &mut rtt_jitter_ms,
+                    rtt_ms,
+                );
                 let send_interval_ms = u64::try_from(
                     adaptive_mouse_interval(sender.smoothed_rtt()).as_millis(),
                 ).unwrap_or(u64::MAX);
                 if events.send(NetworkEvent::Metrics {
                     rtt_ms,
+                    rtt_jitter_ms,
                     send_interval_ms,
                     sent_moves,
                     skipped_moves,
@@ -620,6 +630,13 @@ fn adaptive_mouse_interval(rtt: Duration) -> Duration {
         Duration::from_millis(8)
     } else {
         Duration::from_millis(12)
+    }
+}
+
+fn update_rtt_jitter(previous: &mut Option<f64>, jitter: &mut f64, current: f64) {
+    if let Some(previous) = previous.replace(current) {
+        let variation = (current - previous).abs();
+        *jitter += (variation - *jitter) * RTT_JITTER_WEIGHT;
     }
 }
 
@@ -783,5 +800,17 @@ mod tests {
             adaptive_mouse_interval(Duration::from_millis(200)),
             Duration::from_millis(12)
         );
+    }
+
+    #[test]
+    fn rtt_jitter_tracks_smoothed_rtt_variation() {
+        let mut previous = None;
+        let mut jitter = 0.0;
+        update_rtt_jitter(&mut previous, &mut jitter, 20.0);
+        assert_eq!(jitter, 0.0);
+        update_rtt_jitter(&mut previous, &mut jitter, 28.0);
+        assert_eq!(jitter, 2.0);
+        update_rtt_jitter(&mut previous, &mut jitter, 24.0);
+        assert_eq!(jitter, 2.5);
     }
 }

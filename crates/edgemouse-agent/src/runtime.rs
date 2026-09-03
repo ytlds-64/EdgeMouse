@@ -179,7 +179,10 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         edgemouse_transport::format_node_id(config.peer_node)
     );
     let stopping = install_shutdown_handler()?;
-    let telemetry = RuntimeTelemetry::default();
+    let telemetry = RuntimeTelemetry::with_scroll_settings(
+        config.reverse_scroll_horizontal,
+        config.reverse_scroll_vertical,
+    );
     let _control_server = ControlServer::start(Arc::clone(&stopping), telemetry.clone())?;
     let mut reconnecting = false;
     let mut backoff = ReconnectBackoff::default();
@@ -640,6 +643,7 @@ fn run_loop(
                 }
                 NetworkEvent::Metrics {
                     rtt_ms,
+                    rtt_jitter_ms,
                     send_interval_ms,
                     sent_moves,
                     skipped_moves,
@@ -652,7 +656,7 @@ fn run_loop(
                 } => {
                     telemetry.update_link(LinkMetrics {
                         rtt_ms,
-                        jitter_ms: arrival_jitter_ms,
+                        jitter_ms: rtt_jitter_ms,
                         send_interval_ms,
                         sent_moves,
                         skipped_moves,
@@ -669,7 +673,7 @@ fn run_loop(
                         || superseded_moves > 0
                     {
                         println!(
-                            "Mouse link: RTT {rtt_ms:.1} ms; interval {send_interval_ms} ms; sent {sent_moves}; skipped {skipped_moves}; merged {coalesced_moves}; received {received_moves}; stale {stale_moves}; superseded {superseded_moves}; arrival jitter {arrival_jitter_ms:.1} ms; max gap {max_arrival_gap_ms:.1} ms"
+                            "Mouse link: RTT {rtt_ms:.1} ms; RTT jitter {rtt_jitter_ms:.1} ms; interval {send_interval_ms} ms; sent {sent_moves}; skipped {skipped_moves}; merged {coalesced_moves}; received {received_moves}; stale {stale_moves}; superseded {superseded_moves}; arrival jitter {arrival_jitter_ms:.1} ms; max gap {max_arrival_gap_ms:.1} ms"
                         );
                     }
                 }
@@ -755,6 +759,7 @@ fn run_loop(
                 continue;
             }
             takeover.reset();
+            let event = apply_scroll_settings(event, telemetry.scroll_settings());
             let result = session.handle_input(event, now_ms)?;
             apply_effects(
                 result.effects,
@@ -783,6 +788,30 @@ fn run_loop(
         }
     }
     Ok(ConnectionEnd::Stopped)
+}
+
+fn apply_scroll_settings(
+    event: PhysicalMouseEvent,
+    settings: crate::control::ScrollSettings,
+) -> PhysicalMouseEvent {
+    match event {
+        PhysicalMouseEvent::Wheel {
+            horizontal,
+            vertical,
+        } => PhysicalMouseEvent::Wheel {
+            horizontal: if settings.reverse_horizontal {
+                -horizontal
+            } else {
+                horizontal
+            },
+            vertical: if settings.reverse_vertical {
+                -vertical
+            } else {
+                vertical
+            },
+        },
+        event => event,
+    }
 }
 
 fn movement_across_edge(bounds: Rect, position: Point, edge: Edge) -> Vector {
@@ -1706,5 +1735,39 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn scroll_settings_reverse_each_axis_independently() {
+        let event = PhysicalMouseEvent::Wheel {
+            horizontal: 3.0,
+            vertical: -5.0,
+        };
+        assert_eq!(
+            apply_scroll_settings(
+                event,
+                crate::control::ScrollSettings {
+                    reverse_horizontal: true,
+                    reverse_vertical: false,
+                },
+            ),
+            PhysicalMouseEvent::Wheel {
+                horizontal: -3.0,
+                vertical: -5.0,
+            }
+        );
+        assert_eq!(
+            apply_scroll_settings(
+                event,
+                crate::control::ScrollSettings {
+                    reverse_horizontal: false,
+                    reverse_vertical: true,
+                },
+            ),
+            PhysicalMouseEvent::Wheel {
+                horizontal: 3.0,
+                vertical: 5.0,
+            }
+        );
     }
 }
