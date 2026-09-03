@@ -23,6 +23,9 @@ button, input, select { font: inherit; }
 button { color: inherit; }
 :focus-visible { outline: 2px solid rgba(9, 170, 161, .7); outline-offset: 2px; }
 .app-window { display: grid; grid-template-columns: 254px 1fr; min-height: 100vh; overflow: hidden; background: var(--canvas); }
+html[data-native-app="true"],
+html[data-native-app="true"] body { background: transparent; }
+html[data-native-app="true"][data-desktop-platform="windows"] .app-window { border-radius: 14px; }
 .sidebar { position: relative; display: flex; flex-direction: column; padding: 26px 16px 22px; border-right: 1px solid var(--line); background: rgba(252, 253, 251, .94); }
 .brand { display: flex; align-items: center; gap: 11px; height: 48px; padding: 0 15px; margin-bottom: 28px; font-size: 21px; font-weight: 750; letter-spacing: -.5px; }
 .brand img { width: 34px; height: 34px; border-radius: 9px; }

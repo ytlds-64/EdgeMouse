@@ -411,6 +411,10 @@ also keeps the last confirmed agent state across two isolated local-control
 poll misses, so a brief status-channel delay is shown as confirmation in
 progress instead of incorrectly claiming that the background service stopped.
 Protocol v6 is unchanged and remains connection-compatible with 0.5.3.
+EdgeMouse 0.5.5 gives the frameless Windows desktop window rounded transparent
+corners and regenerates the macOS application icon with a real alpha channel,
+removing the unwanted white square shown behind the icon in the Dock. Protocol
+v6 is unchanged and remains connection-compatible with 0.5.3.
 
 ## Verify the source tree
 
