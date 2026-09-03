@@ -249,9 +249,9 @@
       setText(`${localLayoutSelector} small`, `${Math.round(width)} × ${Math.round(height)} · ${displayCount} 个屏幕`);
     }
 
-    if (snapshot.config.peerOn && typeof window.setLayoutEdge === "function") {
+    if (snapshot.config.peerOn && window.EdgeMouseLayout) {
       const uiEdge = windowsLocal ? snapshot.config.peerOn : oppositeEdge[snapshot.config.peerOn];
-      if (uiEdge) window.setLayoutEdge(uiEdge);
+      if (uiEdge) window.EdgeMouseLayout.applySnapshot(uiEdge);
     }
   }
 
@@ -313,8 +313,19 @@
       screenFacts[0].textContent = `${snapshot.platform.displayCount ?? 1} 个屏幕 · ${orientation}`;
     }
     if (screenFacts[2]) {
-      screenFacts[2].textContent = configValid ? "配置已读取" : "配置读取失败";
+      screenFacts[2].textContent = window.EdgeMouseLayout?.isDirty()
+        ? "尚未保存"
+        : configValid && connected
+          ? "两端一致"
+          : configValid
+            ? "等待连接同步"
+            : "配置读取失败";
       screenFacts[2].title = snapshot.config.error ?? snapshot.config.path ?? "";
+    }
+
+    const layoutSaveStatus = document.querySelector(".layout-save-status");
+    if (layoutSaveStatus && !window.EdgeMouseLayout?.isDirty() && connected) {
+      layoutSaveStatus.textContent = "布局已保存，两端配置一致";
     }
 
     updateDeviceCards(snapshot);
@@ -364,6 +375,28 @@
     } catch (error) {
       console.error("Unable to save scroll settings", error);
       window.showEdgeMouseToast?.(`无法保存滚动方向：${error}`);
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  document.querySelector(".layout-save-button")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    const peerOn = window.EdgeMouseLayout?.getEdge();
+    if (!latestSnapshot || !peerOn) {
+      window.showEdgeMouseToast?.("正在读取本机配置，请稍后重试");
+      return;
+    }
+    button.disabled = true;
+    try {
+      const result = await invoke("save_layout", { peerOn });
+      const message = result.warning ?? "布局已保存，正在同步并重新连接";
+      window.EdgeMouseLayout?.markSaved(message);
+      window.showEdgeMouseToast?.(message);
+      await refreshSnapshot();
+    } catch (error) {
+      console.error("Unable to save screen layout", error);
+      window.showEdgeMouseToast?.(`无法保存屏幕布局：${error}`);
     } finally {
       button.disabled = false;
     }

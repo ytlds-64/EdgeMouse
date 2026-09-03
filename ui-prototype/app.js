@@ -730,8 +730,9 @@ window.addEventListener("keydown", (event) => {
 const layoutCanvas = document.querySelector(".layout-canvas");
 const layoutDirectionButtons = [...document.querySelectorAll(".layout-direction button")];
 const dragBeam = layoutCanvas.querySelector(".drag-beam");
+let layoutDirty = false;
 
-function setLayoutEdge(edge) {
+function setLayoutEdge(edge, { dirty = false } = {}) {
   const win = layoutCanvas.querySelector(".screen-win");
   const mac = layoutCanvas.querySelector(".screen-mac");
   const beam = layoutCanvas.querySelector(".edge-glow");
@@ -748,9 +749,31 @@ function setLayoutEdge(edge) {
   const order = macComesFirst ? [mac, beam, win] : [win, beam, mac];
   order.forEach((element) => layoutCanvas.insertBefore(element, hint));
   layoutDirectionButtons.forEach((button) => button.classList.toggle("is-selected", button.dataset.edge === edge));
+  if (dirty) {
+    layoutDirty = true;
+    const status = document.querySelector(".layout-save-status");
+    if (status) status.textContent = "布局已修改，点击保存后会同步到两台设备";
+    const configStatus = document.querySelector(".layout-config-status");
+    if (configStatus) configStatus.textContent = "尚未保存";
+  }
 }
 
-layoutDirectionButtons.forEach((button) => button.addEventListener("click", () => setLayoutEdge(button.dataset.edge)));
+window.EdgeMouseLayout = {
+  getEdge: () => layoutCanvas.dataset.edge ?? "right",
+  isDirty: () => layoutDirty,
+  applySnapshot(edge) {
+    if (!layoutDirty) setLayoutEdge(edge);
+  },
+  markSaved(message = "布局已保存，两端将自动重新连接") {
+    layoutDirty = false;
+    const status = document.querySelector(".layout-save-status");
+    if (status) status.textContent = message;
+    const configStatus = document.querySelector(".layout-config-status");
+    if (configStatus) configStatus.textContent = "正在同步";
+  },
+};
+
+layoutDirectionButtons.forEach((button) => button.addEventListener("click", () => setLayoutEdge(button.dataset.edge, { dirty: true })));
 
 function edgeFromRects(macRect, winRect) {
   const deltaX = macRect.left + macRect.width / 2 - (winRect.left + winRect.width / 2);
@@ -852,7 +875,7 @@ document.querySelectorAll(".mini-screen").forEach((screen) => {
     setDropPreview();
     drag = undefined;
     if (moved) {
-      setLayoutEdge(edge);
+      setLayoutEdge(edge, { dirty: true });
       const labels = { left: "左侧", right: "右侧", top: "上方", bottom: "下方" };
       showToast(`屏幕布局已调整为 ${labels[edge]}`);
     }
@@ -865,7 +888,7 @@ document.querySelectorAll(".mini-screen").forEach((screen) => {
   }, true);
 });
 
-document.querySelectorAll(".save-button:not(.input-save-button):not(.settings-save-button)").forEach((button) => button.addEventListener("click", () => showToast("设置已保存（原型演示）")));
+document.querySelectorAll(".save-button:not(.input-save-button):not(.settings-save-button):not(.layout-save-button)").forEach((button) => button.addEventListener("click", () => showToast("设置已保存（原型演示）")));
 document.querySelectorAll(".action-button").forEach((button) => button.addEventListener("click", () => showToast(`${button.textContent.trim()}（原型演示）`)));
 document.querySelector(".detect-button")?.addEventListener("click", (event) => {
   event.currentTarget.textContent = "检测中…";

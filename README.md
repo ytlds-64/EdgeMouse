@@ -57,6 +57,9 @@ relay servers, tray/menu-bar integration, installers, and elevated Windows deskt
   current connection phase, reconnect count, latency, jitter, and input counters.
 - Live desktop scroll-direction controls that persist to `edgemouse.toml` and
   update an already-running background agent without reconnecting.
+- A persistent Screen layout editor that converts the shared Windows-to-Mac
+  view into each computer's local edge, synchronizes the opposite edge over the
+  trusted connection, and reconnects both agents automatically.
 - Working light/dark/system themes and Simplified Chinese/English UI switching.
 
 Windows uses a fixed mouse capture anchor while control is remote. Raw Input
@@ -85,9 +88,10 @@ The desktop application keeps the proven background agent separate
 from the window. This means opening or closing the window does not interrupt an
 active mouse/keyboard session. Connection state and the diagnostics quality chart
 are live. The horizontal and wheel-direction switches on the Input page are
-connected to the local background agent; configuration controls that still say
-“prototype” remain demonstrations until their Rust commands are connected in
-the next stages.
+connected to the local background agent. Dragging or choosing a direction on
+the Screen layout page is also live once saved; configuration controls that
+still say “prototype” remain demonstrations until their Rust commands are
+connected in the next stages.
 
 Build and open the desktop window on macOS from the repository root:
 
@@ -396,6 +400,11 @@ directions, clarifies that Windows needs no macOS-style input permission, and
 makes the Input page's horizontal and wheel-direction switches persistent and
 live. Each computer stores the preferences for the physical input attached to
 that computer; existing configurations default both switches to off.
+EdgeMouse 0.5.3 makes the Screen layout page persistent. Saving writes the
+local `layout.peer_on`, sends the corresponding edge over the authenticated
+connection, and makes the trusted peer store the opposite edge before both
+agents reconnect automatically. This layout update and acknowledgement use
+protocol v6, so both computers must update to 0.5.3 before using this release.
 
 ## Verify the source tree
 

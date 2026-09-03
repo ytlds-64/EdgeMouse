@@ -1,3 +1,4 @@
+use edgemouse_core::Edge;
 use std::error::Error;
 use std::fmt;
 use std::io;
@@ -12,6 +13,7 @@ const REQUEST_MAGIC: &[u8; 8] = b"EDGMCTL1";
 const RESPONSE_MAGIC: &[u8; 8] = b"EDGMACK1";
 const REQUEST_LENGTH: usize = REQUEST_MAGIC.len() + 1;
 const SCROLL_REQUEST_LENGTH: usize = REQUEST_LENGTH + 1;
+const LAYOUT_REQUEST_LENGTH: usize = REQUEST_LENGTH + 1;
 const RESPONSE_HEADER_LENGTH: usize = RESPONSE_MAGIC.len() + 1 + 4 + 1;
 const MAX_VERSION_LENGTH: usize = 63;
 const MAX_PEER_NAME_LENGTH: usize = 63;
@@ -30,6 +32,7 @@ enum Command {
     Status = 1,
     Stop = 2,
     SetScroll = 3,
+    SetLayout = 4,
 }
 
 impl Command {
@@ -38,6 +41,7 @@ impl Command {
             value if value == Self::Status as u8 => Some(Self::Status),
             value if value == Self::Stop as u8 => Some(Self::Stop),
             value if value == Self::SetScroll as u8 => Some(Self::SetScroll),
+            value if value == Self::SetLayout as u8 => Some(Self::SetLayout),
             _ => None,
         }
     }
@@ -53,6 +57,7 @@ pub struct ScrollSettings {
 struct ControlRequest {
     command: Command,
     scroll: Option<ScrollSettings>,
+    peer_on: Option<Edge>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -122,6 +127,7 @@ pub struct RuntimeTelemetry {
     inner: Arc<Mutex<ConnectionTelemetry>>,
     reverse_scroll_horizontal: Arc<AtomicBool>,
     reverse_scroll_vertical: Arc<AtomicBool>,
+    pending_layout: Arc<Mutex<Option<Edge>>>,
 }
 
 impl Default for RuntimeTelemetry {
@@ -136,6 +142,7 @@ impl RuntimeTelemetry {
             inner: Arc::new(Mutex::new(ConnectionTelemetry::default())),
             reverse_scroll_horizontal: Arc::new(AtomicBool::new(reverse_horizontal)),
             reverse_scroll_vertical: Arc::new(AtomicBool::new(reverse_vertical)),
+            pending_layout: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -151,6 +158,39 @@ impl RuntimeTelemetry {
             reverse_horizontal: self.reverse_scroll_horizontal.load(Ordering::Acquire),
             reverse_vertical: self.reverse_scroll_vertical.load(Ordering::Acquire),
         }
+    }
+
+    pub fn request_layout_update(&self, peer_on: Edge) {
+        let mut pending = self
+            .pending_layout
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *pending = Some(peer_on);
+    }
+
+    pub fn layout_update(&self) -> Option<Edge> {
+        *self
+            .pending_layout
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn complete_layout_update(&self, peer_on: Edge) {
+        let mut pending = self
+            .pending_layout
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *pending == Some(peer_on) {
+            *pending = None;
+        }
+    }
+
+    pub fn discard_layout_update(&self) {
+        let mut pending = self
+            .pending_layout
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *pending = None;
     }
 
     pub fn begin_connecting(&self, reconnecting: bool) {
@@ -348,6 +388,11 @@ pub fn update_scroll_settings(
     request_packet(CONTROL_ADDRESS, Command::SetScroll, &packet)
 }
 
+pub fn update_layout(peer_on: Edge) -> Result<Option<RunningStatus>, ControlError> {
+    let packet = encode_layout_request(peer_on);
+    request_packet(CONTROL_ADDRESS, Command::SetLayout, &packet)
+}
+
 fn request(address: &str, command: Command) -> Result<Option<RunningStatus>, ControlError> {
     request_packet(address, command, &encode_request(command))
 }
@@ -405,6 +450,9 @@ fn serve(
                 if let Some(settings) = request.scroll {
                     telemetry.set_scroll_settings(settings);
                 }
+                if let Some(peer_on) = request.peer_on {
+                    telemetry.request_layout_update(peer_on);
+                }
                 let status = RunningStatus {
                     process_id: std::process::id(),
                     version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -438,26 +486,63 @@ fn encode_scroll_request(settings: ScrollSettings) -> [u8; SCROLL_REQUEST_LENGTH
     request
 }
 
+fn encode_layout_request(peer_on: Edge) -> [u8; LAYOUT_REQUEST_LENGTH] {
+    let mut request = [0_u8; LAYOUT_REQUEST_LENGTH];
+    request[..REQUEST_MAGIC.len()].copy_from_slice(REQUEST_MAGIC);
+    request[REQUEST_MAGIC.len()] = Command::SetLayout as u8;
+    request[REQUEST_LENGTH] = encode_edge(peer_on);
+    request
+}
+
 fn decode_request(request: &[u8]) -> Option<ControlRequest> {
     if request.len() < REQUEST_LENGTH || &request[..REQUEST_MAGIC.len()] != REQUEST_MAGIC {
         return None;
     }
     let command = Command::from_byte(request[REQUEST_MAGIC.len()])?;
-    let scroll = match command {
-        Command::Status | Command::Stop if request.len() == REQUEST_LENGTH => None,
+    let (scroll, peer_on) = match command {
+        Command::Status | Command::Stop if request.len() == REQUEST_LENGTH => (None, None),
         Command::SetScroll if request.len() == SCROLL_REQUEST_LENGTH => {
             let flags = request[REQUEST_LENGTH];
             if flags & !0b11 != 0 {
                 return None;
             }
-            Some(ScrollSettings {
-                reverse_horizontal: flags & 0b01 != 0,
-                reverse_vertical: flags & 0b10 != 0,
-            })
+            (
+                Some(ScrollSettings {
+                    reverse_horizontal: flags & 0b01 != 0,
+                    reverse_vertical: flags & 0b10 != 0,
+                }),
+                None,
+            )
+        }
+        Command::SetLayout if request.len() == LAYOUT_REQUEST_LENGTH => {
+            (None, Some(decode_edge(request[REQUEST_LENGTH])?))
         }
         _ => return None,
     };
-    Some(ControlRequest { command, scroll })
+    Some(ControlRequest {
+        command,
+        scroll,
+        peer_on,
+    })
+}
+
+const fn encode_edge(edge: Edge) -> u8 {
+    match edge {
+        Edge::Left => 0,
+        Edge::Right => 1,
+        Edge::Top => 2,
+        Edge::Bottom => 3,
+    }
+}
+
+const fn decode_edge(value: u8) -> Option<Edge> {
+    match value {
+        0 => Some(Edge::Left),
+        1 => Some(Edge::Right),
+        2 => Some(Edge::Top),
+        3 => Some(Edge::Bottom),
+        _ => None,
+    }
 }
 
 fn encode_response(command: Command, status: &RunningStatus) -> Vec<u8> {
@@ -722,6 +807,7 @@ mod tests {
         let status_request = decode_request(&encode_request(Command::Status)).unwrap();
         assert_eq!(status_request.command, Command::Status);
         assert_eq!(status_request.scroll, None);
+        assert_eq!(status_request.peer_on, None);
         let scroll = ScrollSettings {
             reverse_horizontal: true,
             reverse_vertical: false,
@@ -729,9 +815,17 @@ mod tests {
         let scroll_request = decode_request(&encode_scroll_request(scroll)).unwrap();
         assert_eq!(scroll_request.command, Command::SetScroll);
         assert_eq!(scroll_request.scroll, Some(scroll));
+        assert_eq!(scroll_request.peer_on, None);
         let mut invalid_scroll = encode_scroll_request(scroll);
         invalid_scroll[REQUEST_LENGTH] |= 0b100;
         assert_eq!(decode_request(&invalid_scroll), None);
+        let layout_request = decode_request(&encode_layout_request(Edge::Top)).unwrap();
+        assert_eq!(layout_request.command, Command::SetLayout);
+        assert_eq!(layout_request.scroll, None);
+        assert_eq!(layout_request.peer_on, Some(Edge::Top));
+        let mut invalid_layout = encode_layout_request(Edge::Left);
+        invalid_layout[REQUEST_LENGTH] = 4;
+        assert_eq!(decode_request(&invalid_layout), None);
 
         let status = RunningStatus {
             process_id: 42,
@@ -804,6 +898,22 @@ mod tests {
                 .is_some()
         );
         assert_eq!(telemetry.scroll_settings(), scroll);
+
+        assert!(
+            request_packet(
+                &address,
+                Command::SetLayout,
+                &encode_layout_request(Edge::Bottom),
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert_eq!(telemetry.layout_update(), Some(Edge::Bottom));
+        assert_eq!(telemetry.layout_update(), Some(Edge::Bottom));
+        telemetry.complete_layout_update(Edge::Right);
+        assert_eq!(telemetry.layout_update(), Some(Edge::Bottom));
+        telemetry.complete_layout_update(Edge::Bottom);
+        assert_eq!(telemetry.layout_update(), None);
 
         assert!(request(&address, Command::Stop).unwrap().is_some());
         let deadline = Instant::now() + Duration::from_secs(1);

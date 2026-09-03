@@ -1,4 +1,4 @@
-use crate::config::{LoadedConfig, PeerAddress, ResolvedScreen};
+use crate::config::{LoadedConfig, PeerAddress, ResolvedScreen, persist_peer_on};
 use crate::control::{ControlServer, LinkMetrics, RuntimeTelemetry};
 use crate::discovery::{
     DISCOVERY_PORT, DiscoveryRequest, discover_trusted_peer, respond_to_trusted_peer,
@@ -7,8 +7,8 @@ use crate::network::{Network, NetworkEvent};
 use crate::platform;
 use edgemouse_core::{
     CaptureMode, ControlState, Edge, Effect, KeyboardCaptureBackend, KeyboardInjectionBackend,
-    MouseCaptureBackend, MouseInjectionBackend, PhysicalMouseEvent, Point, Rect, RemoteMouseEvent,
-    RoutedEvent, RoutedKeyboardEvent, ScreenId, Session, Vector,
+    MouseCaptureBackend, MouseInjectionBackend, NodeId, PhysicalMouseEvent, Point, Rect,
+    RemoteMouseEvent, RoutedEvent, RoutedKeyboardEvent, ScreenId, Session, Vector,
 };
 use edgemouse_protocol::ScreenInfo;
 use edgemouse_protocol::WireMessage;
@@ -33,6 +33,7 @@ const LOCAL_TAKEOVER_ACK_TIMEOUT_MS: u64 = 1_500;
 enum ConnectionEnd {
     Stopped,
     Disconnected(String),
+    LayoutChanged,
 }
 
 #[derive(Debug)]
@@ -168,20 +169,24 @@ fn distance_to_edge(bounds: Rect, pointer: Point, edge: Edge) -> f64 {
     .max(0.0)
 }
 
+fn accepts_remote_layout(local_node: NodeId, peer_node: NodeId, local_pending: bool) -> bool {
+    !local_pending || local_node > peer_node
+}
+
 pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
-    let config = LoadedConfig::load(config_path)?;
+    let initial_config = LoadedConfig::load(config_path)?;
     println!(
         "Local node : {}",
-        edgemouse_transport::format_node_id(config.local_node)
+        edgemouse_transport::format_node_id(initial_config.local_node)
     );
     println!(
         "Peer node  : {}",
-        edgemouse_transport::format_node_id(config.peer_node)
+        edgemouse_transport::format_node_id(initial_config.peer_node)
     );
     let stopping = install_shutdown_handler()?;
     let telemetry = RuntimeTelemetry::with_scroll_settings(
-        config.reverse_scroll_horizontal,
-        config.reverse_scroll_vertical,
+        initial_config.reverse_scroll_horizontal,
+        initial_config.reverse_scroll_vertical,
     );
     let _control_server = ControlServer::start(Arc::clone(&stopping), telemetry.clone())?;
     let mut reconnecting = false;
@@ -191,6 +196,11 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         if stopping.load(Ordering::Acquire) {
             return Ok(());
         }
+        let config = LoadedConfig::load(config_path)?;
+        telemetry.set_scroll_settings(crate::control::ScrollSettings {
+            reverse_horizontal: config.reverse_scroll_horizontal,
+            reverse_vertical: config.reverse_scroll_vertical,
+        });
         let detected = if config.local_screen.automatic {
             let desktop = platform::desktop_geometry()?;
             println!(
@@ -319,8 +329,15 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
             session_id,
             &stopping,
             &telemetry,
+            config_path,
         )? {
             ConnectionEnd::Stopped => return Ok(()),
+            ConnectionEnd::LayoutChanged => {
+                telemetry.disconnected();
+                reconnecting = true;
+                backoff.reset();
+                println!("Screen layout updated; reconnecting with the new edge…");
+            }
             ConnectionEnd::Disconnected(reason) => {
                 telemetry.disconnected();
                 reconnecting = true;
@@ -373,6 +390,7 @@ fn run_connected(
     session_id: u64,
     stopping: &AtomicBool,
     telemetry: &RuntimeTelemetry,
+    config_path: &Path,
 ) -> Result<ConnectionEnd, Box<dyn Error>> {
     let mut capture = platform::start_capture(
         local.screen.bounds,
@@ -413,6 +431,8 @@ fn run_connected(
         stopping,
         clock,
         telemetry,
+        config_path,
+        config.local_node,
     );
 
     let effects = session.disconnect_peer(config.peer_node);
@@ -493,10 +513,24 @@ fn run_loop(
     stopping: &AtomicBool,
     clock: Instant,
     telemetry: &RuntimeTelemetry,
+    config_path: &Path,
+    local_node: NodeId,
 ) -> Result<ConnectionEnd, Box<dyn Error>> {
     let mut takeover = LocalTakeoverGesture::new(takeover_edge);
+    let mut pending_layout_request = None;
     while !stopping.load(Ordering::Acquire) {
         let now_ms = elapsed_ms(clock);
+        if pending_layout_request.is_none()
+            && let Some(peer_on) = telemetry.layout_update()
+        {
+            let request_id = new_session_id(u128::from(session_id));
+            network.send(WireMessage::LayoutUpdate {
+                request_id,
+                peer_on,
+            })?;
+            pending_layout_request = Some((request_id, peer_on));
+            println!("Synchronizing screen layout {peer_on:?} with the trusted peer…");
+        }
         while let Some(event) = network.try_receive()? {
             match event {
                 NetworkEvent::Message(WireMessage::Heartbeat {
@@ -609,6 +643,40 @@ fn run_loop(
                         session_id,
                     )?;
                     println!("Local physical mouse crossed {takeover_edge:?} and took control");
+                }
+                NetworkEvent::Message(WireMessage::LayoutUpdate {
+                    request_id,
+                    peer_on,
+                }) => {
+                    if !accepts_remote_layout(
+                        local_node,
+                        network.peer_node,
+                        telemetry.layout_update().is_some(),
+                    ) {
+                        println!(
+                            "Ignoring a simultaneous peer layout update because this node owns the deterministic tie-break"
+                        );
+                        continue;
+                    }
+                    telemetry.discard_layout_update();
+                    let local_peer_on = peer_on.opposite();
+                    persist_peer_on(config_path, local_peer_on)?;
+                    network.send(WireMessage::LayoutUpdateAck { request_id })?;
+                    println!(
+                        "Trusted peer updated the screen layout; local peer edge is now {local_peer_on:?}"
+                    );
+                    return Ok(ConnectionEnd::LayoutChanged);
+                }
+                NetworkEvent::Message(WireMessage::LayoutUpdateAck { request_id }) => {
+                    let Some((pending_request_id, peer_on)) = pending_layout_request else {
+                        continue;
+                    };
+                    if pending_request_id != request_id {
+                        continue;
+                    }
+                    telemetry.complete_layout_update(peer_on);
+                    println!("Trusted peer saved the synchronized screen layout");
+                    return Ok(ConnectionEnd::LayoutChanged);
                 }
                 NetworkEvent::Datagram {
                     session_id: remote_session,
@@ -1294,6 +1362,15 @@ mod tests {
         ButtonState, KeyCode, KeyState, KeyboardEvent, MouseButton, PermissionState, PlatformError,
         Point,
     };
+
+    #[test]
+    fn simultaneous_layout_updates_use_the_lower_node_as_authority() {
+        let lower = NodeId(1);
+        let higher = NodeId(2);
+        assert!(!accepts_remote_layout(lower, higher, true));
+        assert!(accepts_remote_layout(higher, lower, true));
+        assert!(accepts_remote_layout(lower, higher, false));
+    }
 
     #[derive(Default)]
     struct FakeInjector {

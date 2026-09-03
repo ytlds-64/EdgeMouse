@@ -100,7 +100,7 @@ bypass.
 
 Both agents bind a QUIC UDP endpoint. The lower node ID initiates and retries;
 the higher node ID accepts, eliminating duplicate-connection races. TLS uses
-ALPN `edgemouse/5`. After TLS, both sides exchange and validate a protocol
+ALPN `edgemouse/6`. After TLS, both sides exchange and validate a protocol
 `Hello`, including the sender's current screen ID, desktop bounds, orientation,
 and scale. Each side builds the two-node topology from its freshly detected local
 desktop and the authenticated peer announcement rather than duplicating remote
@@ -125,6 +125,17 @@ captured buttons and keys, restores its local pointer, and then replies with
 `ControlReclaimAck`; only then does the receiver cross the edge and begin a new
 outgoing session. A missing acknowledgement restores local input and forces a
 reconnect after 1.5 seconds, preventing a trapped pointer.
+
+The desktop UI treats the displayed layout as “Mac relative to Windows,”
+independent of which computer is displaying the window. Saving first rewrites
+and validates the local `layout.peer_on` value, restoring the original file if
+validation fails. A local loopback
+control message then asks the running agent to send an authenticated reliable
+`LayoutUpdate`. The peer persists the opposite edge and acknowledges it; both
+agents restore local input, reconnect without re-pairing, re-detect screen
+geometry, and build fresh topologies from the new layout. Protocol v6 makes an
+older agent reject this message family during negotiation rather than silently
+running with asymmetric edges.
 
 When `peer.address` is `auto`, the lower node ID locates the higher node on IPv4
 UDP port 43892 while the higher node immediately opens its QUIC listener and
@@ -206,8 +217,8 @@ restored during transitions and teardown.
 1. Test on physical Windows and macOS machines, including 125–1000 Hz mice,
    long mixed Ethernet/Wi-Fi sessions, horizontal scroll, sleep/wake, and the
    automatic recovery path during Wi-Fi loss.
-2. Put pairing, display selection, edge layout, diagnostics, and tunable session
-   settings into a tray/settings UI.
+2. Finish pairing, display selection, and the remaining tunable session
+   settings in the tray/settings UI.
 3. Add signed installers and diagnostics export around the existing per-user
    launch-at-login scripts.
 4. Make the cross-platform modifier mapping configurable, then add bounded,

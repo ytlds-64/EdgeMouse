@@ -1,5 +1,6 @@
-use edgemouse_agent::config::{LoadedConfig, PeerAddress};
+use edgemouse_agent::config::{LoadedConfig, PeerAddress, edge_name, persist_peer_on};
 use edgemouse_agent::{control, platform};
+use edgemouse_core::Edge;
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -110,6 +111,14 @@ struct SavedScrollSettings {
     warning: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedLayout {
+    applied_live: bool,
+    warning: Option<String>,
+    local_peer_on: String,
+}
+
 #[tauri::command]
 async fn get_app_snapshot(state: tauri::State<'_, AppState>) -> Result<AppSnapshot, String> {
     let config_path = state.config_path.clone();
@@ -143,6 +152,55 @@ async fn save_scroll_settings(
     })
     .await
     .map_err(|error| format!("保存滚动方向的后台任务失败：{error}"))?
+}
+
+#[tauri::command]
+async fn save_layout(
+    state: tauri::State<'_, AppState>,
+    peer_on: String,
+) -> Result<SavedLayout, String> {
+    let path = state
+        .config_path
+        .clone()
+        .ok_or_else(|| "未找到 edgemouse.toml；无法保存屏幕布局".to_owned())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let windows_to_mac = parse_layout_edge(&peer_on)?;
+        let local_peer_on = local_layout_edge(windows_to_mac, cfg!(target_os = "macos"));
+        persist_peer_on(&path, local_peer_on)?;
+        let (applied_live, warning) = match control::update_layout(local_peer_on) {
+            Ok(Some(_)) => (true, None),
+            Ok(None) => (
+                false,
+                Some("布局已保存；后台服务未运行，启动服务后请再点一次保存以同步对端".to_owned()),
+            ),
+            Err(error) => (false, Some(format!("布局已保存；实时同步失败：{error}"))),
+        };
+        Ok(SavedLayout {
+            applied_live,
+            warning,
+            local_peer_on: edge_name(local_peer_on).to_owned(),
+        })
+    })
+    .await
+    .map_err(|error| format!("保存屏幕布局的后台任务失败：{error}"))?
+}
+
+fn parse_layout_edge(value: &str) -> Result<Edge, String> {
+    match value {
+        "left" => Ok(Edge::Left),
+        "right" => Ok(Edge::Right),
+        "top" => Ok(Edge::Top),
+        "bottom" => Ok(Edge::Bottom),
+        _ => Err(format!("不支持的屏幕方向：{value}")),
+    }
+}
+
+const fn local_layout_edge(windows_to_mac: Edge, local_is_macos: bool) -> Edge {
+    if local_is_macos {
+        windows_to_mac.opposite()
+    } else {
+        windows_to_mac
+    }
 }
 
 fn build_app_snapshot(config_path: Option<&Path>) -> AppSnapshot {
@@ -395,6 +453,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_app_snapshot,
             save_scroll_settings,
+            save_layout,
             window_action
         ])
         .run(tauri::generate_context!())
@@ -403,7 +462,25 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::scroll_settings_source;
+    use super::{local_layout_edge, parse_layout_edge, scroll_settings_source};
+    use edgemouse_core::Edge;
+
+    #[test]
+    fn parses_the_four_layout_edges() {
+        assert_eq!(parse_layout_edge("left"), Ok(Edge::Left));
+        assert_eq!(parse_layout_edge("right"), Ok(Edge::Right));
+        assert_eq!(parse_layout_edge("top"), Ok(Edge::Top));
+        assert_eq!(parse_layout_edge("bottom"), Ok(Edge::Bottom));
+        assert!(parse_layout_edge("diagonal").is_err());
+    }
+
+    #[test]
+    fn canonical_layout_is_converted_for_each_computer() {
+        assert_eq!(local_layout_edge(Edge::Right, false), Edge::Right);
+        assert_eq!(local_layout_edge(Edge::Right, true), Edge::Left);
+        assert_eq!(local_layout_edge(Edge::Top, false), Edge::Top);
+        assert_eq!(local_layout_edge(Edge::Top, true), Edge::Bottom);
+    }
 
     #[test]
     fn scroll_settings_are_inserted_without_reformatting_other_tables() {

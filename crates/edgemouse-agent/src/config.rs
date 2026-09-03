@@ -63,6 +63,88 @@ impl LoadedConfig {
     }
 }
 
+pub fn persist_peer_on(path: &Path, peer_on: Edge) -> Result<(), String> {
+    let original = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let updated = replace_table_value(
+        &original,
+        "layout",
+        "peer_on",
+        &format!("\"{}\"", edge_name(peer_on)),
+    );
+    fs::write(path, updated)
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+    if let Err(error) = LoadedConfig::load(path) {
+        let restore_error = fs::write(path, original).err();
+        return Err(match restore_error {
+            Some(restore_error) => format!(
+                "saved configuration is invalid: {error}; restoring the original also failed: {restore_error}"
+            ),
+            None => format!("saved configuration is invalid; restored the original: {error}"),
+        });
+    }
+    Ok(())
+}
+
+pub const fn edge_name(edge: Edge) -> &'static str {
+    match edge {
+        Edge::Left => "left",
+        Edge::Right => "right",
+        Edge::Top => "top",
+        Edge::Bottom => "bottom",
+    }
+}
+
+fn replace_table_value(source: &str, table: &str, key: &str, value: &str) -> String {
+    let newline = if source.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let had_trailing_newline = source.ends_with('\n');
+    let mut lines = source.lines().map(str::to_owned).collect::<Vec<_>>();
+    let header = format!("[{table}]");
+    let start = match lines.iter().position(|line| line.trim() == header) {
+        Some(index) => index,
+        None => {
+            if !lines.is_empty() && !lines.last().is_some_and(|line| line.trim().is_empty()) {
+                lines.push(String::new());
+            }
+            lines.push(header);
+            lines.len() - 1
+        }
+    };
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find_map(|(index, line)| {
+            let line = line.trim();
+            (line.starts_with('[') && line.ends_with(']')).then_some(index)
+        })
+        .unwrap_or(lines.len());
+    let existing = lines[start + 1..end].iter().position(|line| {
+        line.split_once('=')
+            .is_some_and(|(candidate, _)| candidate.trim() == key)
+    });
+    let replacement = format!("{key} = {value}");
+    if let Some(offset) = existing {
+        lines[start + 1 + offset] = replacement;
+    } else {
+        let mut insertion_index = end;
+        while insertion_index > start + 1 && lines[insertion_index - 1].trim().is_empty() {
+            insertion_index -= 1;
+        }
+        lines.insert(insertion_index, replacement);
+    }
+
+    let mut updated = lines.join(newline);
+    if had_trailing_newline || source.is_empty() {
+        updated.push_str(newline);
+    }
+    updated
+}
+
 impl PairingConfig {
     pub fn load(path: &Path) -> Result<Self, Box<dyn Error>> {
         let raw = read_raw(path)?;
@@ -387,6 +469,21 @@ mod tests {
     }
 
     #[test]
+    fn layout_edge_replacement_preserves_other_tables_and_line_endings() {
+        let source = "[local]\r\nname = \"Windows\"\r\n\r\n[layout]\r\npeer_on = \"right\"\r\n\r\n[session]\r\ntimeout_ms = 1500\r\n";
+        let updated = replace_table_value(source, "layout", "peer_on", "\"top\"");
+        assert!(updated.contains("[layout]\r\npeer_on = \"top\"\r\n"));
+        assert!(updated.contains("[session]\r\ntimeout_ms = 1500\r\n"));
+    }
+
+    #[test]
+    fn missing_table_and_value_are_inserted() {
+        let updated =
+            replace_table_value("[local]\nname = \"Mac\"\n", "layout", "peer_on", "\"left\"");
+        assert!(updated.ends_with("\n[layout]\npeer_on = \"left\"\n"));
+    }
+
+    #[test]
     fn session_defaults_are_safety_oriented() {
         let session = RawSession::default();
         assert_eq!(session.hysteresis, 8.0);
@@ -519,6 +616,69 @@ peer_on = "right"
             directory.join("not-created-yet.der")
         );
         assert!(LoadedConfig::load(&config_path).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn persist_peer_on_updates_and_revalidates_a_complete_config() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "edgemouse-layout-config-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(directory.join("identity")).unwrap();
+        let local = Identity::generate().unwrap();
+        let peer = Identity::generate().unwrap();
+        fs::write(
+            directory.join("identity/certificate.der"),
+            &local.certificate,
+        )
+        .unwrap();
+        fs::write(
+            directory.join("identity/private-key.der"),
+            &local.private_key,
+        )
+        .unwrap();
+        fs::write(directory.join("peer.der"), &peer.certificate).unwrap();
+        let config_path = directory.join("edgemouse.toml");
+        fs::write(
+            &config_path,
+            r#"
+[local]
+name = "test-machine"
+listen = "0.0.0.0:43891"
+certificate = "identity/certificate.der"
+private_key = "identity/private-key.der"
+[local.screen]
+id = 1
+name = "Local"
+auto = true
+[peer]
+address = "auto"
+certificate = "peer.der"
+[peer.screen]
+id = 2
+name = "Peer"
+auto = true
+[layout]
+peer_on = "right"
+"#,
+        )
+        .unwrap();
+
+        persist_peer_on(&config_path, Edge::Bottom).unwrap();
+        assert_eq!(
+            LoadedConfig::load(&config_path).unwrap().peer_on,
+            Edge::Bottom
+        );
+        assert!(
+            fs::read_to_string(&config_path)
+                .unwrap()
+                .contains("peer_on = \"bottom\"")
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 }

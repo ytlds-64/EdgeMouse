@@ -7,13 +7,13 @@
 #![forbid(unsafe_code)]
 
 use edgemouse_core::{
-    ButtonState, KeyCode, KeyState, KeyboardEvent, MouseButton, NodeId, Point, Rect,
+    ButtonState, Edge, KeyCode, KeyState, KeyboardEvent, MouseButton, NodeId, Point, Rect,
     RemoteMouseEvent, RoutedEvent, RoutedKeyboardEvent, ScreenId,
 };
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 pub const HEADER_LEN: usize = 12;
 pub const MAX_FRAME_LEN: usize = 64 * 1024;
 pub const MOUSE_DATAGRAM_FRAME_LEN: usize = HEADER_LEN + 6 * std::mem::size_of::<u64>();
@@ -53,6 +53,15 @@ pub enum WireMessage {
     /// ready to accept a reverse handoff from the receiver.
     ControlReclaimAck {
         owner_session_id: u64,
+    },
+    /// Requests an authenticated, persistent layout change. `peer_on` is the
+    /// sender's view, so the receiver stores its opposite edge.
+    LayoutUpdate {
+        request_id: u64,
+        peer_on: Edge,
+    },
+    LayoutUpdateAck {
+        request_id: u64,
     },
     /// An unreliable absolute movement update. `after_sequence` identifies the
     /// newest reliable mouse event that must be applied before this position.
@@ -184,6 +193,14 @@ pub fn encode_frame(message: &WireMessage) -> Result<Vec<u8>, EncodeError> {
         | WireMessage::ControlReclaimAck { owner_session_id } => {
             put_u64(&mut payload, *owner_session_id);
         }
+        WireMessage::LayoutUpdate {
+            request_id,
+            peer_on,
+        } => {
+            put_u64(&mut payload, *request_id);
+            payload.push(encode_edge(*peer_on));
+        }
+        WireMessage::LayoutUpdateAck { request_id } => put_u64(&mut payload, *request_id),
         WireMessage::MouseDatagram {
             session_id,
             after_sequence,
@@ -273,6 +290,13 @@ pub fn decode_frame(frame: &[u8]) -> Result<WireMessage, DecodeError> {
         13 => WireMessage::ControlReclaimAck {
             owner_session_id: payload.u64()?,
         },
+        14 => WireMessage::LayoutUpdate {
+            request_id: payload.u64()?,
+            peer_on: decode_edge(payload.u8()?)?,
+        },
+        15 => WireMessage::LayoutUpdateAck {
+            request_id: payload.u64()?,
+        },
         other => return Err(DecodeError::InvalidTag(other)),
     };
     if !payload.is_empty() {
@@ -315,6 +339,8 @@ fn tag_for(message: &WireMessage) -> u8 {
         WireMessage::Keyboard { .. } => 11,
         WireMessage::ControlReclaim { .. } => 12,
         WireMessage::ControlReclaimAck { .. } => 13,
+        WireMessage::LayoutUpdate { .. } => 14,
+        WireMessage::LayoutUpdateAck { .. } => 15,
         WireMessage::Heartbeat { .. } => 8,
         WireMessage::Goodbye { .. } => 9,
     }
@@ -479,6 +505,25 @@ fn decode_button(value: u16) -> Result<MouseButton, DecodeError> {
         3 => Ok(MouseButton::Back),
         4 => Ok(MouseButton::Forward),
         other if other & 0xff00 == 0x0100 => Ok(MouseButton::Other(other.to_be_bytes()[1])),
+        _ => Err(DecodeError::InvalidEnum),
+    }
+}
+
+const fn encode_edge(edge: Edge) -> u8 {
+    match edge {
+        Edge::Left => 0,
+        Edge::Right => 1,
+        Edge::Top => 2,
+        Edge::Bottom => 3,
+    }
+}
+
+const fn decode_edge(value: u8) -> Result<Edge, DecodeError> {
+    match value {
+        0 => Ok(Edge::Left),
+        1 => Ok(Edge::Right),
+        2 => Ok(Edge::Top),
+        3 => Ok(Edge::Bottom),
         _ => Err(DecodeError::InvalidEnum),
     }
 }
@@ -651,6 +696,11 @@ mod tests {
         round_trip(WireMessage::ControlReclaimAck {
             owner_session_id: 99,
         });
+        round_trip(WireMessage::LayoutUpdate {
+            request_id: 100,
+            peer_on: Edge::Top,
+        });
+        round_trip(WireMessage::LayoutUpdateAck { request_id: 100 });
         round_trip(WireMessage::Heartbeat {
             session_id: 99,
             monotonic_ms: 1_000,
@@ -710,6 +760,17 @@ mod tests {
         };
         let mut frame = encode_frame(&message).unwrap();
         frame[28..30].copy_from_slice(&0x0200_u16.to_be_bytes());
+        assert_eq!(decode_frame(&frame), Err(DecodeError::InvalidEnum));
+    }
+
+    #[test]
+    fn rejects_an_unknown_layout_edge() {
+        let mut frame = encode_frame(&WireMessage::LayoutUpdate {
+            request_id: 7,
+            peer_on: Edge::Left,
+        })
+        .unwrap();
+        *frame.last_mut().unwrap() = 4;
         assert_eq!(decode_frame(&frame), Err(DecodeError::InvalidEnum));
     }
 

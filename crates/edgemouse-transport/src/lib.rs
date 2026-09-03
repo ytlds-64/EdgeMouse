@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const TLS_SERVER_NAME: &str = "edgemouse.local";
-const ALPN: &[u8] = b"edgemouse/5";
+const ALPN: &[u8] = b"edgemouse/6";
 const RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const DATAGRAM_RECEIVE_BUFFER_BYTES: usize = 4 * 1024;
 // One fixed-size movement frame: congestion drops positions at the application latest-value slot.
