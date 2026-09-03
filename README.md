@@ -415,6 +415,11 @@ EdgeMouse 0.5.5 gives the frameless Windows desktop window rounded transparent
 corners and regenerates the macOS application icon with a real alpha channel,
 removing the unwanted white square shown behind the icon in the Dock. Protocol
 v6 is unchanged and remains connection-compatible with 0.5.3.
+EdgeMouse 0.5.6 makes the Windows webview slightly overscan its transparent
+host so display scaling cannot expose a dark seam around the rounded corners.
+It also replaces the improvised macOS device mark with a crisp vector Apple
+silhouette. Protocol v6 is unchanged and remains connection-compatible with
+0.5.3.
 
 ## Verify the source tree
 

@@ -25,7 +25,13 @@ button { color: inherit; }
 .app-window { display: grid; grid-template-columns: 254px 1fr; min-height: 100vh; overflow: hidden; background: var(--canvas); }
 html[data-native-app="true"],
 html[data-native-app="true"] body { background: transparent; }
-html[data-native-app="true"][data-desktop-platform="windows"] .app-window { border-radius: 14px; }
+html[data-native-app="true"][data-desktop-platform="windows"] { overflow: hidden; }
+html[data-native-app="true"][data-desktop-platform="windows"] .app-window {
+  width: calc(100vw + 2px);
+  min-height: calc(100vh + 2px);
+  margin: -1px;
+  border-radius: 10px;
+}
 .sidebar { position: relative; display: flex; flex-direction: column; padding: 26px 16px 22px; border-right: 1px solid var(--line); background: rgba(252, 253, 251, .94); }
 .brand { display: flex; align-items: center; gap: 11px; height: 48px; padding: 0 15px; margin-bottom: 28px; font-size: 21px; font-weight: 750; letter-spacing: -.5px; }
 .brand img { width: 34px; height: 34px; border-radius: 9px; }
@@ -77,8 +83,8 @@ html[data-native-app="true"][data-desktop-platform="macos"] .content { height: 1
 .online b, .online-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); }
 .windows-symbol { display: grid; grid-template-columns: repeat(2, 8px); grid-template-rows: repeat(2, 8px); gap: 2px; }
 .windows-symbol i { background: #1986f8; }
-.apple-symbol { position: relative; color: #111; font-size: 23px; line-height: 1; transform: scaleX(.82); }
-.apple-symbol::after { content: ""; position: absolute; width: 6px; height: 4px; border-radius: 80% 0; background: #111; top: -3px; right: 3px; transform: rotate(-35deg); }
+.apple-symbol { display: inline-flex; width: 22px; height: 24px; color: #111; }
+.apple-symbol svg { display: block; width: 100%; height: 100%; fill: currentColor; }
 .device-card h2 { margin: 12px 0 4px; font-size: 21px; }
 .device-card > p { margin: 0; color: var(--muted); font-size: 13px; }
 .monitor-art { position: relative; width: 210px; height: 156px; margin: 14px auto 0; }
@@ -507,7 +513,6 @@ html[data-theme="dark"] .dotted-surface { background-color: #152126; background-
 html[data-theme="dark"] .connection-stage { border-color: #35454a; }
 html[data-theme="dark"] .device-card { border-color: #3b4b50; background: linear-gradient(145deg, #203138, #172429); }
 html[data-theme="dark"] .apple-symbol { color: #eef4f5; }
-html[data-theme="dark"] .apple-symbol::after { background: #eef4f5; }
 html[data-theme="dark"] .stage-tip { border-color: #526165; color: #b1bdbf; background: rgba(20, 33, 38, .9); }
 html[data-theme="dark"] .panel,
 html[data-theme="dark"] .summary-card,
