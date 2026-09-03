@@ -52,6 +52,8 @@ button { color: inherit; }
 .window-icon-close::before { transform: rotate(45deg); }
 .window-icon-close::after { transform: rotate(-45deg); }
 .content { height: calc(100vh - 54px); overflow: auto; padding: 24px 38px 34px; }
+html[data-native-app="true"][data-desktop-platform="macos"] .titlebar { display: none; }
+html[data-native-app="true"][data-desktop-platform="macos"] .content { height: 100vh; }
 .page { display: none; max-width: 1280px; min-height: calc(100vh - 112px); margin: 0 auto; animation: page-in .22s ease both; }
 .page.is-active { display: block; }
 @keyframes page-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }

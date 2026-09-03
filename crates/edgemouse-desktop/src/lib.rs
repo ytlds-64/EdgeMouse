@@ -4,16 +4,25 @@ use edgemouse_core::Edge;
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
 struct AppState {
     config_path: Option<PathBuf>,
+    agent_status: Arc<Mutex<AgentStatusCache>>,
+}
+
+#[derive(Default)]
+struct AgentStatusCache {
+    last_status: Option<control::RunningStatus>,
+    consecutive_misses: u8,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AgentSnapshot {
     running: bool,
+    status_fresh: bool,
     process_id: Option<u32>,
     version: String,
     connection: Option<ConnectionSnapshot>,
@@ -122,9 +131,12 @@ struct SavedLayout {
 #[tauri::command]
 async fn get_app_snapshot(state: tauri::State<'_, AppState>) -> Result<AppSnapshot, String> {
     let config_path = state.config_path.clone();
-    tauri::async_runtime::spawn_blocking(move || build_app_snapshot(config_path.as_deref()))
-        .await
-        .map_err(|error| format!("failed to read EdgeMouse desktop status: {error}"))
+    let agent_status = Arc::clone(&state.agent_status);
+    tauri::async_runtime::spawn_blocking(move || {
+        build_app_snapshot(config_path.as_deref(), &agent_status)
+    })
+    .await
+    .map_err(|error| format!("failed to read EdgeMouse desktop status: {error}"))
 }
 
 #[tauri::command]
@@ -203,10 +215,13 @@ const fn local_layout_edge(windows_to_mac: Edge, local_is_macos: bool) -> Edge {
     }
 }
 
-fn build_app_snapshot(config_path: Option<&Path>) -> AppSnapshot {
+fn build_app_snapshot(
+    config_path: Option<&Path>,
+    agent_status: &Mutex<AgentStatusCache>,
+) -> AppSnapshot {
     AppSnapshot {
         desktop_version: env!("CARGO_PKG_VERSION").to_owned(),
-        agent: agent_snapshot(),
+        agent: agent_snapshot(agent_status),
         platform: platform_snapshot(),
         config: config_snapshot(config_path),
     }
@@ -230,30 +245,178 @@ fn window_action(window: tauri::WebviewWindow, action: String) -> Result<(), Str
     result.map_err(|error| error.to_string())
 }
 
-fn agent_snapshot() -> AgentSnapshot {
+const AGENT_STATUS_MISS_TOLERANCE: u8 = 3;
+
+fn agent_snapshot(cache: &Mutex<AgentStatusCache>) -> AgentSnapshot {
     match control::query_status() {
-        Ok(Some(status)) => AgentSnapshot {
-            running: true,
-            process_id: Some(status.process_id),
-            version: status.version,
-            connection: Some(status.connection.into()),
-            error: None,
-        },
-        Ok(None) => AgentSnapshot {
-            running: false,
-            process_id: None,
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-            connection: None,
-            error: None,
-        },
-        Err(error) => AgentSnapshot {
-            running: false,
-            process_id: None,
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-            connection: None,
-            error: Some(error.to_string()),
-        },
+        Ok(Some(status)) => {
+            let snapshot = running_agent_snapshot(status.clone(), true, None);
+            let mut cache = cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cache.last_status = Some(status);
+            cache.consecutive_misses = 0;
+            snapshot
+        }
+        Ok(None) => missed_agent_snapshot(cache, None),
+        Err(error) => missed_agent_snapshot(cache, Some(error.to_string())),
     }
+}
+
+fn running_agent_snapshot(
+    status: control::RunningStatus,
+    status_fresh: bool,
+    error: Option<String>,
+) -> AgentSnapshot {
+    AgentSnapshot {
+        running: true,
+        status_fresh,
+        process_id: Some(status.process_id),
+        version: status.version,
+        connection: Some(status.connection.into()),
+        error,
+    }
+}
+
+fn missed_agent_snapshot(
+    cache: &Mutex<AgentStatusCache>,
+    query_error: Option<String>,
+) -> AgentSnapshot {
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.consecutive_misses = cache.consecutive_misses.saturating_add(1);
+    if cache.consecutive_misses < AGENT_STATUS_MISS_TOLERANCE
+        && let Some(status) = cache.last_status.clone()
+    {
+        let detail = query_error.unwrap_or_else(|| "本机状态通道暂时没有响应".to_owned());
+        return running_agent_snapshot(
+            status,
+            false,
+            Some(format!("{detail}；正在自动确认后台服务状态")),
+        );
+    }
+
+    AgentSnapshot {
+        running: false,
+        status_fresh: false,
+        process_id: None,
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        connection: None,
+        error: query_error,
+    }
+}
+
+#[tauri::command]
+fn set_menu_language(app: tauri::AppHandle, language: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    install_macos_menu(&app, &language).map_err(|error| error.to_string())?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, language);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn install_macos_menu(app: &tauri::AppHandle, language: &str) -> tauri::Result<()> {
+    use tauri::menu::{AboutMetadataBuilder, MenuBuilder, SubmenuBuilder};
+
+    let chinese = language != "en";
+    let about = AboutMetadataBuilder::new()
+        .name(Some("EdgeMouse"))
+        .version(Some(env!("CARGO_PKG_VERSION")))
+        .copyright(Some("Copyright © 2026 EdgeMouse contributors"))
+        .credits(Some(if chinese {
+            "让 Windows 与 macOS 像一张连续的桌面一样自然协作。"
+        } else {
+            "Make Windows and macOS feel like one continuous desktop."
+        }))
+        .build();
+
+    let app_menu = SubmenuBuilder::new(app, "EdgeMouse")
+        .about_with_text(
+            if chinese {
+                "关于 EdgeMouse"
+            } else {
+                "About EdgeMouse"
+            },
+            Some(about),
+        )
+        .separator()
+        .services_with_text(if chinese { "服务" } else { "Services" })
+        .separator()
+        .hide_with_text(if chinese {
+            "隐藏 EdgeMouse"
+        } else {
+            "Hide EdgeMouse"
+        })
+        .hide_others_with_text(if chinese {
+            "隐藏其他"
+        } else {
+            "Hide Others"
+        })
+        .show_all_with_text(if chinese { "全部显示" } else { "Show All" })
+        .separator()
+        .quit_with_text(if chinese {
+            "退出 EdgeMouse"
+        } else {
+            "Quit EdgeMouse"
+        })
+        .build()?;
+    let file_menu = SubmenuBuilder::new(app, if chinese { "文件" } else { "File" })
+        .close_window_with_text(if chinese {
+            "关闭窗口"
+        } else {
+            "Close Window"
+        })
+        .build()?;
+    let edit_menu = SubmenuBuilder::new(app, if chinese { "编辑" } else { "Edit" })
+        .undo_with_text(if chinese { "撤销" } else { "Undo" })
+        .redo_with_text(if chinese { "重做" } else { "Redo" })
+        .separator()
+        .cut_with_text(if chinese { "剪切" } else { "Cut" })
+        .copy_with_text(if chinese { "拷贝" } else { "Copy" })
+        .paste_with_text(if chinese { "粘贴" } else { "Paste" })
+        .select_all_with_text(if chinese { "全选" } else { "Select All" })
+        .build()?;
+    let view_menu = SubmenuBuilder::new(app, if chinese { "显示" } else { "View" })
+        .fullscreen_with_text(if chinese {
+            "进入全屏幕"
+        } else {
+            "Enter Full Screen"
+        })
+        .build()?;
+    let window_menu = SubmenuBuilder::new(app, if chinese { "窗口" } else { "Window" })
+        .minimize_with_text(if chinese { "最小化" } else { "Minimize" })
+        .maximize_with_text(if chinese { "缩放" } else { "Zoom" })
+        .separator()
+        .bring_all_to_front_with_text(if chinese {
+            "前置全部窗口"
+        } else {
+            "Bring All to Front"
+        })
+        .build()?;
+    let help_menu = SubmenuBuilder::new(app, if chinese { "帮助" } else { "Help" })
+        .text(
+            "show_help",
+            if chinese {
+                "EdgeMouse 帮助"
+            } else {
+                "EdgeMouse Help"
+            },
+        )
+        .build()?;
+    let menu = MenuBuilder::new(app)
+        .items(&[
+            &app_menu,
+            &file_menu,
+            &edit_menu,
+            &view_menu,
+            &window_menu,
+            &help_menu,
+        ])
+        .build()?;
+    app.set_menu(menu)?;
+    Ok(())
 }
 
 fn platform_snapshot() -> PlatformSnapshot {
@@ -443,17 +606,34 @@ fn resolve_config_path() -> Option<PathBuf> {
 pub fn run() {
     let config_path = resolve_config_path();
     tauri::Builder::default()
-        .manage(AppState { config_path })
+        .manage(AppState {
+            config_path,
+            agent_status: Arc::new(Mutex::new(AgentStatusCache::default())),
+        })
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 window.set_title(&format!("EdgeMouse {}", env!("CARGO_PKG_VERSION")))?;
+                #[cfg(target_os = "macos")]
+                window.set_decorations(true)?;
             }
+            #[cfg(target_os = "macos")]
+            install_macos_menu(app.handle(), "zh-CN")?;
             Ok(())
+        })
+        .on_menu_event(|app, event| {
+            if event.id() == "show_help"
+                && let Some(window) = app.get_webview_window("main")
+            {
+                let _ = window.show();
+                let _ = window.set_focus();
+                let _ = window.eval("document.querySelector('[data-page=\"about\"]')?.click();");
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_app_snapshot,
             save_scroll_settings,
             save_layout,
+            set_menu_language,
             window_action
         ])
         .run(tauri::generate_context!())
@@ -462,8 +642,13 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{local_layout_edge, parse_layout_edge, scroll_settings_source};
+    use super::{
+        AgentStatusCache, local_layout_edge, missed_agent_snapshot, parse_layout_edge,
+        scroll_settings_source,
+    };
+    use edgemouse_agent::control::{ConnectionTelemetry, RunningStatus};
     use edgemouse_core::Edge;
+    use std::sync::Mutex;
 
     #[test]
     fn parses_the_four_layout_edges() {
@@ -508,5 +693,49 @@ mod tests {
         assert!(updated.ends_with(
             "\n[session]\nreverse_scroll_horizontal = false\nreverse_scroll_vertical = true\n"
         ));
+    }
+
+    #[test]
+    fn transient_agent_status_misses_keep_the_last_known_running_state() {
+        let cache = Mutex::new(AgentStatusCache {
+            last_status: Some(RunningStatus {
+                process_id: 42,
+                version: "test-version".to_owned(),
+                connection: ConnectionTelemetry::default(),
+            }),
+            consecutive_misses: 0,
+        });
+
+        let first = missed_agent_snapshot(&cache, None);
+        let second = missed_agent_snapshot(&cache, Some("temporary failure".to_owned()));
+
+        assert!(first.running);
+        assert!(!first.status_fresh);
+        assert_eq!(first.process_id, Some(42));
+        assert!(second.running);
+        assert!(!second.status_fresh);
+        assert!(
+            second
+                .error
+                .is_some_and(|error| error.contains("temporary failure"))
+        );
+    }
+
+    #[test]
+    fn repeated_agent_status_misses_eventually_report_the_service_stopped() {
+        let cache = Mutex::new(AgentStatusCache {
+            last_status: Some(RunningStatus {
+                process_id: 42,
+                version: "test-version".to_owned(),
+                connection: ConnectionTelemetry::default(),
+            }),
+            consecutive_misses: 2,
+        });
+
+        let snapshot = missed_agent_snapshot(&cache, None);
+
+        assert!(!snapshot.running);
+        assert!(!snapshot.status_fresh);
+        assert_eq!(snapshot.process_id, None);
     }
 }

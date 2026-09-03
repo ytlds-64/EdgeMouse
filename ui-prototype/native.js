@@ -3,6 +3,19 @@
   if (!invoke) return;
 
   document.documentElement.dataset.nativeApp = "true";
+  const isMacOS = /Macintosh|Mac OS X/.test(navigator.userAgent);
+  document.documentElement.dataset.desktopPlatform = isMacOS ? "macos" : "windows";
+
+  if (isMacOS) {
+    const syncNativeMenuLanguage = () => {
+      const language = document.querySelector("#language")?.value
+        ?? window.localStorage.getItem("edgemouse-language")
+        ?? "zh-CN";
+      invoke("set_menu_language", { language }).catch(console.error);
+    };
+    syncNativeMenuLanguage();
+    document.querySelector("#language")?.addEventListener("change", syncNativeMenuLanguage);
+  }
 
   document.querySelectorAll("[data-window-action]").forEach((element) => {
     element.addEventListener("pointerdown", (event) => {
@@ -239,7 +252,10 @@
 
     setText(`${localSelector} h2`, snapshot.config.localName);
     setText(`${peerSelector} h2`, snapshot.config.peerScreenName);
-    setOnlineLabel(`${localSelector} .online`, snapshot.agent.running ? "本机运行中" : "本机服务未启动");
+    const localStatus = snapshot.agent.running
+      ? snapshot.agent.statusFresh === false ? "本机状态确认中" : "本机运行中"
+      : "本机服务未启动";
+    setOnlineLabel(`${localSelector} .online`, localStatus);
     setOnlineLabel(`${peerSelector} .online`, connected ? "可信设备已连接" : connectionLabels[state] ?? "可信设备待连接");
 
     const width = snapshot.platform.desktopWidth;
@@ -304,7 +320,12 @@
     if (serviceChip) {
       serviceChip.classList.toggle("good", running);
       serviceChip.classList.toggle("pending", !running);
-      serviceChip.textContent = running ? `后台服务正常 · PID ${snapshot.agent.processId}` : "后台服务未运行";
+      serviceChip.textContent = running
+        ? snapshot.agent.statusFresh === false
+          ? `正在确认后台状态 · PID ${snapshot.agent.processId}`
+          : `后台服务正常 · PID ${snapshot.agent.processId}`
+        : "后台服务未运行";
+      serviceChip.title = snapshot.agent.error ?? "";
     }
 
     const screenFacts = document.querySelectorAll(".screen-facts b");

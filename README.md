@@ -405,6 +405,12 @@ local `layout.peer_on`, sends the corresponding edge over the authenticated
 connection, and makes the trusted peer store the opposite edge before both
 agents reconnect automatically. This layout update and acknowledgement use
 protocol v6, so both computers must update to 0.5.3 before using this release.
+EdgeMouse 0.5.4 gives macOS its native decorated window and localized system
+menus while retaining the custom Windows title bar. The desktop status panel
+also keeps the last confirmed agent state across two isolated local-control
+poll misses, so a brief status-channel delay is shown as confirmation in
+progress instead of incorrectly claiming that the background service stopped.
+Protocol v6 is unchanged and remains connection-compatible with 0.5.3.
 
 ## Verify the source tree
 
