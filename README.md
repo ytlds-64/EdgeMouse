@@ -431,6 +431,12 @@ per-display topology after authentication. The desktop app now draws every
 Windows and macOS monitor at its real relative position, labels its physical
 pixel resolution and primary-display status, and derives both layout summaries
 from live device data. Both computers must update to 0.5.8 before connecting.
+EdgeMouse 0.5.9 makes the Overview layout label follow the same canonical
+Mac-relative-to-Windows direction used by the Screen layout page. It also turns
+the Overview power switch into a live local-service control: the desktop app
+starts only a matching agent version with file logging, suppresses the Windows
+console window, and uses the safe control channel when stopping. Protocol v7 is
+unchanged and remains connection-compatible with 0.5.8.
 
 ## Verify the source tree
 

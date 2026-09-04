@@ -2,9 +2,12 @@ use edgemouse_agent::config::{LoadedConfig, PeerAddress, edge_name, persist_peer
 use edgemouse_agent::{control, platform};
 use edgemouse_core::{DisplayGeometry, Edge, Rect};
 use serde::Serialize;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 use tauri::Manager;
 
 struct AppState {
@@ -189,6 +192,13 @@ struct SavedLayout {
     local_peer_on: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentServiceResult {
+    running: bool,
+    message: String,
+}
+
 #[tauri::command]
 async fn get_app_snapshot(state: tauri::State<'_, AppState>) -> Result<AppSnapshot, String> {
     let config_path = state.config_path.clone();
@@ -257,6 +267,177 @@ async fn save_layout(
     .await
     .map_err(|error| format!("保存屏幕布局的后台任务失败：{error}"))?
 }
+
+#[tauri::command]
+async fn set_agent_running(
+    state: tauri::State<'_, AppState>,
+    running: bool,
+) -> Result<AgentServiceResult, String> {
+    let config_path = state
+        .config_path
+        .clone()
+        .ok_or_else(|| "未找到 edgemouse.toml；无法启动后台服务".to_owned())?;
+    let agent_status = Arc::clone(&state.agent_status);
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = if running {
+            start_agent(&config_path)
+        } else {
+            stop_agent()
+        }?;
+        let mut cache = agent_status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *cache = AgentStatusCache::default();
+        Ok(result)
+    })
+    .await
+    .map_err(|error| format!("后台服务操作失败：{error}"))?
+}
+
+fn start_agent(config_path: &Path) -> Result<AgentServiceResult, String> {
+    if let Some(status) = control::query_status().map_err(|error| error.to_string())? {
+        return Ok(AgentServiceResult {
+            running: true,
+            message: format!("EdgeMouse 已在运行 · PID {}", status.process_id),
+        });
+    }
+    LoadedConfig::load(config_path).map_err(|error| format!("启动前配置检查失败：{error}"))?;
+    let agent_path = resolve_agent_executable(config_path)?;
+    let project_root = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let log_directory = project_root.join("logs");
+    fs::create_dir_all(&log_directory)
+        .map_err(|error| format!("无法创建日志目录 {}：{error}", log_directory.display()))?;
+    let output_log = log_directory.join("desktop-agent.out.log");
+    let error_log = log_directory.join("desktop-agent.err.log");
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&output_log)
+        .map_err(|error| format!("无法打开日志 {}：{error}", output_log.display()))?;
+    let stderr = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&error_log)
+        .map_err(|error| format!("无法打开日志 {}：{error}", error_log.display()))?;
+
+    let mut command = Command::new(&agent_path);
+    command
+        .arg("run")
+        .arg(config_path)
+        .current_dir(project_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+    suppress_windows_console(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("无法启动 {}：{error}", agent_path.display()))?;
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(125));
+        if let Some(status) = control::query_status().map_err(|error| error.to_string())? {
+            return Ok(AgentServiceResult {
+                running: true,
+                message: format!("EdgeMouse 已启动 · PID {}", status.process_id),
+            });
+        }
+        if let Some(exit_status) = child
+            .try_wait()
+            .map_err(|error| format!("无法读取后台服务状态：{error}"))?
+        {
+            return Err(format!(
+                "后台服务启动后立即退出（{exit_status}）；请查看 {}",
+                error_log.display()
+            ));
+        }
+    }
+    Err(format!("后台服务启动超时；请查看 {}", error_log.display()))
+}
+
+fn stop_agent() -> Result<AgentServiceResult, String> {
+    let Some(status) = control::request_stop().map_err(|error| error.to_string())? else {
+        return Ok(AgentServiceResult {
+            running: false,
+            message: "EdgeMouse 已停止".to_owned(),
+        });
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(100));
+        if control::query_status()
+            .map_err(|error| error.to_string())?
+            .is_none()
+        {
+            return Ok(AgentServiceResult {
+                running: false,
+                message: format!("EdgeMouse 已安全停止 · PID {}", status.process_id),
+            });
+        }
+    }
+    Err("后台服务没有在 5 秒内停止；本地控制权已请求恢复".to_owned())
+}
+
+fn resolve_agent_executable(config_path: &Path) -> Result<PathBuf, String> {
+    let executable_name = if cfg!(target_os = "windows") {
+        "edgemouse.exe"
+    } else {
+        "edgemouse"
+    };
+    let mut candidates = Vec::new();
+    if let Ok(current_executable) = std::env::current_exe()
+        && let Some(directory) = current_executable.parent()
+    {
+        candidates.push(directory.join(executable_name));
+    }
+    if let Some(project_root) = config_path.parent() {
+        candidates.push(
+            project_root
+                .join("target")
+                .join("release")
+                .join(executable_name),
+        );
+    }
+    candidates.dedup();
+
+    let expected_version = format!("edgemouse {}", env!("CARGO_PKG_VERSION"));
+    let mut found_versions = Vec::new();
+    for candidate in candidates {
+        if !candidate.is_file() {
+            continue;
+        }
+        let mut command = Command::new(&candidate);
+        command.arg("version").stdin(Stdio::null());
+        suppress_windows_console(&mut command);
+        let output = command
+            .output()
+            .map_err(|error| format!("无法检查 {}：{error}", candidate.display()))?;
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if output.status.success() && version == expected_version {
+            return Ok(candidate);
+        }
+        found_versions.push(format!("{} ({version})", candidate.display()));
+    }
+    let detail = if found_versions.is_empty() {
+        "没有找到后台程序".to_owned()
+    } else {
+        format!("找到的版本不匹配：{}", found_versions.join("；"))
+    };
+    Err(format!(
+        "{detail}。请先同时构建 edgemouse-agent 与 edgemouse-desktop {}",
+        env!("CARGO_PKG_VERSION")
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn suppress_windows_console(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn suppress_windows_console(_command: &mut Command) {}
 
 fn parse_layout_edge(value: &str) -> Result<Edge, String> {
     match value {
@@ -700,6 +881,7 @@ pub fn run() {
             get_app_snapshot,
             save_scroll_settings,
             save_layout,
+            set_agent_running,
             set_menu_language,
             window_action
         ])

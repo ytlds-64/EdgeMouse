@@ -110,6 +110,7 @@ button.summary-card:hover { border-color: #b8dcd6; box-shadow: 0 5px 15px rgba(2
 .summary-card div { display: flex; flex: 1; flex-direction: column; gap: 5px; min-width: 0; }
 .summary-card strong { font-size: 14px; }
 .summary-card small { font-size: 13px; white-space: nowrap; }
+.service-toggle:disabled { cursor: wait; opacity: .7; }
 .summary-link { border: 1px solid var(--line); }
 .summary-link > b { color: #4d5a5c; font-size: 26px; font-weight: 400; }
 .direction-card { padding: 13px 15px; }

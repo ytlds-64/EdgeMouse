@@ -64,6 +64,7 @@
   const chartPointCount = 60;
   let lastQualitySecond;
   let latestSnapshot;
+  let serviceActionPending = false;
 
   const connectionLabels = {
     starting: "正在启动",
@@ -413,6 +414,16 @@
     window.setEdgeMouseAppVersion?.(running ? snapshot.agent.version : snapshot.desktopVersion);
     setText("[data-native-mode]", "桌面应用 · 实时状态");
 
+    if (!serviceActionPending) {
+      const serviceToggle = document.querySelector("[data-service-toggle]");
+      if (serviceToggle) {
+        serviceToggle.classList.toggle("is-on", running);
+        serviceToggle.setAttribute("aria-checked", String(running));
+        serviceToggle.title = snapshot.agent.error ?? "";
+      }
+      setText(".service-state-label", running ? "本机服务运行中" : "本机服务未启动");
+    }
+
     setChip(
       ".connection-status-chip",
       connected,
@@ -487,6 +498,31 @@
       refreshing = false;
     }
   }
+
+  document.querySelector("[data-service-toggle]")?.addEventListener("click", async (event) => {
+    const toggle = event.currentTarget;
+    const shouldRun = toggle.classList.contains("is-on");
+    serviceActionPending = true;
+    toggle.disabled = true;
+    toggle.setAttribute("aria-busy", "true");
+    setText(".service-state-label", shouldRun ? "正在启动…" : "正在停止…");
+    try {
+      const result = await invoke("set_agent_running", { running: shouldRun });
+      toggle.classList.toggle("is-on", result.running);
+      toggle.setAttribute("aria-checked", String(result.running));
+      window.showEdgeMouseToast?.(result.message);
+    } catch (error) {
+      toggle.classList.toggle("is-on", !shouldRun);
+      toggle.setAttribute("aria-checked", String(!shouldRun));
+      console.error("Unable to change EdgeMouse service state", error);
+      window.showEdgeMouseToast?.(`${shouldRun ? "无法启动" : "无法停止"} EdgeMouse：${error}`);
+    } finally {
+      serviceActionPending = false;
+      toggle.disabled = false;
+      toggle.removeAttribute("aria-busy");
+      await refreshSnapshot();
+    }
+  });
 
   document.querySelector(".input-save-button")?.addEventListener("click", async (event) => {
     const button = event.currentTarget;

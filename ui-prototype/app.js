@@ -732,6 +732,13 @@ const layoutDirectionButtons = [...document.querySelectorAll(".layout-direction 
 const dragBeam = layoutCanvas.querySelector(".drag-beam");
 let layoutDirty = false;
 
+function syncOverviewLayout(edge) {
+  const label = document.querySelector("[data-overview-layout]");
+  if (!label) return;
+  const direction = { left: "左侧", right: "右侧", top: "上方", bottom: "下方" }[edge] ?? "右侧";
+  label.textContent = `Mac 位于 Windows ${direction}`;
+}
+
 function setLayoutEdge(edge, { dirty = false } = {}) {
   const win = layoutCanvas.querySelector(".screen-win");
   const mac = layoutCanvas.querySelector(".screen-mac");
@@ -741,6 +748,7 @@ function setLayoutEdge(edge, { dirty = false } = {}) {
   const macComesFirst = edge === "left" || edge === "top";
 
   layoutCanvas.dataset.edge = edge;
+  syncOverviewLayout(edge);
   layoutCanvas.style.flexDirection = vertical ? "column" : "row";
   beam.style.width = vertical ? "160px" : "20px";
   beam.style.height = vertical ? "20px" : "160px";

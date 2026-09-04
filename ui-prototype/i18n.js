@@ -21,6 +21,13 @@
     "将鼠标推过屏幕边缘即可切换控制": "Push the pointer across a screen edge to switch control",
     "开机自动连接": "Connect at startup",
     "已启用": "Enabled",
+    "运行 EdgeMouse": "Run EdgeMouse",
+    "正在读取状态": "Reading status",
+    "本机服务运行中": "Local service is running",
+    "本机服务未启动": "Local service is stopped",
+    "正在启动…": "Starting…",
+    "正在停止…": "Stopping…",
+    "启动或停止 EdgeMouse 本机服务": "Start or stop the local EdgeMouse service",
     "边缘切换": "Edge switching",
     "Windows 右侧": "Right of Windows",
     "网络延迟": "Network latency",
@@ -438,6 +445,16 @@
     }
     const desktopSize = value.match(/^(\d+) 个屏幕 · (\d+) × (\d+) 桌面$/);
     if (desktopSize) return `${desktopSize[1]} ${desktopSize[1] === "1" ? "display" : "displays"} · ${desktopSize[2]} × ${desktopSize[3]} desktop`;
+    const overviewLayout = value.match(/^Mac 位于 Windows (左侧|右侧|上方|下方)$/);
+    if (overviewLayout) {
+      const position = { 左侧: "left of", 右侧: "right of", 上方: "above", 下方: "below" }[overviewLayout[1]];
+      return `Mac is ${position} Windows`;
+    }
+    const agentStarted = value.match(/^EdgeMouse 已(?:在运行|启动) · PID (\d+)$/);
+    if (agentStarted) return `EdgeMouse is running · PID ${agentStarted[1]}`;
+    const agentStopped = value.match(/^EdgeMouse 已安全停止 · PID (\d+)$/);
+    if (agentStopped) return `EdgeMouse stopped safely · PID ${agentStopped[1]}`;
+    if (value === "EdgeMouse 已停止") return "EdgeMouse is stopped";
     const displayTitle = value.match(/^(Windows|macOS) (主屏|屏幕 \d+) · (.+) · 位置 \((-?\d+), (-?\d+)\)$/);
     if (displayTitle) {
       const label = displayTitle[2] === "主屏" ? "Primary" : displayTitle[2].replace("屏幕", "Display");
