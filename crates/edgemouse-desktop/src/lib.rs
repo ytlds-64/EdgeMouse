@@ -1,6 +1,6 @@
 use edgemouse_agent::config::{LoadedConfig, PeerAddress, edge_name, persist_peer_on};
 use edgemouse_agent::{control, platform};
-use edgemouse_core::Edge;
+use edgemouse_core::{DisplayGeometry, Edge, Rect};
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -46,6 +46,7 @@ struct ConnectionSnapshot {
     received_moves: u64,
     stale_moves: u64,
     superseded_moves: u64,
+    peer_desktop: Option<DesktopSnapshot>,
 }
 
 impl From<control::ConnectionTelemetry> for ConnectionSnapshot {
@@ -65,7 +66,66 @@ impl From<control::ConnectionTelemetry> for ConnectionSnapshot {
             received_moves: telemetry.received_moves,
             stale_moves: telemetry.stale_moves,
             superseded_moves: telemetry.superseded_moves,
+            peer_desktop: telemetry.peer_desktop.map(DesktopSnapshot::from),
         }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopSnapshot {
+    origin_x: f64,
+    origin_y: f64,
+    width: f64,
+    height: f64,
+    scale_factor: f64,
+    displays: Vec<DisplaySnapshot>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DisplaySnapshot {
+    origin_x: f64,
+    origin_y: f64,
+    width: f64,
+    height: f64,
+    pixel_width: u32,
+    pixel_height: u32,
+    scale_factor: f64,
+    primary: bool,
+}
+
+impl From<DisplayGeometry> for DisplaySnapshot {
+    fn from(display: DisplayGeometry) -> Self {
+        Self {
+            origin_x: display.bounds.origin.x,
+            origin_y: display.bounds.origin.y,
+            width: display.bounds.width,
+            height: display.bounds.height,
+            pixel_width: display.pixel_width,
+            pixel_height: display.pixel_height,
+            scale_factor: display.scale_factor,
+            primary: display.primary,
+        }
+    }
+}
+
+impl DesktopSnapshot {
+    fn new(bounds: Rect, scale_factor: f64, displays: Vec<DisplayGeometry>) -> Self {
+        Self {
+            origin_x: bounds.origin.x,
+            origin_y: bounds.origin.y,
+            width: bounds.width,
+            height: bounds.height,
+            scale_factor,
+            displays: displays.into_iter().map(DisplaySnapshot::from).collect(),
+        }
+    }
+}
+
+impl From<control::DesktopTelemetry> for DesktopSnapshot {
+    fn from(desktop: control::DesktopTelemetry) -> Self {
+        Self::new(desktop.bounds, desktop.scale_factor, desktop.displays)
     }
 }
 
@@ -78,6 +138,7 @@ struct PlatformSnapshot {
     desktop_height: Option<f64>,
     scale_factor: Option<f64>,
     display_count: Option<u32>,
+    desktop: Option<DesktopSnapshot>,
     geometry_error: Option<String>,
 }
 
@@ -429,6 +490,11 @@ fn platform_snapshot() -> PlatformSnapshot {
             desktop_height: Some(desktop.bounds.height),
             scale_factor: Some(desktop.scale_factor),
             display_count: Some(desktop.display_count),
+            desktop: Some(DesktopSnapshot::new(
+                desktop.bounds,
+                desktop.scale_factor,
+                desktop.displays,
+            )),
             geometry_error: None,
         },
         Err(error) => PlatformSnapshot {
@@ -438,6 +504,7 @@ fn platform_snapshot() -> PlatformSnapshot {
             desktop_height: None,
             scale_factor: None,
             display_count: None,
+            desktop: None,
             geometry_error: Some(error.to_string()),
         },
     }

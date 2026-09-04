@@ -9,23 +9,28 @@ pub struct PlatformStatus {
     pub permission_granted: Option<bool>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct DesktopGeometry {
     pub bounds: edgemouse_core::Rect,
     pub scale_factor: f64,
     pub display_count: u32,
+    pub displays: Vec<edgemouse_core::DisplayGeometry>,
 }
 
 pub fn desktop_geometry() -> Result<DesktopGeometry, edgemouse_core::PlatformError> {
     #[cfg(target_os = "macos")]
-    let (bounds, scale_factor, display_count) = edgemouse_platform_macos::desktop_geometry()?;
+    let (bounds, scale_factor, displays) = edgemouse_platform_macos::desktop_geometry()?;
     #[cfg(target_os = "windows")]
-    let (bounds, scale_factor, display_count) = edgemouse_platform_windows::desktop_geometry()?;
+    let (bounds, scale_factor, displays) = edgemouse_platform_windows::desktop_geometry()?;
+
+    let display_count = u32::try_from(displays.len())
+        .map_err(|_| edgemouse_core::PlatformError::new("display count exceeds supported range"))?;
 
     Ok(DesktopGeometry {
         bounds,
         scale_factor,
         display_count,
+        displays,
     })
 }
 

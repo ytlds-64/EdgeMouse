@@ -7,15 +7,16 @@
 #![forbid(unsafe_code)]
 
 use edgemouse_core::{
-    ButtonState, Edge, KeyCode, KeyState, KeyboardEvent, MouseButton, NodeId, Point, Rect,
-    RemoteMouseEvent, RoutedEvent, RoutedKeyboardEvent, ScreenId,
+    ButtonState, DisplayGeometry, Edge, KeyCode, KeyState, KeyboardEvent, MouseButton, NodeId,
+    Point, Rect, RemoteMouseEvent, RoutedEvent, RoutedKeyboardEvent, ScreenId,
 };
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-pub const PROTOCOL_VERSION: u16 = 6;
+pub const PROTOCOL_VERSION: u16 = 7;
 pub const HEADER_LEN: usize = 12;
 pub const MAX_FRAME_LEN: usize = 64 * 1024;
+pub const MAX_DISPLAY_COUNT: usize = 32;
 pub const MOUSE_DATAGRAM_FRAME_LEN: usize = HEADER_LEN + 6 * std::mem::size_of::<u64>();
 const MAGIC: [u8; 4] = *b"EMOU";
 
@@ -25,6 +26,7 @@ pub struct ScreenInfo {
     pub name: String,
     pub bounds: Rect,
     pub scale_factor: f64,
+    pub displays: Vec<DisplayGeometry>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -84,6 +86,7 @@ pub enum WireMessage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EncodeError {
     NameTooLong,
+    TooManyDisplays,
     NonFiniteNumber,
     FrameTooLarge,
 }
@@ -92,6 +95,7 @@ impl Display for EncodeError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NameTooLong => formatter.write_str("peer name exceeds the protocol limit"),
+            Self::TooManyDisplays => formatter.write_str("screen contains too many displays"),
             Self::NonFiniteNumber => formatter.write_str("wire numbers must be finite"),
             Self::FrameTooLarge => formatter.write_str("encoded frame exceeds the size limit"),
         }
@@ -152,6 +156,11 @@ pub fn encode_frame(message: &WireMessage) -> Result<Vec<u8>, EncodeError> {
             let screen_name = screen.name.as_bytes();
             let screen_name_len =
                 u16::try_from(screen_name.len()).map_err(|_| EncodeError::NameTooLong)?;
+            let display_count =
+                u8::try_from(screen.displays.len()).map_err(|_| EncodeError::TooManyDisplays)?;
+            if screen.displays.len() > MAX_DISPLAY_COUNT {
+                return Err(EncodeError::TooManyDisplays);
+            }
             put_u128(&mut payload, node.0);
             put_u32(&mut payload, *capabilities);
             put_u64(&mut payload, screen.id.0);
@@ -171,8 +180,28 @@ pub fn encode_frame(message: &WireMessage) -> Result<Vec<u8>, EncodeError> {
             put_f64(&mut payload, screen.scale_factor);
             put_u16(&mut payload, name_len);
             put_u16(&mut payload, screen_name_len);
+            payload.push(display_count);
             payload.extend_from_slice(name);
             payload.extend_from_slice(screen_name);
+            for display in &screen.displays {
+                for value in [
+                    display.bounds.origin.x,
+                    display.bounds.origin.y,
+                    display.bounds.width,
+                    display.bounds.height,
+                    display.scale_factor,
+                ] {
+                    require_finite(value)?;
+                }
+                put_f64(&mut payload, display.bounds.origin.x);
+                put_f64(&mut payload, display.bounds.origin.y);
+                put_f64(&mut payload, display.bounds.width);
+                put_f64(&mut payload, display.bounds.height);
+                put_u32(&mut payload, display.pixel_width);
+                put_u32(&mut payload, display.pixel_height);
+                put_f64(&mut payload, display.scale_factor);
+                payload.push(u8::from(display.primary));
+            }
         }
         WireMessage::Mouse { session_id, event } => {
             put_u64(&mut payload, *session_id);
@@ -387,12 +416,42 @@ fn decode_hello(payload: &mut Reader<'_>) -> Result<WireMessage, DecodeError> {
     let scale_factor = payload.f64()?;
     let name_len = usize::from(payload.u16()?);
     let screen_name_len = usize::from(payload.u16()?);
+    let display_count = usize::from(payload.u8()?);
+    if display_count > MAX_DISPLAY_COUNT {
+        return Err(DecodeError::InvalidLength);
+    }
     let name = std::str::from_utf8(payload.take(name_len)?)
         .map_err(|_| DecodeError::InvalidUtf8)?
         .to_owned();
     let screen_name = std::str::from_utf8(payload.take(screen_name_len)?)
         .map_err(|_| DecodeError::InvalidUtf8)?
         .to_owned();
+    let mut displays = Vec::with_capacity(display_count);
+    for _ in 0..display_count {
+        let origin = payload.point()?;
+        let width = payload.f64()?;
+        let height = payload.f64()?;
+        let pixel_width = payload.u32()?;
+        let pixel_height = payload.u32()?;
+        let display_scale = payload.f64()?;
+        let primary = match payload.u8()? {
+            0 => false,
+            1 => true,
+            _ => return Err(DecodeError::InvalidEnum),
+        };
+        let display_bounds =
+            Rect::new(origin, width, height).map_err(|_| DecodeError::InvalidEnum)?;
+        if pixel_width == 0 || pixel_height == 0 || display_scale <= 0.0 {
+            return Err(DecodeError::InvalidEnum);
+        }
+        displays.push(DisplayGeometry {
+            bounds: display_bounds,
+            pixel_width,
+            pixel_height,
+            scale_factor: display_scale,
+            primary,
+        });
+    }
     let bounds = Rect::new(screen_origin, screen_width, screen_height)
         .map_err(|_| DecodeError::InvalidEnum)?;
     if scale_factor <= 0.0 || screen_name.is_empty() {
@@ -407,6 +466,7 @@ fn decode_hello(payload: &mut Reader<'_>) -> Result<WireMessage, DecodeError> {
             name: screen_name,
             bounds,
             scale_factor,
+            displays,
         },
     })
 }
@@ -638,6 +698,22 @@ mod tests {
                 name: "Automatic desktop".to_owned(),
                 bounds: Rect::new(Point::new(-1080.0, 0.0), 4920.0, 2160.0).unwrap(),
                 scale_factor: 2.0,
+                displays: vec![
+                    DisplayGeometry {
+                        bounds: Rect::new(Point::new(0.0, 0.0), 1920.0, 1080.0).unwrap(),
+                        pixel_width: 3840,
+                        pixel_height: 2160,
+                        scale_factor: 2.0,
+                        primary: true,
+                    },
+                    DisplayGeometry {
+                        bounds: Rect::new(Point::new(-1080.0, 0.0), 1080.0, 1920.0).unwrap(),
+                        pixel_width: 1080,
+                        pixel_height: 1920,
+                        scale_factor: 1.0,
+                        primary: false,
+                    },
+                ],
             },
         });
         for event in [

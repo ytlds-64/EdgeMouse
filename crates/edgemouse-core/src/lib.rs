@@ -12,7 +12,7 @@ mod platform;
 mod session;
 mod topology;
 
-pub use geometry::{Edge, GeometryError, Point, Rect, Vector};
+pub use geometry::{DisplayGeometry, Edge, GeometryError, Point, Rect, Vector};
 pub use input::{
     ButtonState, Effect, InputDisposition, InputResult, KeyCode, KeyState, KeyboardEvent,
     MouseButton, PhysicalMouseEvent, RemoteMouseEvent, RoutedEvent, RoutedKeyboardEvent,

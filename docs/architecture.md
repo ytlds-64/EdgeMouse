@@ -137,6 +137,13 @@ geometry, and build fresh topologies from the new layout. Protocol v6 makes an
 older agent reject this message family during negotiation rather than silently
 running with asymmetric edges.
 
+Protocol v7 extends the authenticated hello and local telemetry snapshots with
+the complete display topology: every monitor's global origin, logical bounds,
+physical pixel resolution, scale factor, and primary-display flag. The desktop
+UI uses that shared topology to draw each machine's real multi-monitor layout;
+the aggregate desktop rectangle remains the coordinate space used by routing.
+Because this changes the hello frame, both peers must run v7.
+
 When `peer.address` is `auto`, the lower node ID locates the higher node on IPv4
 UDP port 43892 while the higher node immediately opens its QUIC listener and
 answers every discovery request concurrently until the connection succeeds.

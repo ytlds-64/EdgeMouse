@@ -3,9 +3,10 @@
 #![cfg(target_os = "windows")]
 
 use edgemouse_core::{
-    ButtonState, CaptureMode, KeyCode, KeyState, KeyboardCaptureBackend, KeyboardEvent,
-    KeyboardInjectionBackend, MouseButton, MouseCaptureBackend, MouseInjectionBackend,
-    PermissionState, PhysicalMouseEvent, PlatformError, Point, Rect, RemoteMouseEvent, Vector,
+    ButtonState, CaptureMode, DisplayGeometry, KeyCode, KeyState, KeyboardCaptureBackend,
+    KeyboardEvent, KeyboardInjectionBackend, MouseButton, MouseCaptureBackend,
+    MouseInjectionBackend, PermissionState, PhysicalMouseEvent, PlatformError, Point, Rect,
+    RemoteMouseEvent, Vector,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::c_void;
@@ -99,12 +100,30 @@ const SM_CXSCREEN: i32 = 0;
 const SM_CYSCREEN: i32 = 1;
 const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: isize = -4;
 const HWND_MESSAGE: isize = -3;
+const MONITORINFOF_PRIMARY: u32 = 1;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PointI32 {
     x: i32,
     y: i32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RectI32 {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+#[repr(C)]
+struct MonitorInfo {
+    size: u32,
+    monitor: RectI32,
+    work: RectI32,
+    flags: u32,
 }
 
 #[repr(C)]
@@ -262,6 +281,25 @@ unsafe extern "system" {
     fn GetSystemMetrics(index: i32) -> i32;
     fn GetDpiForSystem() -> u32;
     fn SetProcessDpiAwarenessContext(value: isize) -> i32;
+    fn EnumDisplayMonitors(
+        device_context: *mut c_void,
+        clip: *const RectI32,
+        callback: Option<
+            unsafe extern "system" fn(*mut c_void, *mut c_void, *mut RectI32, isize) -> i32,
+        >,
+        data: isize,
+    ) -> i32;
+    fn GetMonitorInfoW(monitor: *mut c_void, info: *mut MonitorInfo) -> i32;
+}
+
+#[link(name = "Shcore")]
+unsafe extern "system" {
+    fn GetDpiForMonitor(
+        monitor: *mut c_void,
+        dpi_type: u32,
+        dpi_x: *mut u32,
+        dpi_y: *mut u32,
+    ) -> i32;
 }
 
 #[link(name = "Kernel32")]
@@ -327,7 +365,7 @@ pub fn current_pointer() -> Result<Point, PlatformError> {
 /// Returns the Windows virtual desktop in per-monitor-aware physical coordinates.
 /// This includes rotated and secondary displays and avoids DPI virtualization in
 /// the low-level hook coordinate stream.
-pub fn desktop_geometry() -> Result<(Rect, f64, u32), PlatformError> {
+pub fn desktop_geometry() -> Result<(Rect, f64, Vec<DisplayGeometry>), PlatformError> {
     // SAFETY: this changes process coordinate interpretation and retains no Rust memory.
     // A zero result is also expected when an embedding manifest already selected DPI mode.
     unsafe {
@@ -356,11 +394,74 @@ pub fn desktop_geometry() -> Result<(Rect, f64, u32), PlatformError> {
     )
     .map_err(|error| PlatformError::new(format!("invalid Windows desktop bounds: {error}")))?;
     let scale_factor = (f64::from(dpi) / 96.0).max(1.0);
-    Ok((
+    let mut displays = Vec::with_capacity(
+        usize::try_from(count).map_err(|_| PlatformError::new("invalid Windows display count"))?,
+    );
+    // SAFETY: the callback only appends to `displays` during this synchronous call.
+    let enumerated = unsafe {
+        EnumDisplayMonitors(
+            ptr::null_mut(),
+            ptr::null(),
+            Some(collect_display_geometry),
+            (&raw mut displays) as isize,
+        )
+    };
+    if enumerated == 0 || displays.is_empty() {
+        return Err(PlatformError::new(
+            "Windows failed to enumerate active displays",
+        ));
+    }
+    Ok((bounds, scale_factor, displays))
+}
+
+unsafe extern "system" fn collect_display_geometry(
+    monitor: *mut c_void,
+    _device_context: *mut c_void,
+    monitor_rect: *mut RectI32,
+    data: isize,
+) -> i32 {
+    if monitor_rect.is_null() || data == 0 {
+        return 0;
+    }
+    // SAFETY: EnumDisplayMonitors supplies a valid rectangle for the callback duration.
+    let rect = unsafe { *monitor_rect };
+    let width = rect.right.saturating_sub(rect.left);
+    let height = rect.bottom.saturating_sub(rect.top);
+    if width <= 0 || height <= 0 {
+        return 1;
+    }
+    let Ok(bounds) = Rect::new(
+        Point::new(f64::from(rect.left), f64::from(rect.top)),
+        f64::from(width),
+        f64::from(height),
+    ) else {
+        return 1;
+    };
+    let mut info = MonitorInfo {
+        size: u32::try_from(size_of::<MonitorInfo>()).expect("MONITORINFO size fits in u32"),
+        monitor: rect,
+        work: rect,
+        flags: 0,
+    };
+    // SAFETY: `info` is initialized writable storage for one MONITORINFO value.
+    let primary = unsafe { GetMonitorInfoW(monitor, &raw mut info) } != 0
+        && info.flags & MONITORINFOF_PRIMARY != 0;
+    let mut dpi_x = 96_u32;
+    let mut dpi_y = 96_u32;
+    // SAFETY: the monitor handle comes from EnumDisplayMonitors and both DPI outputs are writable.
+    if unsafe { GetDpiForMonitor(monitor, 0, &raw mut dpi_x, &raw mut dpi_y) } != 0 {
+        dpi_x = 96;
+    }
+    let display = DisplayGeometry {
         bounds,
-        scale_factor,
-        u32::try_from(count).map_err(|_| PlatformError::new("invalid Windows display count"))?,
-    ))
+        pixel_width: u32::try_from(width).expect("positive i32 width fits in u32"),
+        pixel_height: u32::try_from(height).expect("positive i32 height fits in u32"),
+        scale_factor: (f64::from(dpi_x) / 96.0).max(1.0),
+        primary,
+    };
+    // SAFETY: `data` is the exclusive Vec pointer passed to the synchronous enumeration call.
+    unsafe { &mut *(data as *mut Vec<DisplayGeometry>) }.push(display);
+    1
 }
 
 /// A low-level mouse hook hosted on a dedicated Win32 message-loop thread.

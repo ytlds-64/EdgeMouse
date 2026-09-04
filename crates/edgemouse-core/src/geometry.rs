@@ -94,6 +94,21 @@ pub struct Rect {
     pub height: f64,
 }
 
+/// Geometry for one physical display inside an operating-system desktop.
+///
+/// `bounds` uses the platform's global logical coordinate space, while
+/// `pixel_width` and `pixel_height` retain the native mode resolution for UI
+/// diagnostics. Keeping both lets Retina/DPI-scaled displays be drawn in the
+/// correct relative position without losing their physical resolution.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DisplayGeometry {
+    pub bounds: Rect,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    pub scale_factor: f64,
+    pub primary: bool,
+}
+
 impl Rect {
     pub fn new(origin: Point, width: f64, height: f64) -> Result<Self, GeometryError> {
         if !origin.is_finite() || !width.is_finite() || !height.is_finite() {

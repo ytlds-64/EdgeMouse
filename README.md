@@ -426,6 +426,11 @@ Windows Script Host without opening a PowerShell window. Runtime output is
 still written to the current and archived log files, while the visible runner
 remains available for manual diagnostics. Protocol v6 is unchanged and remains
 connection-compatible with 0.5.3.
+EdgeMouse 0.5.8 upgrades the connection protocol to v7 and exchanges the full
+per-display topology after authentication. The desktop app now draws every
+Windows and macOS monitor at its real relative position, labels its physical
+pixel resolution and primary-display status, and derives both layout summaries
+from live device data. Both computers must update to 0.5.8 before connecting.
 
 ## Verify the source tree
 

@@ -6,9 +6,10 @@ use crate::discovery::{
 use crate::network::{Network, NetworkEvent};
 use crate::platform;
 use edgemouse_core::{
-    CaptureMode, ControlState, Edge, Effect, KeyboardCaptureBackend, KeyboardInjectionBackend,
-    MouseCaptureBackend, MouseInjectionBackend, NodeId, PhysicalMouseEvent, Point, Rect,
-    RemoteMouseEvent, RoutedEvent, RoutedKeyboardEvent, ScreenId, Session, Vector,
+    CaptureMode, ControlState, DisplayGeometry, Edge, Effect, KeyboardCaptureBackend,
+    KeyboardInjectionBackend, MouseCaptureBackend, MouseInjectionBackend, NodeId,
+    PhysicalMouseEvent, Point, Rect, RemoteMouseEvent, RoutedEvent, RoutedKeyboardEvent, ScreenId,
+    Session, Vector,
 };
 use edgemouse_protocol::ScreenInfo;
 use edgemouse_protocol::WireMessage;
@@ -28,6 +29,12 @@ const LOCAL_TAKEOVER_MIN_DISTANCE: f64 = 480.0;
 const LOCAL_TAKEOVER_EDGE_OVERSHOOT: f64 = 96.0;
 const LOCAL_TAKEOVER_MOTION_GAP_MS: u64 = 600;
 const LOCAL_TAKEOVER_ACK_TIMEOUT_MS: u64 = 1_500;
+
+fn scaled_dimension(logical: f64, scale_factor: f64) -> u32 {
+    (logical * scale_factor)
+        .round()
+        .clamp(1.0, f64::from(u32::MAX)) as u32
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ConnectionEnd {
@@ -212,11 +219,15 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
                 desktop.display_count,
                 desktop.scale_factor
             );
-            Some((desktop.bounds, desktop.scale_factor))
+            Some(desktop)
         } else {
             None
         };
-        let local = config.resolve_local_screen(detected)?;
+        let local = config.resolve_local_screen(
+            detected
+                .as_ref()
+                .map(|desktop| (desktop.bounds, desktop.scale_factor)),
+        )?;
         let session_id = new_session_id(config.local_node.0);
         if reconnecting {
             println!("Reconnecting to the trusted peer…");
@@ -270,6 +281,24 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
             name: local.screen.name.clone(),
             bounds: local.screen.bounds,
             scale_factor: local.screen.scale_factor,
+            displays: detected
+                .as_ref()
+                .map(|desktop| desktop.displays.clone())
+                .unwrap_or_else(|| {
+                    vec![DisplayGeometry {
+                        bounds: local.screen.bounds,
+                        pixel_width: scaled_dimension(
+                            local.screen.bounds.width,
+                            local.screen.scale_factor,
+                        ),
+                        pixel_height: scaled_dimension(
+                            local.screen.bounds.height,
+                            local.screen.scale_factor,
+                        ),
+                        scale_factor: local.screen.scale_factor,
+                        primary: true,
+                    }]
+                }),
         };
         let network_result = Network::connect(
             transport,
@@ -302,7 +331,7 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         } else {
             println!("Connected to {} with mutual TLS", network.peer_name);
         }
-        telemetry.connected(&network.peer_name);
+        telemetry.connected(&network.peer_name, &network.peer_screen);
         backoff.reset();
 
         let topology = config.topology(local.screen.clone(), &network.peer_screen)?;

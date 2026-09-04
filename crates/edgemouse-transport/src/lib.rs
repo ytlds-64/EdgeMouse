@@ -753,6 +753,7 @@ mod tests {
             bounds: edgemouse_core::Rect::new(edgemouse_core::Point::new(0.0, 0.0), 1920.0, 1080.0)
                 .unwrap(),
             scale_factor: 1.0,
+            displays: Vec::new(),
         }
     }
 }

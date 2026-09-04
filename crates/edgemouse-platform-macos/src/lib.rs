@@ -3,9 +3,10 @@
 #![cfg(target_os = "macos")]
 
 use edgemouse_core::{
-    ButtonState, CaptureMode, KeyCode, KeyState, KeyboardCaptureBackend, KeyboardEvent,
-    KeyboardInjectionBackend, MouseButton, MouseCaptureBackend, MouseInjectionBackend,
-    PermissionState, PhysicalMouseEvent, PlatformError, Point, Rect, RemoteMouseEvent, Vector,
+    ButtonState, CaptureMode, DisplayGeometry, KeyCode, KeyState, KeyboardCaptureBackend,
+    KeyboardEvent, KeyboardInjectionBackend, MouseButton, MouseCaptureBackend,
+    MouseInjectionBackend, PermissionState, PhysicalMouseEvent, PlatformError, Point, Rect,
+    RemoteMouseEvent, Vector,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::c_void;
@@ -156,6 +157,7 @@ unsafe extern "C" {
     ) -> i32;
     fn CGDisplayBounds(display: u32) -> CGRect;
     fn CGDisplayPixelsWide(display: u32) -> usize;
+    fn CGDisplayPixelsHigh(display: u32) -> usize;
     fn CGDisplayHideCursor(display: u32) -> i32;
     fn CGDisplayShowCursor(display: u32) -> i32;
     fn CGAssociateMouseAndMouseCursorPosition(connected: u32) -> i32;
@@ -213,7 +215,7 @@ pub fn current_pointer() -> Result<Point, PlatformError> {
 
 /// Returns the union of all active displays in CoreGraphics global point coordinates.
 /// Rotation and scaled display modes are already reflected in each display's bounds.
-pub fn desktop_geometry() -> Result<(Rect, f64, u32), PlatformError> {
+pub fn desktop_geometry() -> Result<(Rect, f64, Vec<DisplayGeometry>), PlatformError> {
     const MAX_DISPLAYS: usize = 32;
     let mut displays = [0_u32; MAX_DISPLAYS];
     let mut count = 0_u32;
@@ -237,10 +239,12 @@ pub fn desktop_geometry() -> Result<(Rect, f64, u32), PlatformError> {
         count = 1;
     }
 
+    let main_display = unsafe { CGMainDisplayID() };
     let mut left = f64::INFINITY;
     let mut top = f64::INFINITY;
     let mut right = f64::NEG_INFINITY;
     let mut bottom = f64::NEG_INFINITY;
+    let mut geometry = Vec::with_capacity(usize::try_from(count).unwrap_or(MAX_DISPLAYS));
     for display in displays
         .iter()
         .take(usize::try_from(count).unwrap_or(MAX_DISPLAYS))
@@ -251,13 +255,33 @@ pub fn desktop_geometry() -> Result<(Rect, f64, u32), PlatformError> {
         top = top.min(bounds.origin.y);
         right = right.max(bounds.origin.x + bounds.size.width);
         bottom = bottom.max(bounds.origin.y + bounds.size.height);
+        let display_bounds = Rect::new(
+            Point::new(bounds.origin.x, bounds.origin.y),
+            bounds.size.width,
+            bounds.size.height,
+        )
+        .map_err(|error| PlatformError::new(format!("invalid macOS display bounds: {error}")))?;
+        let pixel_width = u32::try_from(unsafe { CGDisplayPixelsWide(*display) })
+            .map_err(|_| PlatformError::new("macOS display width exceeds supported range"))?;
+        let pixel_height = u32::try_from(unsafe { CGDisplayPixelsHigh(*display) })
+            .map_err(|_| PlatformError::new("macOS display height exceeds supported range"))?;
+        if pixel_width == 0 || pixel_height == 0 {
+            return Err(PlatformError::new("macOS reported an empty display mode"));
+        }
+        let display_scale = (f64::from(pixel_width) / bounds.size.width).max(1.0);
+        geometry.push(DisplayGeometry {
+            bounds: display_bounds,
+            pixel_width,
+            pixel_height,
+            scale_factor: display_scale,
+            primary: *display == main_display,
+        });
     }
     let bounds = Rect::new(Point::new(left, top), right - left, bottom - top)
         .map_err(|error| PlatformError::new(format!("invalid macOS desktop bounds: {error}")))?;
 
     // CoreGraphics input coordinates are points. The backing scale is advertised
     // for diagnostics and future UI rendering, not for pointer coordinate conversion.
-    let main_display = unsafe { CGMainDisplayID() };
     // SAFETY: the main display identifier is owned by CoreGraphics.
     let main_bounds = unsafe { CGDisplayBounds(main_display) };
     let scale_factor = if main_bounds.size.width > 0.0 {
@@ -265,7 +289,7 @@ pub fn desktop_geometry() -> Result<(Rect, f64, u32), PlatformError> {
     } else {
         1.0
     };
-    Ok((bounds, scale_factor, count))
+    Ok((bounds, scale_factor, geometry))
 }
 
 struct CallbackState {

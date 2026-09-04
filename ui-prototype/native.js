@@ -73,6 +73,125 @@
     stopped: "未运行",
   };
 
+  function desktopFromLegacy(width, height, scaleFactor, displayCount) {
+    if (!Number.isFinite(Number(width)) || !Number.isFinite(Number(height))) return null;
+    const desktopWidth = Number(width);
+    const desktopHeight = Number(height);
+    const scale = Number(scaleFactor) || 1;
+    return {
+      originX: 0,
+      originY: 0,
+      width: desktopWidth,
+      height: desktopHeight,
+      scaleFactor: scale,
+      displays: [{
+        originX: 0,
+        originY: 0,
+        width: desktopWidth,
+        height: desktopHeight,
+        pixelWidth: Math.round(desktopWidth * scale),
+        pixelHeight: Math.round(desktopHeight * scale),
+        scaleFactor: scale,
+        primary: true,
+      }],
+      reportedDisplayCount: Number(displayCount) || 1,
+    };
+  }
+
+  function usableDisplays(desktop) {
+    if (!desktop?.displays?.length) return [];
+    return desktop.displays.filter((display) => [
+      display.originX,
+      display.originY,
+      display.width,
+      display.height,
+      display.pixelWidth,
+      display.pixelHeight,
+    ].every((value) => Number.isFinite(Number(value))) && Number(display.width) > 0 && Number(display.height) > 0);
+  }
+
+  function desktopLayoutLabel(desktop) {
+    const displays = usableDisplays(desktop);
+    const count = displays.length || Number(desktop?.reportedDisplayCount) || 0;
+    if (!count) return "等待设备数据";
+    if (count === 1) {
+      const display = displays[0];
+      const portrait = display
+        ? Number(display.pixelHeight) > Number(display.pixelWidth)
+        : Number(desktop.height) > Number(desktop.width);
+      return `1 个屏幕 · ${portrait ? "纵向" : "横向"}`;
+    }
+    const centers = displays.map((display) => ({
+      x: Number(display.originX) + Number(display.width) / 2,
+      y: Number(display.originY) + Number(display.height) / 2,
+    }));
+    const xSpread = centers.length ? Math.max(...centers.map((point) => point.x)) - Math.min(...centers.map((point) => point.x)) : 0;
+    const ySpread = centers.length ? Math.max(...centers.map((point) => point.y)) - Math.min(...centers.map((point) => point.y)) : 0;
+    const arrangement = Math.max(xSpread, ySpread) === 0
+      ? "自动布局"
+      : xSpread > ySpread * 1.35
+        ? "横向排列"
+        : ySpread > xSpread * 1.35
+          ? "纵向排列"
+          : "混合布局";
+    return `${count} 个屏幕 · ${arrangement}`;
+  }
+
+  function desktopSummary(desktop) {
+    const displays = usableDisplays(desktop);
+    const count = displays.length || Number(desktop?.reportedDisplayCount) || 0;
+    if (!count) return "等待连接后读取屏幕";
+    const width = Math.round(Number(desktop.width) || 0);
+    const height = Math.round(Number(desktop.height) || 0);
+    return `${count} 个屏幕 · ${width} × ${height} 桌面`;
+  }
+
+  function renderDesktopMap(selector, desktop, platformName) {
+    const card = document.querySelector(selector);
+    const map = card?.querySelector(".desktop-map");
+    if (!card || !map) return;
+    const displays = usableDisplays(desktop);
+    card.querySelector(".desktop-summary").textContent = desktopSummary(desktop);
+    map.replaceChildren();
+    map.classList.toggle("is-empty", displays.length === 0);
+    if (!displays.length) {
+      const empty = document.createElement("span");
+      empty.className = "display-map-empty";
+      empty.textContent = "连接后显示真实屏幕排列";
+      map.append(empty);
+      return;
+    }
+
+    const originX = Number(desktop.originX);
+    const originY = Number(desktop.originY);
+    const desktopWidth = Number(desktop.width);
+    const desktopHeight = Number(desktop.height);
+    const availableWidth = Math.max(1, map.clientWidth - 20);
+    const availableHeight = Math.max(1, map.clientHeight - 20);
+    const scale = Math.min(availableWidth / desktopWidth, availableHeight / desktopHeight);
+    const drawnWidth = desktopWidth * scale;
+    const drawnHeight = desktopHeight * scale;
+    const offsetX = (map.clientWidth - drawnWidth) / 2;
+    const offsetY = (map.clientHeight - drawnHeight) / 2;
+
+    displays.forEach((display, index) => {
+      const tile = document.createElement("div");
+      tile.className = `display-tile ${platformName === "Windows" ? "windows-wallpaper" : "mac-wallpaper"}`;
+      tile.classList.toggle("is-primary", Boolean(display.primary));
+      tile.style.left = `${offsetX + (Number(display.originX) - originX) * scale}px`;
+      tile.style.top = `${offsetY + (Number(display.originY) - originY) * scale}px`;
+      tile.style.width = `${Math.max(34, Number(display.width) * scale)}px`;
+      tile.style.height = `${Math.max(34, Number(display.height) * scale)}px`;
+      const number = document.createElement("b");
+      number.textContent = display.primary ? "主屏" : String(index + 1);
+      const resolution = document.createElement("small");
+      resolution.textContent = `${Math.round(Number(display.pixelWidth))} × ${Math.round(Number(display.pixelHeight))}`;
+      tile.title = `${platformName} ${display.primary ? "主屏" : `屏幕 ${index + 1}`} · ${resolution.textContent} · 位置 (${Math.round(Number(display.originX))}, ${Math.round(Number(display.originY))})`;
+      tile.append(number, resolution);
+      map.append(tile);
+    });
+  }
+
   const numberOrNull = (value) => {
     if (value === null || value === undefined || value === "") return null;
     const number = Number(value);
@@ -246,7 +365,6 @@
     const windowsLocal = snapshot.platform.operatingSystem.toLowerCase().includes("windows");
     const localSelector = windowsLocal ? ".windows-device" : ".mac-device";
     const peerSelector = windowsLocal ? ".mac-device" : ".windows-device";
-    const localLayoutSelector = windowsLocal ? ".screen-win" : ".screen-mac";
     const state = connectionState(snapshot);
     const connected = state === "connected";
 
@@ -258,12 +376,19 @@
     setOnlineLabel(`${localSelector} .online`, localStatus);
     setOnlineLabel(`${peerSelector} .online`, connected ? "可信设备已连接" : connectionLabels[state] ?? "可信设备待连接");
 
-    const width = snapshot.platform.desktopWidth;
-    const height = snapshot.platform.desktopHeight;
-    if (width && height) {
-      const displayCount = snapshot.platform.displayCount ?? 1;
-      setText(`${localLayoutSelector} small`, `${Math.round(width)} × ${Math.round(height)} · ${displayCount} 个屏幕`);
-    }
+    const localDesktop = snapshot.platform.desktop ?? desktopFromLegacy(
+      snapshot.platform.desktopWidth,
+      snapshot.platform.desktopHeight,
+      snapshot.platform.scaleFactor,
+      snapshot.platform.displayCount,
+    );
+    const peerDesktop = snapshot.agent.connection?.peerDesktop ?? null;
+    const windowsDesktop = windowsLocal ? localDesktop : peerDesktop;
+    const macDesktop = windowsLocal ? peerDesktop : localDesktop;
+    renderDesktopMap(".screen-win", windowsDesktop, "Windows");
+    renderDesktopMap(".screen-mac", macDesktop, "macOS");
+    setText('[data-screen-fact="windows"]', desktopLayoutLabel(windowsDesktop));
+    setText('[data-screen-fact="macos"]', desktopLayoutLabel(macDesktop));
 
     if (snapshot.config.peerOn && window.EdgeMouseLayout) {
       const uiEdge = windowsLocal ? snapshot.config.peerOn : oppositeEdge[snapshot.config.peerOn];
@@ -328,20 +453,16 @@
       serviceChip.title = snapshot.agent.error ?? "";
     }
 
-    const screenFacts = document.querySelectorAll(".screen-facts b");
-    if (screenFacts[0] && snapshot.platform.desktopWidth) {
-      const orientation = snapshot.platform.desktopWidth >= snapshot.platform.desktopHeight ? "横向" : "纵向";
-      screenFacts[0].textContent = `${snapshot.platform.displayCount ?? 1} 个屏幕 · ${orientation}`;
-    }
-    if (screenFacts[2]) {
-      screenFacts[2].textContent = window.EdgeMouseLayout?.isDirty()
+    const configStatus = document.querySelector(".layout-config-status");
+    if (configStatus) {
+      configStatus.textContent = window.EdgeMouseLayout?.isDirty()
         ? "尚未保存"
         : configValid && connected
           ? "两端一致"
           : configValid
             ? "等待连接同步"
             : "配置读取失败";
-      screenFacts[2].title = snapshot.config.error ?? snapshot.config.path ?? "";
+      configStatus.title = snapshot.config.error ?? snapshot.config.path ?? "";
     }
 
     const layoutSaveStatus = document.querySelector(".layout-save-status");
@@ -425,4 +546,7 @@
 
   refreshSnapshot();
   window.setInterval(refreshSnapshot, 1000);
+  window.addEventListener("resize", () => {
+    if (latestSnapshot) updateDeviceCards(latestSnapshot);
+  });
 })();

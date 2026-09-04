@@ -1,4 +1,5 @@
-use edgemouse_core::Edge;
+use edgemouse_core::{DisplayGeometry, Edge, Point, Rect};
+use edgemouse_protocol::{MAX_DISPLAY_COUNT, ScreenInfo};
 use std::error::Error;
 use std::fmt;
 use std::io;
@@ -17,14 +18,21 @@ const LAYOUT_REQUEST_LENGTH: usize = REQUEST_LENGTH + 1;
 const RESPONSE_HEADER_LENGTH: usize = RESPONSE_MAGIC.len() + 1 + 4 + 1;
 const MAX_VERSION_LENGTH: usize = 63;
 const MAX_PEER_NAME_LENGTH: usize = 63;
-const TELEMETRY_VERSION: u8 = 1;
+const TELEMETRY_VERSION: u8 = 2;
 const TELEMETRY_FIXED_LENGTH: usize = 1 + 1 + 1 + 4 + 8 + 8 + 4 + 4 + 4 + (8 * 6) + 1;
-const MAX_RESPONSE_LENGTH: usize =
-    RESPONSE_HEADER_LENGTH + MAX_VERSION_LENGTH + TELEMETRY_FIXED_LENGTH + MAX_PEER_NAME_LENGTH;
+const DESKTOP_FIXED_LENGTH: usize = (8 * 5) + 1;
+const DISPLAY_LENGTH: usize = (8 * 5) + (4 * 2) + 1;
+const MAX_RESPONSE_LENGTH: usize = RESPONSE_HEADER_LENGTH
+    + MAX_VERSION_LENGTH
+    + TELEMETRY_FIXED_LENGTH
+    + MAX_PEER_NAME_LENGTH
+    + DESKTOP_FIXED_LENGTH
+    + (DISPLAY_LENGTH * MAX_DISPLAY_COUNT);
 const CLIENT_TIMEOUT: Duration = Duration::from_millis(500);
 const SERVER_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const FLAG_CONNECTED_SINCE: u8 = 1 << 0;
 const FLAG_LINK_METRICS: u8 = 1 << 1;
+const FLAG_PEER_DESKTOP: u8 = 1 << 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -107,6 +115,14 @@ pub struct ConnectionTelemetry {
     pub received_moves: u64,
     pub stale_moves: u64,
     pub superseded_moves: u64,
+    pub peer_desktop: Option<DesktopTelemetry>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DesktopTelemetry {
+    pub bounds: Rect,
+    pub scale_factor: f64,
+    pub displays: Vec<DisplayGeometry>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -202,11 +218,16 @@ impl RuntimeTelemetry {
         };
     }
 
-    pub fn connected(&self, peer_name: &str) {
+    pub fn connected(&self, peer_name: &str, peer_screen: &ScreenInfo) {
         let mut status = self.lock();
         status.phase = ConnectionPhase::Connected;
         status.peer_name = Some(peer_name.to_owned());
         status.connected_since_unix_ms = Some(unix_time_ms());
+        status.peer_desktop = Some(DesktopTelemetry {
+            bounds: peer_screen.bounds,
+            scale_factor: peer_screen.scale_factor,
+            displays: peer_screen.displays.clone(),
+        });
         clear_link_metrics(&mut status);
     }
 
@@ -572,6 +593,9 @@ fn encode_response(command: Command, status: &RunningStatus) -> Vec<u8> {
     if status.connection.metrics_updated_unix_ms.is_some() {
         flags |= FLAG_LINK_METRICS;
     }
+    if status.connection.peer_desktop.is_some() {
+        flags |= FLAG_PEER_DESKTOP;
+    }
     response.push(flags);
     response.extend_from_slice(&status.connection.reconnect_count.to_be_bytes());
     response.extend_from_slice(
@@ -619,6 +643,33 @@ fn encode_response(command: Command, status: &RunningStatus) -> Vec<u8> {
     response.extend_from_slice(&status.connection.superseded_moves.to_be_bytes());
     response.push(u8::try_from(peer_name_length).expect("maximum peer name length fits in a byte"));
     response.extend_from_slice(&peer_name[..peer_name_length]);
+    if let Some(desktop) = &status.connection.peer_desktop {
+        for value in [
+            desktop.bounds.origin.x,
+            desktop.bounds.origin.y,
+            desktop.bounds.width,
+            desktop.bounds.height,
+            desktop.scale_factor,
+        ] {
+            response.extend_from_slice(&value.to_bits().to_be_bytes());
+        }
+        let display_count = desktop.displays.len().min(MAX_DISPLAY_COUNT);
+        response.push(u8::try_from(display_count).expect("maximum display count fits in a byte"));
+        for display in desktop.displays.iter().take(display_count) {
+            for value in [
+                display.bounds.origin.x,
+                display.bounds.origin.y,
+                display.bounds.width,
+                display.bounds.height,
+            ] {
+                response.extend_from_slice(&value.to_bits().to_be_bytes());
+            }
+            response.extend_from_slice(&display.pixel_width.to_be_bytes());
+            response.extend_from_slice(&display.pixel_height.to_be_bytes());
+            response.extend_from_slice(&display.scale_factor.to_bits().to_be_bytes());
+            response.push(u8::from(display.primary));
+        }
+    }
     response
 }
 
@@ -702,17 +753,70 @@ fn decode_telemetry(data: &[u8]) -> Result<ConnectionTelemetry, ControlError> {
         ));
     }
     let peer_name_bytes = decoder.bytes(peer_name_length)?;
-    if !decoder.is_finished() {
-        return Err(ControlError::new(
-            "EdgeMouse sent trailing control response data",
-        ));
-    }
     let peer_name = std::str::from_utf8(peer_name_bytes)
         .map_err(|_| ControlError::new("EdgeMouse sent an invalid peer name"))?;
     let metrics_present = flags & FLAG_LINK_METRICS != 0;
     if metrics_present && (!rtt_ms.is_finite() || !jitter_ms.is_finite()) {
         return Err(ControlError::new(
             "EdgeMouse sent invalid connection metrics",
+        ));
+    }
+    let peer_desktop = if flags & FLAG_PEER_DESKTOP != 0 {
+        let origin = Point::new(decoder.f64()?, decoder.f64()?);
+        let width = decoder.f64()?;
+        let height = decoder.f64()?;
+        let scale_factor = decoder.f64()?;
+        let bounds = Rect::new(origin, width, height).map_err(|error| {
+            ControlError::new(format!("invalid peer desktop geometry: {error}"))
+        })?;
+        if scale_factor <= 0.0 {
+            return Err(ControlError::new("invalid peer desktop scale factor"));
+        }
+        let display_count = usize::from(decoder.u8()?);
+        if display_count > MAX_DISPLAY_COUNT {
+            return Err(ControlError::new("invalid peer display count"));
+        }
+        let mut displays = Vec::with_capacity(display_count);
+        for _ in 0..display_count {
+            let display_origin = Point::new(decoder.f64()?, decoder.f64()?);
+            let display_width = decoder.f64()?;
+            let display_height = decoder.f64()?;
+            let pixel_width = decoder.u32()?;
+            let pixel_height = decoder.u32()?;
+            let display_scale = decoder.f64()?;
+            let primary = match decoder.u8()? {
+                0 => false,
+                1 => true,
+                _ => return Err(ControlError::new("invalid primary display flag")),
+            };
+            let display_bounds =
+                Rect::new(display_origin, display_width, display_height).map_err(|error| {
+                    ControlError::new(format!("invalid peer display geometry: {error}"))
+                })?;
+            if pixel_width == 0 || pixel_height == 0 || display_scale <= 0.0 {
+                return Err(ControlError::new("invalid peer display mode"));
+            }
+            displays.push(DisplayGeometry {
+                bounds: display_bounds,
+                pixel_width,
+                pixel_height,
+                scale_factor: display_scale,
+                primary,
+            });
+        }
+        Some(DesktopTelemetry {
+            bounds,
+            scale_factor,
+            displays,
+        })
+    } else {
+        None
+    };
+    if flags & !(FLAG_CONNECTED_SINCE | FLAG_LINK_METRICS | FLAG_PEER_DESKTOP) != 0
+        || !decoder.is_finished()
+    {
+        return Err(ControlError::new(
+            "EdgeMouse sent trailing or unsupported control response data",
         ));
     }
     Ok(ConnectionTelemetry {
@@ -730,6 +834,7 @@ fn decode_telemetry(data: &[u8]) -> Result<ConnectionTelemetry, ControlError> {
         received_moves,
         stale_moves,
         superseded_moves,
+        peer_desktop,
     })
 }
 
@@ -772,6 +877,17 @@ impl<'a> Decoder<'a> {
         Ok(u64::from_be_bytes(self.array()?))
     }
 
+    fn f64(&mut self) -> Result<f64, ControlError> {
+        let value = f64::from_bits(self.u64()?);
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            Err(ControlError::new(
+                "EdgeMouse sent non-finite desktop geometry",
+            ))
+        }
+    }
+
     const fn is_finished(&self) -> bool {
         self.offset == self.data.len()
     }
@@ -795,6 +911,22 @@ mod tests {
 
     fn loopback_ephemeral() -> SocketAddr {
         SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 0)
+    }
+
+    fn test_peer_screen() -> ScreenInfo {
+        ScreenInfo {
+            id: edgemouse_core::ScreenId(2),
+            name: "test desktop".to_owned(),
+            bounds: Rect::new(Point::new(0.0, 0.0), 1920.0, 1080.0).unwrap(),
+            scale_factor: 1.0,
+            displays: vec![DisplayGeometry {
+                bounds: Rect::new(Point::new(0.0, 0.0), 1920.0, 1080.0).unwrap(),
+                pixel_width: 1920,
+                pixel_height: 1080,
+                scale_factor: 1.0,
+                primary: true,
+            }],
+        }
     }
 
     #[test]
@@ -845,6 +977,26 @@ mod tests {
                 received_moves: 20,
                 stale_moves: 3,
                 superseded_moves: 4,
+                peer_desktop: Some(DesktopTelemetry {
+                    bounds: Rect::new(Point::new(-1080.0, 0.0), 3000.0, 1920.0).unwrap(),
+                    scale_factor: 2.0,
+                    displays: vec![
+                        DisplayGeometry {
+                            bounds: Rect::new(Point::new(0.0, 0.0), 1920.0, 1080.0).unwrap(),
+                            pixel_width: 3840,
+                            pixel_height: 2160,
+                            scale_factor: 2.0,
+                            primary: true,
+                        },
+                        DisplayGeometry {
+                            bounds: Rect::new(Point::new(-1080.0, 0.0), 1080.0, 1920.0).unwrap(),
+                            pixel_width: 1080,
+                            pixel_height: 1920,
+                            scale_factor: 1.0,
+                            primary: false,
+                        },
+                    ],
+                }),
             },
         };
         let response = encode_response(Command::Status, &status);
@@ -872,7 +1024,7 @@ mod tests {
     fn status_and_stop_use_the_loopback_control_channel() {
         let stopping = Arc::new(AtomicBool::new(false));
         let telemetry = RuntimeTelemetry::default();
-        telemetry.connected("test-peer");
+        telemetry.connected("test-peer", &test_peer_screen());
         let server = ControlServer::start_on(
             loopback_ephemeral(),
             Arc::clone(&stopping),
@@ -966,7 +1118,7 @@ mod tests {
         assert_eq!(telemetry.scroll_settings(), scroll);
         telemetry.begin_connecting(false);
         assert_eq!(telemetry.snapshot().phase, ConnectionPhase::Connecting);
-        telemetry.connected("macbook");
+        telemetry.connected("macbook", &test_peer_screen());
         telemetry.update_link(LinkMetrics {
             rtt_ms: 19.25,
             jitter_ms: 2.5,

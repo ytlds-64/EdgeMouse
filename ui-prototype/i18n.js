@@ -53,6 +53,10 @@
     "1 个屏幕 · 横向": "1 display · Landscape",
     "macOS 桌面": "macOS desktop",
     "2 个屏幕 · 自动布局": "2 displays · Automatic layout",
+    "等待设备数据": "Waiting for device data",
+    "等待连接后读取屏幕": "Connect to read displays",
+    "连接后显示真实屏幕排列": "Connect to show the real display arrangement",
+    "主屏": "Primary",
     "配置状态": "Configuration",
     "两端一致": "Synchronized",
     "拖动或选择方向后保存，两端会自动同步": "Drag or choose a direction, then save to synchronize both devices",
@@ -420,6 +424,25 @@
     if (quality) return `${quality[1]} ms · ${{ 良好: "Good", 一般: "Fair", 较高: "High" }[quality[2]]}`;
     const found = value.match(/^已识别 (\d+) 个显示区域$/);
     if (found) return `${found[1]} display regions detected`;
+    const desktopLayout = value.match(/^(\d+) 个屏幕 · (纵向|横向|自动布局|横向排列|纵向排列|混合布局)$/);
+    if (desktopLayout) {
+      const arrangement = {
+        纵向: "Portrait",
+        横向: "Landscape",
+        自动布局: "Automatic layout",
+        横向排列: "Horizontal arrangement",
+        纵向排列: "Vertical arrangement",
+        混合布局: "Mixed arrangement",
+      }[desktopLayout[2]];
+      return `${desktopLayout[1]} ${desktopLayout[1] === "1" ? "display" : "displays"} · ${arrangement}`;
+    }
+    const desktopSize = value.match(/^(\d+) 个屏幕 · (\d+) × (\d+) 桌面$/);
+    if (desktopSize) return `${desktopSize[1]} ${desktopSize[1] === "1" ? "display" : "displays"} · ${desktopSize[2]} × ${desktopSize[3]} desktop`;
+    const displayTitle = value.match(/^(Windows|macOS) (主屏|屏幕 \d+) · (.+) · 位置 \((-?\d+), (-?\d+)\)$/);
+    if (displayTitle) {
+      const label = displayTitle[2] === "主屏" ? "Primary" : displayTitle[2].replace("屏幕", "Display");
+      return `${displayTitle[1]} ${label} · ${displayTitle[3]} · position (${displayTitle[4]}, ${displayTitle[5]})`;
+    }
     const layout = value.match(/^屏幕布局已调整为 (.+)$/);
     if (layout) return `Screen layout changed to ${zhToEn[layout[1]] ?? layout[1]}`;
     const paired = value.match(/^通过自动发现 · (.+)$/);
