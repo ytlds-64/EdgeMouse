@@ -64,6 +64,10 @@
   const chartPointCount = 60;
   let lastQualitySecond;
   let latestSnapshot;
+  let desktopPreferences;
+  let lastNotificationState;
+  let pairingPollTimer;
+  let pairingHostActive = false;
   let serviceActionPending = false;
 
   const connectionLabels = {
@@ -404,12 +408,22 @@
     const state = connectionState(snapshot);
     const connected = state === "connected";
     const peerName = snapshot.agent.connection?.peerName ?? snapshot.config.peerScreenName ?? "可信设备";
-    const localInputProfile = snapshot.platform.operatingSystem.toLowerCase().includes("windows")
+    const windowsLocal = snapshot.platform.operatingSystem.toLowerCase().includes("windows");
+    const localInputProfile = windowsLocal
       ? "windows-to-mac"
       : "mac-to-windows";
+    const incomingInputProfile = windowsLocal ? "mac-to-windows" : "windows-to-mac";
+    window.EdgeMouseInputSettings?.setLocalPlatform(windowsLocal ? "windows" : "macos");
+    window.EdgeMouseInputSettings?.setOverviewProfile(localInputProfile);
     window.EdgeMouseInputSettings?.applyLocalProfile(localInputProfile, {
       horizontal: snapshot.config.reverseScrollHorizontal,
       vertical: snapshot.config.reverseScrollVertical,
+      keyboard: snapshot.config.keyboardEnabled,
+      dragLock: snapshot.config.blockSwitchWhileDragging,
+    });
+    window.EdgeMouseInputSettings?.applyLocalProfile(incomingInputProfile, {
+      smoothing: snapshot.config.pointerSmoothing,
+      reclaim: snapshot.config.reclaimEnabled,
     });
     window.setEdgeMouseAppVersion?.(running ? snapshot.agent.version : snapshot.desktopVersion);
     setText("[data-native-mode]", "桌面应用 · 实时状态");
@@ -443,6 +457,18 @@
     );
     setText(".trust-detail", configValid ? "可信证书已载入" : "配置需要检查");
     setText(".certificate-line code", groupedNode(snapshot.config.peerNode));
+    const autoReconnectToggle = document.querySelector(".auto-reconnect-toggle");
+    if (autoReconnectToggle) {
+      const enabled = snapshot.config.autoReconnect !== false;
+      autoReconnectToggle.classList.toggle("is-on", enabled);
+      autoReconnectToggle.setAttribute("aria-checked", String(enabled));
+    }
+    const edgeProtectionToggle = document.querySelector('[data-layout-setting="edgeProtection"]');
+    if (edgeProtectionToggle && !window.EdgeMouseLayout?.isDirty()) {
+      const enabled = Number(snapshot.config.entryHysteresis ?? 0) > 0;
+      edgeProtectionToggle.classList.toggle("is-on", enabled);
+      edgeProtectionToggle.setAttribute("aria-checked", String(enabled));
+    }
 
     const diagnostics = document.querySelector(".diagnostics-overall");
     if (diagnostics) {
@@ -483,6 +509,19 @@
 
     updateDeviceCards(snapshot);
     updateDiagnostics(snapshot);
+
+    if (lastNotificationState !== undefined
+      && desktopPreferences?.notifications
+      && state !== lastNotificationState
+      && ["connected", "reconnecting", "stopped"].includes(state)) {
+      const notification = {
+        connected: ["EdgeMouse 已连接", `已安全连接到 ${peerName}`],
+        reconnecting: ["EdgeMouse 正在重连", "网络发生变化，正在自动恢复连接"],
+        stopped: ["EdgeMouse 已停止", "本机鼠标和键盘控制保持可用"],
+      }[state];
+      invoke("show_system_notification", { title: notification[0], body: notification[1] }).catch(console.error);
+    }
+    lastNotificationState = state;
   }
 
   let refreshing = false;
@@ -498,6 +537,423 @@
       refreshing = false;
     }
   }
+
+  async function refreshDesktopPreferences() {
+    try {
+      desktopPreferences = await invoke("get_desktop_preferences");
+      window.EdgeMouseDesktopSettings?.apply(desktopPreferences);
+    } catch (error) {
+      console.error("Unable to load desktop settings", error);
+    }
+  }
+
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (_error) {
+      const input = document.createElement("textarea");
+      input.value = text;
+      input.style.position = "fixed";
+      input.style.opacity = "0";
+      document.body.append(input);
+      input.select();
+      document.execCommand("copy");
+      input.remove();
+    }
+  }
+
+  function renderDiagnosticReport(report) {
+    let passed = 0;
+    report.checks.forEach((check) => {
+      const row = document.querySelector(`[data-check="${check.key}"]`);
+      if (!row) return;
+      passed += check.passed ? 1 : 0;
+      row.classList.remove("is-running");
+      row.classList.toggle("is-failed", !check.passed);
+      const icon = row.querySelector(".check");
+      if (icon) icon.textContent = check.passed ? "✓" : "×";
+      const detail = row.querySelector("small");
+      if (detail) detail.textContent = check.detail;
+    });
+    const overall = document.querySelector(".diagnostics-overall");
+    if (overall) {
+      const allPassed = passed === report.checks.length;
+      overall.classList.toggle("good", allPassed);
+      overall.classList.toggle("pending", !allPassed);
+      overall.textContent = allPassed ? "全部通过" : `${passed}/${report.checks.length} 项通过`;
+    }
+    const logContainer = document.querySelector(".log-lines");
+    if (logContainer) {
+      logContainer.replaceChildren();
+      const lines = report.logLines.length ? report.logLines : ["暂时没有可显示的后台日志"];
+      lines.forEach((message) => {
+        const line = document.createElement("p");
+        const time = document.createElement("time");
+        time.textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+        const tag = document.createElement("span");
+        tag.textContent = "本机";
+        line.append(time, tag, document.createTextNode(message));
+        logContainer.append(line);
+      });
+    }
+    const lastRun = document.querySelector(".diagnostic-last-run");
+    if (lastRun) lastRun.textContent = "上次检查：刚刚";
+  }
+
+  async function readDiagnosticReport() {
+    const report = await invoke("run_diagnostics");
+    renderDiagnosticReport(report);
+    return report;
+  }
+
+  document.querySelector(".run-diagnostics-button")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = "正在检查…";
+    document.querySelectorAll(".diagnostic-check").forEach((row) => {
+      row.classList.remove("is-failed");
+      row.classList.add("is-running");
+      const icon = row.querySelector(".check");
+      if (icon) icon.textContent = "…";
+    });
+    try {
+      const report = await readDiagnosticReport();
+      const passed = report.checks.filter((check) => check.passed).length;
+      window.showEdgeMouseToast?.(passed === report.checks.length ? "完整检查已通过" : `检查完成：${passed}/${report.checks.length} 项通过`);
+    } catch (error) {
+      window.showEdgeMouseToast?.(`诊断失败：${error}`);
+    } finally {
+      button.disabled = false;
+      button.textContent = "再次运行检查";
+    }
+  }, true);
+
+  document.querySelector(".copy-diagnostics-button")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    try {
+      const report = await readDiagnosticReport();
+      await copyText(report.summary);
+      window.showEdgeMouseToast?.("真实诊断摘要已复制");
+    } catch (error) {
+      window.showEdgeMouseToast?.(`无法复制诊断摘要：${error}`);
+    }
+  }, true);
+
+  document.querySelector(".open-logs-button")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    try {
+      const result = await invoke("open_logs_folder");
+      window.showEdgeMouseToast?.(result.message);
+    } catch (error) {
+      window.showEdgeMouseToast?.(`无法打开日志文件夹：${error}`);
+    }
+  }, true);
+
+  document.querySelector(".generate-diagnostics-button")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    const button = event.currentTarget;
+    const checked = new Set([...document.querySelectorAll(".export-options input:checked")].map((input) => input.value));
+    const steps = [...document.querySelectorAll(".diagnostics-export-step")];
+    const showStep = (name) => steps.forEach((step) => step.classList.toggle("is-active", step.classList.contains(`diagnostics-export-${name}`)));
+    button.disabled = true;
+    showStep("generating");
+    try {
+      const result = await invoke("export_diagnostics", {
+        includeLogs: checked.has("logs"),
+        includeConfig: checked.has("system"),
+        includeSystem: checked.has("system") || checked.has("network"),
+      });
+      const name = result.path.split(/[\\/]/).pop();
+      setText(".export-file-name", name);
+      const detail = document.querySelector(".export-file small");
+      if (detail) detail.textContent = "已脱敏 · 下载目录";
+      showStep("success");
+      window.showEdgeMouseToast?.(result.message);
+    } catch (error) {
+      showStep("options");
+      window.showEdgeMouseToast?.(`无法生成诊断包：${error}`);
+    } finally {
+      button.disabled = false;
+    }
+  }, true);
+
+  document.querySelectorAll("[data-device-action]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopImmediatePropagation();
+      const action = button.dataset.deviceAction;
+      try {
+        if (action === "copy") {
+          const config = latestSnapshot?.config;
+          await copyText([
+            `EdgeMouse ${latestSnapshot?.desktopVersion ?? ""}`,
+            `本机：${config?.localName ?? "—"}`,
+            `可信设备：${config?.peerScreenName ?? "—"}`,
+            `设备指纹：${config?.peerNode ?? "—"}`,
+            `连接地址：${config?.peerAddress ?? "—"}`,
+          ].join("\n"));
+          window.showEdgeMouseToast?.("真实连接信息已复制");
+        } else if (action === "verify") {
+          const message = await invoke("verify_trusted_device");
+          setText(".trust-detail", "刚刚重新验证");
+          window.showEdgeMouseToast?.(message);
+        } else if (action === "forget") {
+          if (!window.confirm("确定解除当前可信设备吗？原证书会备份，后台连接将停止。")) return;
+          const message = await invoke("forget_trusted_device");
+          window.showEdgeMouseToast?.(message);
+          await refreshSnapshot();
+        }
+      } catch (error) {
+        window.showEdgeMouseToast?.(`设备操作失败：${error}`);
+      }
+    }, true);
+  });
+
+  const pairingModal = document.querySelector(".pairing-modal");
+  const pairingSteps = [...document.querySelectorAll(".pairing-step")];
+  const showPairingStep = (name) => pairingSteps.forEach((step) => step.classList.toggle("is-active", step.classList.contains(`pairing-step-${name}`)));
+
+  function stopPairingPoll() {
+    window.clearInterval(pairingPollTimer);
+    pairingPollTimer = undefined;
+  }
+
+  function showPairingSuccess(status) {
+    pairingHostActive = false;
+    stopPairingPoll();
+    setText(".pairing-success-message", status.message);
+    showPairingStep("success");
+    refreshSnapshot();
+  }
+
+  async function pollPairingStatus() {
+    try {
+      const status = await invoke("get_pairing_status");
+      if (status.phase === "complete") {
+        showPairingSuccess(status);
+      } else if (status.phase === "failed") {
+        pairingHostActive = false;
+        stopPairingPoll();
+        showPairingStep("discover");
+        window.showEdgeMouseToast?.(status.message);
+      } else if (status.phase === "hosting") {
+        setText(".pairing-host-status", status.message);
+      }
+    } catch (error) {
+      console.error("Unable to read pairing status", error);
+    }
+  }
+
+  function openRealPairingModal() {
+    stopPairingPoll();
+    pairingHostActive = false;
+    pairingModal.hidden = false;
+    showPairingStep("discover");
+    const code = document.querySelector("#pairing-code-input");
+    const address = document.querySelector("#manual-peer-address");
+    if (code) code.value = "";
+    if (address) address.value = "";
+    const error = pairingModal.querySelector(".field-error");
+    if (error) error.hidden = true;
+  }
+
+  async function closeRealPairingModal() {
+    stopPairingPoll();
+    if (pairingHostActive) {
+      pairingHostActive = false;
+      await invoke("cancel_pairing").catch(console.error);
+    }
+    pairingModal.hidden = true;
+    refreshSnapshot();
+  }
+
+  document.querySelector(".pair-device-button")?.addEventListener("click", (event) => {
+    event.stopImmediatePropagation();
+    openRealPairingModal();
+  }, true);
+
+  document.querySelector(".start-pairing-host-button")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = "正在生成…";
+    try {
+      const status = await invoke("start_pairing_host");
+      pairingHostActive = true;
+      setText(".pairing-code", status.code?.replace("-", " – "));
+      setText(".pairing-host-status", status.message);
+      showPairingStep("code");
+      pairingPollTimer = window.setInterval(pollPairingStatus, 500);
+    } catch (error) {
+      window.showEdgeMouseToast?.(`无法创建配对码：${error}`);
+    } finally {
+      button.disabled = false;
+      button.textContent = "生成一次性配对码";
+    }
+  }, true);
+
+  document.querySelector(".join-pairing-button")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    const button = event.currentTarget;
+    const codeInput = document.querySelector("#pairing-code-input");
+    const hostInput = document.querySelector("#manual-peer-address");
+    const normalized = codeInput.value.replace(/\D/g, "");
+    const errorLabel = pairingModal.querySelector(".field-error");
+    if (normalized.length !== 8) {
+      errorLabel.hidden = false;
+      return;
+    }
+    errorLabel.hidden = true;
+    button.disabled = true;
+    button.textContent = "正在安全配对…";
+    try {
+      const status = await invoke("join_pairing", {
+        code: `${normalized.slice(0, 4)}-${normalized.slice(4)}`,
+        host: hostInput.value.trim() || null,
+      });
+      showPairingSuccess(status);
+    } catch (error) {
+      window.showEdgeMouseToast?.(`${error}`);
+    } finally {
+      button.disabled = false;
+      button.textContent = "安全加入";
+    }
+  }, true);
+
+  document.querySelector(".pairing-cancel-button")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    await closeRealPairingModal();
+  }, true);
+
+  document.querySelector(".pairing-modal-close")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    await closeRealPairingModal();
+  }, true);
+
+  document.querySelector(".pairing-finish-button")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    await closeRealPairingModal();
+    window.showEdgeMouseToast?.("安全配对完成，可信证书已保存");
+  }, true);
+
+  pairingModal?.addEventListener("click", async (event) => {
+    if (event.target !== pairingModal) return;
+    event.stopImmediatePropagation();
+    await closeRealPairingModal();
+  }, true);
+
+  window.addEventListener("keydown", async (event) => {
+    if (event.key !== "Escape" || pairingModal?.hidden) return;
+    event.stopImmediatePropagation();
+    await closeRealPairingModal();
+  }, true);
+
+  document.querySelector(".project-home-button")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    try {
+      await invoke("open_external_url", { url: "https://github.com/ytlds-64/EdgeMouse" });
+    } catch (error) {
+      window.showEdgeMouseToast?.(`无法打开项目主页：${error}`);
+    }
+  }, true);
+
+  document.querySelector('[data-about-action="issues"]')?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    try {
+      await invoke("open_external_url", { url: "https://github.com/ytlds-64/EdgeMouse/issues" });
+    } catch (error) {
+      window.showEdgeMouseToast?.(`无法打开问题反馈：${error}`);
+    }
+  }, true);
+
+  document.querySelector('[data-about-action="version"]')?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    const snapshot = latestSnapshot;
+    const text = `EdgeMouse ${snapshot?.desktopVersion ?? ""} · ${snapshot?.platform?.operatingSystem ?? ""} · QUIC · mutual TLS`;
+    await copyText(text);
+    window.showEdgeMouseToast?.("真实版本与平台信息已复制");
+  }, true);
+
+  document.querySelectorAll(".check-updates-button").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopImmediatePropagation();
+      const install = button.dataset.installUpdate === "true";
+      const buttons = [...document.querySelectorAll(".check-updates-button")];
+      buttons.forEach((item) => {
+        item.disabled = true;
+        item.textContent = install ? "正在下载并安装…" : "正在检查…";
+      });
+      const status = document.querySelector(".update-status");
+      status?.classList.remove("good");
+      status?.classList.add("pending");
+      if (status) status.textContent = install ? "正在安装" : "正在检查";
+      try {
+        const result = await invoke("check_for_updates", { install });
+        setText(".update-last-check", "最后检查：刚刚");
+        if (result.available) {
+          if (status) status.textContent = `可更新至 ${result.version}`;
+          buttons.forEach((item) => {
+            item.dataset.installUpdate = "true";
+            item.textContent = `下载并安装 ${result.version}`;
+          });
+        } else {
+          status?.classList.remove("pending");
+          status?.classList.add("good");
+          if (status) status.textContent = "已是最新版";
+          buttons.forEach((item) => {
+            delete item.dataset.installUpdate;
+            item.textContent = "再次检查更新";
+          });
+        }
+        window.showEdgeMouseToast?.(result.message);
+      } catch (error) {
+        if (status) status.textContent = "检查失败";
+        buttons.forEach((item) => {
+          item.textContent = "重新检查更新";
+        });
+        window.showEdgeMouseToast?.(`${error}`);
+      } finally {
+        buttons.forEach((item) => { item.disabled = false; });
+      }
+    }, true);
+  });
+
+  document.querySelector(".settings-save-button")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    const button = event.currentTarget;
+    const settings = window.EdgeMouseDesktopSettings?.get();
+    if (!settings) return;
+    button.disabled = true;
+    try {
+      const result = await invoke("save_desktop_preferences", settings);
+      desktopPreferences = result.preferences;
+      window.EdgeMouseDesktopSettings?.apply(result.preferences);
+      window.EdgeMouseDesktopSettings?.markSaved(result.message);
+      window.showEdgeMouseToast?.(result.message);
+    } catch (error) {
+      window.showEdgeMouseToast?.(`无法保存桌面设置：${error}`);
+    } finally {
+      button.disabled = false;
+    }
+  }, true);
+
+  document.querySelector(".confirm-reset-button")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const result = await invoke("reset_preferences");
+      desktopPreferences = result.preferences;
+      window.EdgeMouseDesktopSettings?.apply(result.preferences);
+      document.querySelector(".reset-settings-modal").hidden = true;
+      window.showEdgeMouseToast?.(result.message);
+      await refreshSnapshot();
+    } catch (error) {
+      window.showEdgeMouseToast?.(`无法恢复默认设置：${error}`);
+    } finally {
+      button.disabled = false;
+    }
+  }, true);
 
   document.querySelector("[data-service-toggle]")?.addEventListener("click", async (event) => {
     const toggle = event.currentTarget;
@@ -525,29 +981,29 @@
   });
 
   document.querySelector(".input-save-button")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
     const button = event.currentTarget;
     if (!latestSnapshot) {
       window.showEdgeMouseToast?.("正在读取本机配置，请稍后重试");
       return;
     }
-    const localProfile = latestSnapshot.platform.operatingSystem.toLowerCase().includes("windows")
-      ? "windows-to-mac"
-      : "mac-to-windows";
     const settingsApi = window.EdgeMouseInputSettings;
-    if (settingsApi?.getActiveProfile() !== localProfile) {
-      window.showEdgeMouseToast?.("请在另一台设备上设置这个控制方向");
-      return;
-    }
-    const settings = settingsApi?.getProfile(localProfile);
+    const profile = settingsApi?.getActiveProfile();
+    const settings = settingsApi?.getProfile(profile);
     if (!settings) return;
     button.disabled = true;
     try {
-      const result = await invoke("save_scroll_settings", {
+      const result = await invoke("save_input_settings", {
+        profile,
         reverseHorizontal: Boolean(settings.horizontal),
         reverseVertical: Boolean(settings.vertical),
+        pointerSmoothing: Number(settings.smoothing),
+        keyboardEnabled: Boolean(settings.keyboard),
+        reclaimEnabled: Boolean(settings.reclaim),
+        dragLock: Boolean(settings.dragLock),
       });
-      const message = result.warning ?? "滚动方向已保存并立即生效";
-      settingsApi.markSaved(result.warning ? message : "滚动方向已保存；其他输入选项仍为界面预览");
+      const message = result.warning ?? (result.restarted ? "输入设置已保存，后台服务已重新连接" : "输入设置已保存");
+      settingsApi.markSaved(message);
       window.showEdgeMouseToast?.(message);
       await refreshSnapshot();
     } catch (error) {
@@ -556,7 +1012,95 @@
     } finally {
       button.disabled = false;
     }
-  });
+  }, true);
+
+  document.querySelector(".overview-save-button")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    const button = event.currentTarget;
+    const settingsApi = window.EdgeMouseInputSettings;
+    const profile = settingsApi?.getOverviewProfile();
+    const settings = settingsApi?.getProfile(profile);
+    if (!latestSnapshot || !settings) {
+      window.showEdgeMouseToast?.("正在读取本机配置，请稍后重试");
+      return;
+    }
+    button.disabled = true;
+    try {
+      const result = await invoke("save_input_settings", {
+        profile,
+        reverseHorizontal: Boolean(settings.horizontal),
+        reverseVertical: Boolean(settings.vertical),
+        pointerSmoothing: Number(settings.smoothing),
+        keyboardEnabled: Boolean(settings.keyboard),
+        reclaimEnabled: Boolean(settings.reclaim),
+        dragLock: Boolean(settings.dragLock),
+      });
+      const message = result.warning ?? (result.restarted ? "滚轮方向已保存，后台服务已重新连接" : "滚轮方向已保存");
+      settingsApi.markSaved(message);
+      setText(".overview-save-status", message);
+      window.showEdgeMouseToast?.(message);
+      await refreshSnapshot();
+    } catch (error) {
+      window.showEdgeMouseToast?.(`无法保存滚轮方向：${error}`);
+    } finally {
+      button.disabled = false;
+    }
+  }, true);
+
+  document.querySelector(".detect-button")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = "正在检测…";
+    try {
+      await refreshSnapshot();
+      const localDesktop = latestSnapshot?.platform?.desktop;
+      const count = usableDisplays(localDesktop).length || Number(localDesktop?.reportedDisplayCount) || 0;
+      window.showEdgeMouseToast?.(`已重新读取本机 ${count} 个屏幕；另一台电脑会在连接后自动同步`);
+    } catch (error) {
+      window.showEdgeMouseToast?.(`屏幕检测失败：${error}`);
+    } finally {
+      button.disabled = false;
+      button.textContent = "重新检测屏幕";
+    }
+  }, true);
+
+  document.querySelector(".auto-reconnect-toggle")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    const toggle = event.currentTarget;
+    const enabled = !toggle.classList.contains("is-on");
+    toggle.classList.toggle("is-on", enabled);
+    toggle.setAttribute("aria-checked", String(enabled));
+    toggle.disabled = true;
+    try {
+      const result = await invoke("save_connection_settings", { autoReconnect: enabled });
+      window.showEdgeMouseToast?.(result.warning ?? (enabled ? "自动重连已启用" : "自动重连已关闭"));
+      await refreshSnapshot();
+    } catch (error) {
+      toggle.classList.toggle("is-on", !enabled);
+      toggle.setAttribute("aria-checked", String(!enabled));
+      window.showEdgeMouseToast?.(`无法保存连接设置：${error}`);
+    } finally {
+      toggle.disabled = false;
+    }
+  }, true);
+
+  document.querySelector(".reconnect-button")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = "正在重新连接…";
+    try {
+      const result = await invoke("reconnect_agent");
+      window.showEdgeMouseToast?.(result.message);
+    } catch (error) {
+      window.showEdgeMouseToast?.(`重新连接失败：${error}`);
+    } finally {
+      button.disabled = false;
+      button.textContent = "立即重新连接";
+      await refreshSnapshot();
+    }
+  }, true);
 
   document.querySelector(".layout-save-button")?.addEventListener("click", async (event) => {
     const button = event.currentTarget;
@@ -567,7 +1111,8 @@
     }
     button.disabled = true;
     try {
-      const result = await invoke("save_layout", { peerOn });
+      const edgeProtection = document.querySelector('[data-layout-setting="edgeProtection"]')?.classList.contains("is-on") ?? true;
+      const result = await invoke("save_layout", { peerOn, edgeProtection });
       const message = result.warning ?? "布局已保存，正在同步并重新连接";
       window.EdgeMouseLayout?.markSaved(message);
       window.showEdgeMouseToast?.(message);
@@ -580,6 +1125,7 @@
     }
   });
 
+  refreshDesktopPreferences();
   refreshSnapshot();
   window.setInterval(refreshSnapshot, 1000);
   window.addEventListener("resize", () => {

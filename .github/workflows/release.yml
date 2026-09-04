@@ -1,0 +1,55 @@
+name: Build installers and publish release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-14
+            args: --target universal-apple-darwin --bundles dmg
+            sidecar: universal-apple-darwin
+          - platform: windows-2022
+            args: --target x86_64-pc-windows-msvc --bundles nsis
+            sidecar: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust targets for macOS Universal
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Prepare bundled background service on macOS
+        if: runner.os == 'macOS'
+        run: ./scripts/prepare-sidecar-macos.sh "${{ matrix.sidecar }}"
+
+      - name: Prepare bundled background service on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .\scripts\prepare-sidecar-windows.ps1 -TargetTriple "${{ matrix.sidecar }}"
+
+      - name: Build signed installers and updater artifacts
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: crates/edgemouse-desktop
+          tagName: v__VERSION__
+          releaseName: EdgeMouse __VERSION__
+          releaseBody: |
+            EdgeMouse 安装版。首次启动会在本机安全生成设备身份，然后可直接在“连接”页面完成配对。
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

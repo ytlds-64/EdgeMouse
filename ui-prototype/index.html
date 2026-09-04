@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
-    <meta name="edgemouse-version" content="0.5.9" />
-    <title>EdgeMouse · UI 原型</title>
+    <meta name="edgemouse-version" content="0.6.0" />
+    <title>EdgeMouse</title>
     <link rel="icon" href="./assets/branding/edgemouse-app-icon.svg" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
@@ -64,7 +64,7 @@
           <section class="page is-active" id="page-overview" data-title="概览">
             <div class="page-heading">
               <div><h1>概览</h1><p>查看设备连接状态与关键设置</p></div>
-              <span class="prototype-pill" data-native-mode>外观原型</span>
+              <span class="prototype-pill" data-native-mode>桌面应用</span>
             </div>
 
             <div class="connection-stage dotted-surface">
@@ -98,12 +98,12 @@
                 <span class="round-icon">◴</span><div><strong>网络延迟</strong><small class="teal-text">18 ms · 良好</small></div><b>›</b>
               </button>
               <article class="direction-card">
-                <div class="card-title">Mac → Windows <span class="info-dot">i</span></div>
+                <div class="card-title"><span data-overview-profile-label>本机 → 另一台电脑</span> <span class="info-dot">i</span></div>
                 <label><span>反转横向滚动</span><button class="toggle is-on" data-overview-setting="horizontal" type="button" role="switch" aria-checked="true"><span></span></button></label>
                 <label><span>反转纵向滚动</span><button class="toggle" data-overview-setting="vertical" type="button" role="switch" aria-checked="false"><span></span></button></label>
               </article>
             </div>
-            <div class="page-footer"><span>设置会在两台设备下次连接时同步</span><button class="primary-button save-button" type="button">保存设置</button></div>
+            <div class="page-footer"><span class="overview-save-status">这里调整的是本机控制另一台电脑时的滚轮方向</span><button class="primary-button save-button overview-save-button" type="button">保存设置</button></div>
           </section>
 
           <section class="page" id="page-layout" data-title="屏幕布局">
@@ -119,8 +119,8 @@
               <aside class="panel inspector">
                 <div class="panel-heading"><h2>布局设置</h2><span class="status-chip good">自动识别</span></div>
                 <div class="form-group"><label>Mac 位于 Windows 的</label><div class="segmented layout-direction" role="group"><button type="button" data-edge="left">左侧</button><button class="is-selected" type="button" data-edge="right">右侧</button><button type="button" data-edge="top">上方</button><button type="button" data-edge="bottom">下方</button></div></div>
-                <div class="setting-row"><div><strong>自动检测分辨率</strong><small>包含缩放、旋转和多显示器</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div>
-                <div class="setting-row"><div><strong>防止边缘误触</strong><small>越过边缘 8 px 后切换</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div>
+                <div class="setting-row"><div><strong>自动检测分辨率</strong><small>包含缩放、旋转和多显示器 · 已启用</small></div><button class="toggle is-on" data-layout-setting="automatic" type="button" role="switch" aria-checked="true" disabled><span></span></button></div>
+                <div class="setting-row"><div><strong>防止边缘误触</strong><small>越过边缘 8 px 后切换</small></div><button class="toggle is-on" data-layout-setting="edgeProtection" type="button" role="switch" aria-checked="true"><span></span></button></div>
                 <div class="screen-facts"><p><span>Windows 桌面</span><b data-screen-fact="windows">1 个屏幕 · 横向</b></p><p><span>macOS 桌面</span><b data-screen-fact="macos">等待设备数据</b></p><p><span>配置状态</span><b class="teal-text layout-config-status">两端一致</b></p></div>
               </aside>
             </div>
@@ -157,7 +157,7 @@
               <div class="column-stack">
                 <article class="panel setting-panel">
                   <div class="panel-heading"><div class="heading-icon">↔</div><div><h2>控制权切换</h2><p>决定何时把输入交给另一台设备</p></div></div>
-                  <div class="form-group"><label>边缘触发方式</label><div class="segmented" data-input-choice="trigger"><button class="is-selected" data-value="push" type="button">推动穿越</button><button data-value="dwell" type="button">停留后切换</button></div></div>
+                  <div class="form-group"><label>边缘触发方式</label><div class="segmented" data-input-choice="trigger"><button class="is-selected" data-value="push" type="button">推动穿越</button><button data-value="dwell" type="button" disabled title="计划在后续版本提供">停留后切换</button></div></div>
                   <div class="setting-row"><div><strong>本机反向抢回</strong><small>鼠标卡住时可从目标边缘抢回控制</small></div><button class="toggle is-on" data-input-setting="reclaim" type="button" role="switch" aria-checked="true"><span></span></button></div>
                   <div class="setting-row"><div><strong>拖拽时禁止切换</strong><small>避免拖动文件时误穿越屏幕</small></div><button class="toggle is-on" data-input-setting="dragLock" type="button" role="switch" aria-checked="true"><span></span></button></div>
                 </article>
@@ -175,12 +175,12 @@
               <article class="panel trusted-device">
                 <div class="device-summary"><div class="device-avatar mac-avatar">M</div><div><span class="eyebrow">已配对设备</span><h2>MacBook Air</h2><p class="connection-device-status"><span class="online-dot"></span><b>已连接 · Wi‑Fi</b></p></div><div class="device-more"><button class="more-button" type="button" aria-label="更多操作" aria-expanded="false">•••</button><div class="device-menu" hidden><button type="button" data-device-action="copy">复制连接信息</button><button type="button" data-device-action="verify">重新验证证书</button><button class="menu-danger" type="button" data-device-action="forget">解除配对…</button></div></div></div>
                 <div class="detail-grid"><div><span>查找方式</span><b class="discovery-detail">局域网自动发现</b></div><div><span>当前地址</span><b class="peer-address">自动获取 · 192.168.8.189</b></div><div><span>加密方式</span><b>双向 TLS</b></div><div><span>可信状态</span><b class="teal-text trust-detail">证书已验证</b></div></div>
-                <div class="certificate-line"><span>设备指纹</span><code>85f2 6b5e 2662 1790 ··· d73d e36c 4e</code><button type="button">复制</button></div>
+                <div class="certificate-line"><span>设备指纹</span><code>85f2 6b5e 2662 1790 ··· d73d e36c 4e</code><button type="button" data-device-action="copy">复制</button></div>
               </article>
               <aside class="panel connection-actions">
                 <div class="panel-heading"><h2>连接选项</h2></div>
-                <div class="setting-row"><div><strong>自动发现可信设备</strong><small>IP 变化后无需重新配对</small></div><button class="toggle is-on auto-discovery-toggle" type="button" role="switch" aria-checked="true"><span></span></button></div>
-                <div class="setting-row"><div><strong>断开后自动重连</strong><small>网络恢复后自动继续连接</small></div><button class="toggle is-on" type="button" role="switch" aria-checked="true"><span></span></button></div>
+                <div class="setting-row"><div><strong>自动发现可信设备</strong><small>IP 变化后无需重新配对 · 当前为必要功能</small></div><button class="toggle is-on auto-discovery-toggle" type="button" role="switch" aria-checked="true" disabled title="已启用局域网自动发现"><span></span></button></div>
+                <div class="setting-row"><div><strong>断开后自动重连</strong><small>网络恢复后自动继续连接</small></div><button class="toggle is-on auto-reconnect-toggle" data-connection-setting="autoReconnect" type="button" role="switch" aria-checked="true"><span></span></button></div>
                 <div class="discovery-state"><span class="discovery-radar"><i></i></span><div><strong>正在监听可信设备</strong><small>UDP 43892 · 地址变化自动更新</small></div></div>
                 <button class="secondary-button full-button reconnect-button" type="button">立即重新连接</button>
                 <button class="ghost-button full-button pair-device-button" type="button">配对新设备</button>
@@ -217,11 +217,11 @@
             <div class="page-heading"><div><h1>设置</h1><p>调整 EdgeMouse 的启动、外观和后台行为</p></div></div>
             <div class="settings-columns">
               <div class="column-stack">
-                <article class="panel setting-panel"><div class="panel-heading"><h2>常规</h2><span class="status-chip good">后台服务正常</span></div><div class="setting-row"><div><strong>登录时启动 EdgeMouse</strong><small>进入桌面后自动连接可信设备</small></div><button class="toggle is-on" data-general-setting="autostart" type="button" role="switch" aria-checked="true"><span></span></button></div><div class="setting-row"><div><strong>关闭窗口后继续运行</strong><small>从菜单栏或系统托盘再次打开</small></div><button class="toggle is-on" data-general-setting="background" type="button" role="switch" aria-checked="true"><span></span></button></div><div class="setting-row"><div><strong>显示连接通知</strong><small>连接、断开和控制权变化时提醒</small></div><button class="toggle is-on" data-general-setting="notifications" type="button" role="switch" aria-checked="true"><span></span></button></div></article>
+                <article class="panel setting-panel"><div class="panel-heading"><h2>常规</h2><span class="status-chip good">后台服务正常</span></div><div class="setting-row"><div><strong>登录时启动 EdgeMouse</strong><small>进入桌面后自动连接可信设备</small></div><button class="toggle is-on" data-general-setting="autostart" type="button" role="switch" aria-checked="true"><span></span></button></div><div class="setting-row"><div><strong>关闭窗口后继续运行</strong><small>从菜单栏或系统托盘再次打开</small></div><button class="toggle is-on" data-general-setting="background" type="button" role="switch" aria-checked="true"><span></span></button></div><div class="setting-row"><div><strong>显示连接通知</strong><small>连接、断开和自动重连时提醒</small></div><button class="toggle is-on" data-general-setting="notifications" type="button" role="switch" aria-checked="true"><span></span></button></div></article>
                 <article class="panel setting-panel appearance-panel"><div class="panel-heading"><h2>外观</h2><span class="theme-current">跟随系统 · 浅色</span></div><div class="form-group"><label>界面主题</label><div class="theme-options" role="radiogroup" aria-label="界面主题"><button class="theme-option is-selected" type="button" role="radio" aria-checked="true" data-theme="system"><span class="theme-preview system-preview"><i></i><i></i></span><b>跟随系统</b><small>当前为浅色</small></button><button class="theme-option" type="button" role="radio" aria-checked="false" data-theme="light"><span class="theme-preview light-preview"><i></i><i></i></span><b>浅色</b><small>始终使用浅色</small></button><button class="theme-option" type="button" role="radio" aria-checked="false" data-theme="dark"><span class="theme-preview dark-preview"><i></i><i></i></span><b>深色</b><small>适合暗光环境</small></button></div></div><div class="form-group select-row"><label for="language">界面语言</label><select id="language"><option value="zh-CN">简体中文</option><option value="en">English</option></select></div></article>
               </div>
               <div class="column-stack">
-              <article class="panel setting-panel update-panel"><div class="panel-heading"><h2>更新</h2><span class="status-chip good update-status">已是最新版</span></div><div class="update-version"><img src="./assets/branding/edgemouse-app-icon.svg" alt=""/><div><strong>EdgeMouse <span data-app-version>0.5.9</span></strong><small class="update-last-check">最后检查：刚刚</small></div></div><div class="form-group select-row update-channel-row"><label for="update-channel">更新通道</label><select id="update-channel"><option value="stable">稳定版</option><option value="preview">预览版</option></select></div><button class="secondary-button full-button check-updates-button" type="button">检查更新</button></article>
+              <article class="panel setting-panel update-panel"><div class="panel-heading"><h2>更新</h2><span class="status-chip pending update-status">尚未检查</span></div><div class="update-version"><img src="./assets/branding/edgemouse-app-icon.svg" alt=""/><div><strong>EdgeMouse <span data-app-version>0.6.0</span></strong><small class="update-last-check">将从 GitHub 安全检查正式版本</small></div></div><div class="form-group select-row update-channel-row"><label for="update-channel">更新通道</label><select id="update-channel"><option value="stable">稳定版</option><option value="preview" disabled>预览版（筹备中）</option></select></div><button class="secondary-button full-button check-updates-button" type="button">检查更新</button></article>
                 <article class="panel setting-panel danger-panel"><div class="panel-heading"><h2>重置</h2><span class="status-chip">保留证书</span></div><p>恢复界面、输入和连接偏好，不会删除设备身份、私钥或可信证书。</p><button class="danger-button reset-settings-button" type="button">恢复默认设置…</button></article>
               </div>
             </div>
@@ -231,10 +231,10 @@
           <section class="page" id="page-about" data-title="关于">
             <div class="page-heading"><div><h1>关于</h1><p>EdgeMouse 版本、开源许可和产品信息</p></div></div>
             <div class="about-layout">
-              <article class="panel about-hero"><img src="./assets/branding/edgemouse-mark.svg" alt="EdgeMouse"/><h2>EdgeMouse</h2><p class="version-text">版本 <span data-app-version>0.5.9</span> · 稳定版</p><p>让 Windows 与 macOS 像一张连续的桌面一样自然协作。</p><div class="about-actions"><button class="primary-button check-updates-button" type="button">检查更新</button><button class="secondary-button project-home-button" type="button">查看项目主页</button></div></article>
+              <article class="panel about-hero"><img src="./assets/branding/edgemouse-mark.svg" alt="EdgeMouse"/><h2>EdgeMouse</h2><p class="version-text">版本 <span data-app-version>0.6.0</span> · 稳定版</p><p>让 Windows 与 macOS 像一张连续的桌面一样自然协作。</p><div class="about-actions"><button class="primary-button check-updates-button" type="button">检查更新</button><button class="secondary-button project-home-button" type="button">查看项目主页</button></div></article>
               <div class="about-details">
                 <article class="panel"><div class="panel-heading"><h2>当前能力</h2><span class="status-chip good">MVP 已就绪</span></div><div class="feature-tags"><span>双向鼠标</span><span>键盘跟随</span><span>自动屏幕识别</span><span>局域网发现</span><span>安全配对</span><span>自动重连</span><span>诊断导出</span></div></article>
-                <article class="panel build-info"><div class="panel-heading"><h2>构建信息</h2></div><p><span>版本</span><b data-app-version>0.5.9</b></p><p><span>平台</span><b>Windows 11 · macOS 15+</b></p><p><span>传输</span><b>QUIC · 双向 TLS</b></p><p><span>项目</span><b>开源 · MIT License</b></p></article>
+                <article class="panel build-info"><div class="panel-heading"><h2>构建信息</h2></div><p><span>版本</span><b data-app-version>0.6.0</b></p><p><span>平台</span><b>Windows 11 · macOS 15+</b></p><p><span>传输</span><b>QUIC · 双向 TLS</b></p><p><span>项目</span><b>开源 · MIT License</b></p></article>
                 <article class="panel about-links"><button type="button" data-about-action="license"><span>开源许可</span><b>MIT License ›</b></button><button type="button" data-about-action="dependencies"><span>第三方组件</span><b>查看清单 ›</b></button><button type="button" data-about-action="issues"><span>问题反馈</span><b>GitHub Issues ›</b></button><button type="button" data-about-action="version"><span>诊断信息</span><b>复制版本信息 ›</b></button></article>
                 <p class="copyright">© 2026 EdgeMouse contributors · 为跨平台桌面协作而设计</p>
               </div>
@@ -245,28 +245,21 @@
     </div>
     <div class="modal-backdrop pairing-modal" hidden>
       <section class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="pairing-title">
-        <header class="modal-header"><div><span class="modal-eyebrow">安全配对</span><h2 id="pairing-title">配对新设备</h2></div><button class="modal-close" type="button" aria-label="关闭配对窗口">×</button></header>
+        <header class="modal-header"><div><span class="modal-eyebrow">安全配对</span><h2 id="pairing-title">配对新设备</h2></div><button class="modal-close pairing-modal-close" type="button" aria-label="关闭配对窗口">×</button></header>
         <div class="pairing-step pairing-step-discover is-active">
-          <div class="pairing-mode segmented" role="tablist" aria-label="查找设备方式"><button class="is-selected" type="button" role="tab" aria-selected="true" data-pairing-mode="auto">自动发现</button><button type="button" role="tab" aria-selected="false" data-pairing-mode="manual">手动地址</button></div>
-          <div class="pairing-panel pairing-auto is-active">
-            <div class="scan-status"><span class="scan-rings"><i></i></span><div><strong>正在查找附近设备…</strong><small>请确保另一台设备已打开 EdgeMouse</small></div></div>
-            <button class="discovered-device" type="button" hidden><span class="profile-device mac-profile">M</span><span><b>MacBook Air</b><small>自动发现 · <em>192.168.8.189</em></small></span><i>配对 ›</i></button>
-          </div>
-          <div class="pairing-panel pairing-manual">
-            <label for="manual-peer-address">另一台设备的局域网地址</label>
-            <div class="address-field"><input id="manual-peer-address" type="text" inputmode="decimal" placeholder="例如 192.168.8.189" autocomplete="off"/><span>:43893</span></div>
-            <p class="field-help">自动发现不可用时，可输入对方当前 IP；配对完成后仍会自动追踪地址变化。</p>
-            <p class="field-error" hidden>请输入正确的 IPv4 地址</p>
-            <button class="primary-button manual-connect-button" type="button">连接此设备</button>
+          <p class="export-intro">在其中一台电脑创建配对码，再在另一台电脑输入。完成后即使 IP 变化也会自动发现。</p>
+          <div class="pairing-choice-grid">
+            <article class="pairing-choice"><span class="pairing-code-icon">＋</span><h3>创建配对码</h3><p>这台电脑等待另一台加入</p><button class="primary-button start-pairing-host-button" type="button">生成一次性配对码</button></article>
+            <article class="pairing-choice"><span class="pairing-code-icon">→</span><h3>加入另一台电脑</h3><label for="pairing-code-input">对方显示的配对码</label><input id="pairing-code-input" class="pairing-code-input" inputmode="numeric" placeholder="例如 9274-7922" maxlength="9" autocomplete="one-time-code"/><label for="manual-peer-address">对方 IP（可选）</label><input id="manual-peer-address" inputmode="decimal" placeholder="留空则自动发现" autocomplete="off"/><p class="field-error" hidden>请输入 8 位配对码</p><button class="secondary-button join-pairing-button" type="button">安全加入</button></article>
           </div>
         </div>
         <div class="pairing-step pairing-step-code">
-          <div class="pairing-code-icon">↔</div><h3>确认两台设备显示相同配对码</h3><p>这可以防止局域网中的其他设备冒充你的电脑。</p><div class="pairing-code" aria-label="配对码">9274&nbsp;–&nbsp;7922</div>
-          <div class="pairing-target"><span class="profile-device mac-profile">M</span><div><strong class="pairing-target-name">MacBook Air</strong><small class="pairing-target-address">通过自动发现 · 192.168.8.189</small></div><span class="status-chip good">证书待确认</span></div>
-          <div class="modal-actions"><button class="ghost-button pairing-back-button" type="button">返回</button><button class="primary-button pairing-confirm-button" type="button">配对码一致</button></div>
+          <div class="pairing-code-icon">↔</div><h3>在另一台电脑输入此配对码</h3><p class="pairing-host-status">一次性配对码 5 分钟内有效，最多允许尝试 3 次。</p><div class="pairing-code" aria-label="配对码">••••&nbsp;–&nbsp;••••</div>
+          <div class="pairing-target"><span class="profile-device mac-profile">✓</span><div><strong class="pairing-target-name">正在安全等待</strong><small class="pairing-target-address">局域网自动发现 · TCP 43893</small></div><span class="status-chip pending">等待加入</span></div>
+          <div class="modal-actions"><button class="ghost-button pairing-cancel-button" type="button">取消配对</button></div>
         </div>
         <div class="pairing-step pairing-step-success">
-          <div class="pairing-success-icon">✓</div><h3>安全配对完成</h3><p>证书已经保存。以后 IP 地址发生变化时，EdgeMouse 仍会自动找到并验证这台设备。</p><button class="primary-button pairing-finish-button" type="button">完成</button>
+          <div class="pairing-success-icon">✓</div><h3>安全配对完成</h3><p class="pairing-success-message">证书已经保存。以后 IP 地址发生变化时，EdgeMouse 仍会自动找到并验证这台设备。</p><button class="primary-button pairing-finish-button" type="button">完成</button>
         </div>
       </section>
     </div>
@@ -303,7 +296,7 @@
         <div class="info-modal-content"></div><div class="info-modal-footer"><button class="primary-button info-modal-finish" type="button">完成</button></div>
       </section>
     </div>
-    <div class="toast" role="status" aria-live="polite"><span>✓</span><b>原型操作已完成</b></div>
+    <div class="toast" role="status" aria-live="polite"><span>✓</span><b>操作已完成</b></div>
     <script src="./i18n.js"></script>
     <script src="./app.js"></script>
     <script src="./native.js"></script>

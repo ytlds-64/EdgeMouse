@@ -121,8 +121,8 @@ pub fn start_capture(
 
 #[cfg(target_os = "macos")]
 #[must_use]
-pub fn injector(initial: edgemouse_core::Point) -> NativeMouseInjector {
-    NativeMouseInjector::new(initial)
+pub fn injector(initial: edgemouse_core::Point, pointer_smoothing: u8) -> NativeMouseInjector {
+    NativeMouseInjector::new_with_smoothing(initial, pointer_smoothing)
 }
 
 #[cfg(target_os = "macos")]
@@ -156,6 +156,6 @@ pub const fn keyboard_injector() -> NativeKeyboardInjector {
 
 #[cfg(target_os = "windows")]
 #[must_use]
-pub fn injector(initial: edgemouse_core::Point) -> NativeMouseInjector {
+pub fn injector(initial: edgemouse_core::Point, _pointer_smoothing: u8) -> NativeMouseInjector {
     NativeMouseInjector::new(initial)
 }

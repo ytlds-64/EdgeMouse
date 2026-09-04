@@ -28,6 +28,22 @@ pub struct LoadedConfig {
     pub windows_raw_input: bool,
     pub reverse_scroll_horizontal: bool,
     pub reverse_scroll_vertical: bool,
+    pub pointer_smoothing: u8,
+    pub keyboard_enabled: bool,
+    pub reclaim_enabled: bool,
+    pub auto_reconnect: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SessionPreferences {
+    pub entry_hysteresis: f64,
+    pub reverse_scroll_horizontal: bool,
+    pub reverse_scroll_vertical: bool,
+    pub pointer_smoothing: u8,
+    pub keyboard_enabled: bool,
+    pub reclaim_enabled: bool,
+    pub block_switch_while_dragging: bool,
+    pub auto_reconnect: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +79,97 @@ impl LoadedConfig {
     }
 }
 
+/// Creates the per-user identity and an unpaired configuration used by the
+/// packaged desktop application. Existing files are never replaced.
+pub fn initialize_unpaired_config(path: &Path) -> Result<(), String> {
+    if path.exists() {
+        return Ok(());
+    }
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
+    let identity_directory = base.join("identity");
+    let certificate_path = identity_directory.join("certificate.der");
+    let private_key_path = identity_directory.join("private-key.der");
+    let peer_certificate = if cfg!(target_os = "windows") {
+        "mac-certificate.der"
+    } else {
+        "windows-certificate.der"
+    };
+    let local_name = default_device_name();
+    let (local_screen_id, local_screen_name, peer_screen_id, peer_screen_name, peer_on) =
+        if cfg!(target_os = "windows") {
+            (1, "Windows display", 2, "Mac display", "right")
+        } else {
+            (2, "Mac display", 1, "Windows display", "left")
+        };
+
+    fs::create_dir_all(&identity_directory).map_err(|error| {
+        format!(
+            "failed to create identity directory {}: {error}",
+            identity_directory.display()
+        )
+    })?;
+    if certificate_path.exists() || private_key_path.exists() {
+        return Err(format!(
+            "identity directory {} is incomplete; refusing to replace existing identity files",
+            identity_directory.display()
+        ));
+    }
+    let identity =
+        Identity::generate().map_err(|error| format!("failed to create identity: {error}"))?;
+    fs::write(&certificate_path, &identity.certificate)
+        .map_err(|error| format!("failed to save local certificate: {error}"))?;
+    if let Err(error) = write_private_key(&private_key_path, &identity.private_key) {
+        drop(fs::remove_file(&certificate_path));
+        return Err(error);
+    }
+
+    let source = format!(
+        "[local]\nname = \"{local_name}\"\nlisten = \"0.0.0.0:43891\"\ncertificate = \"identity/certificate.der\"\nprivate_key = \"identity/private-key.der\"\n\n[local.screen]\nid = {local_screen_id}\nname = \"{local_screen_name}\"\nauto = true\n\n[peer]\naddress = \"auto\"\ncertificate = \"{peer_certificate}\"\n\n[peer.screen]\nid = {peer_screen_id}\nname = \"{peer_screen_name}\"\nauto = true\n\n[layout]\npeer_on = \"{peer_on}\"\n\n[session]\nhysteresis = 8\ntimeout_ms = 1500\nconnect_timeout_seconds = 30\nwindows_raw_input = true\nreverse_scroll_horizontal = false\nreverse_scroll_vertical = false\npointer_smoothing = 52\nkeyboard_enabled = true\nreclaim_enabled = true\nblock_switch_while_dragging = true\nauto_reconnect = true\n"
+    );
+    if let Err(error) = fs::write(path, source) {
+        drop(fs::remove_file(&certificate_path));
+        drop(fs::remove_file(&private_key_path));
+        return Err(format!("failed to save initial configuration: {error}"));
+    }
+    PairingConfig::load(path)
+        .map_err(|error| format!("initial configuration is invalid: {error}"))?;
+    Ok(())
+}
+
+fn default_device_name() -> String {
+    let fallback = if cfg!(target_os = "windows") {
+        "windows-pc"
+    } else {
+        "macbook"
+    };
+    let raw = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| fallback.to_owned());
+    let sanitized = raw
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | ' ')
+        })
+        .take(63)
+        .collect::<String>();
+    if sanitized.trim().is_empty() {
+        fallback.to_owned()
+    } else {
+        sanitized
+    }
+}
+
+fn write_private_key(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    fs::write(path, bytes).map_err(|error| format!("failed to save private key: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("failed to secure private key permissions: {error}"))?;
+    }
+    Ok(())
+}
+
 pub fn persist_peer_on(path: &Path, peer_on: Edge) -> Result<(), String> {
     let original = fs::read_to_string(path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
@@ -73,6 +180,58 @@ pub fn persist_peer_on(path: &Path, peer_on: Edge) -> Result<(), String> {
         &format!("\"{}\"", edge_name(peer_on)),
     );
     fs::write(path, updated)
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+    if let Err(error) = LoadedConfig::load(path) {
+        let restore_error = fs::write(path, original).err();
+        return Err(match restore_error {
+            Some(restore_error) => format!(
+                "saved configuration is invalid: {error}; restoring the original also failed: {restore_error}"
+            ),
+            None => format!("saved configuration is invalid; restored the original: {error}"),
+        });
+    }
+    Ok(())
+}
+
+pub fn persist_session_preferences(
+    path: &Path,
+    preferences: SessionPreferences,
+) -> Result<(), String> {
+    if !preferences.entry_hysteresis.is_finite() || preferences.entry_hysteresis < 0.0 {
+        return Err("entry hysteresis must be finite and non-negative".to_owned());
+    }
+    if preferences.pointer_smoothing > 100 {
+        return Err("pointer smoothing must be between 0 and 100".to_owned());
+    }
+    let original = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let mut updated = original.clone();
+    let values = [
+        ("hysteresis", preferences.entry_hysteresis.to_string()),
+        (
+            "reverse_scroll_horizontal",
+            preferences.reverse_scroll_horizontal.to_string(),
+        ),
+        (
+            "reverse_scroll_vertical",
+            preferences.reverse_scroll_vertical.to_string(),
+        ),
+        (
+            "pointer_smoothing",
+            preferences.pointer_smoothing.to_string(),
+        ),
+        ("keyboard_enabled", preferences.keyboard_enabled.to_string()),
+        ("reclaim_enabled", preferences.reclaim_enabled.to_string()),
+        (
+            "block_switch_while_dragging",
+            preferences.block_switch_while_dragging.to_string(),
+        ),
+        ("auto_reconnect", preferences.auto_reconnect.to_string()),
+    ];
+    for (key, value) in values {
+        updated = replace_table_value(&updated, "session", key, &value);
+    }
+    fs::write(path, &updated)
         .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
     if let Err(error) = LoadedConfig::load(path) {
         let restore_error = fs::write(path, original).err();
@@ -238,6 +397,11 @@ struct RawSession {
     windows_raw_input: bool,
     reverse_scroll_horizontal: bool,
     reverse_scroll_vertical: bool,
+    pointer_smoothing: u8,
+    keyboard_enabled: bool,
+    reclaim_enabled: bool,
+    block_switch_while_dragging: bool,
+    auto_reconnect: bool,
 }
 
 impl Default for RawSession {
@@ -249,6 +413,11 @@ impl Default for RawSession {
             windows_raw_input: true,
             reverse_scroll_horizontal: false,
             reverse_scroll_vertical: false,
+            pointer_smoothing: 52,
+            keyboard_enabled: true,
+            reclaim_enabled: true,
+            block_switch_while_dragging: true,
+            auto_reconnect: true,
         }
     }
 }
@@ -290,8 +459,11 @@ impl RawConfig {
         let session = SessionConfig {
             entry_hysteresis: self.session.hysteresis,
             peer_timeout_ms: self.session.timeout_ms,
-            block_switch_while_dragging: true,
+            block_switch_while_dragging: self.session.block_switch_while_dragging,
         };
+        if self.session.pointer_smoothing > 100 {
+            return Err("session.pointer_smoothing must be between 0 and 100".into());
+        }
 
         Ok(LoadedConfig {
             transport,
@@ -306,6 +478,10 @@ impl RawConfig {
             windows_raw_input: self.session.windows_raw_input,
             reverse_scroll_horizontal: self.session.reverse_scroll_horizontal,
             reverse_scroll_vertical: self.session.reverse_scroll_vertical,
+            pointer_smoothing: self.session.pointer_smoothing,
+            keyboard_enabled: self.session.keyboard_enabled,
+            reclaim_enabled: self.session.reclaim_enabled,
+            auto_reconnect: self.session.auto_reconnect,
         })
     }
 }
@@ -492,6 +668,38 @@ mod tests {
         assert!(session.windows_raw_input);
         assert!(!session.reverse_scroll_horizontal);
         assert!(!session.reverse_scroll_vertical);
+        assert_eq!(session.pointer_smoothing, 52);
+        assert!(session.keyboard_enabled);
+        assert!(session.reclaim_enabled);
+        assert!(session.block_switch_while_dragging);
+        assert!(session.auto_reconnect);
+    }
+
+    #[test]
+    fn packaged_app_initialization_creates_an_unpaired_identity_once() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "edgemouse-initial-config-{}-{unique}",
+            std::process::id()
+        ));
+        let config_path = directory.join("edgemouse.toml");
+
+        initialize_unpaired_config(&config_path).unwrap();
+        let pairing = PairingConfig::load(&config_path).unwrap();
+        assert!(directory.join("identity/certificate.der").is_file());
+        assert!(directory.join("identity/private-key.der").is_file());
+        assert!(!pairing.peer_certificate_path.exists());
+        let original_certificate = fs::read(directory.join("identity/certificate.der")).unwrap();
+
+        initialize_unpaired_config(&config_path).unwrap();
+        assert_eq!(
+            fs::read(directory.join("identity/certificate.der")).unwrap(),
+            original_certificate
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -27,10 +27,8 @@ const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_DISTANCE: f64 = 5.0;
 const MAX_CLICK_STATE: i64 = 3;
 const MOTION_FRAME_INTERVAL: Duration = Duration::from_millis(4);
-const MOTION_TIME_CONSTANT_SECONDS: f64 = 0.004;
 const MOTION_SNAP_DISTANCE: f64 = 0.25;
 const MOTION_MAX_FRAME_DISTANCE: f64 = 240.0;
-const MOTION_BUFFER_DELAY: Duration = Duration::from_millis(12);
 const MOTION_MIN_SAMPLE_INTERVAL: Duration = Duration::from_millis(1);
 const MOTION_MAX_SAMPLES: usize = 32;
 
@@ -719,10 +717,13 @@ struct MotionSmoother {
     last_frame: Instant,
     next_frame: Instant,
     pending: bool,
+    buffer_delay: Duration,
+    time_constant_seconds: f64,
 }
 
 impl MotionSmoother {
-    fn new(position: Point, now: Instant) -> Self {
+    fn new(position: Point, now: Instant, level: u8) -> Self {
+        let level = f64::from(level.min(100));
         Self {
             displayed: position,
             target: position,
@@ -732,6 +733,8 @@ impl MotionSmoother {
             last_frame: now,
             next_frame: now + MOTION_FRAME_INTERVAL,
             pending: false,
+            buffer_delay: Duration::from_micros((level * 180.0).round() as u64),
+            time_constant_seconds: 0.0015 + level * 0.000_065,
         }
     }
 
@@ -803,7 +806,7 @@ impl MotionSmoother {
             return None;
         }
 
-        let playback_at = now.checked_sub(MOTION_BUFFER_DELAY).unwrap_or(now);
+        let playback_at = now.checked_sub(self.buffer_delay).unwrap_or(now);
         let (desired, keep_polling) = self.desired_position(playback_at);
         self.target = desired;
         let previous_displayed = self.displayed;
@@ -811,7 +814,7 @@ impl MotionSmoother {
         let dx = self.target.x - self.displayed.x;
         let dy = self.target.y - self.displayed.y;
         let distance = dx.hypot(dy);
-        let alpha = 1.0 - (-elapsed / MOTION_TIME_CONSTANT_SECONDS).exp();
+        let alpha = 1.0 - (-elapsed / self.time_constant_seconds).exp();
         let frame_fraction = if distance <= MOTION_SNAP_DISTANCE {
             1.0
         } else {
@@ -938,12 +941,17 @@ fn points_are_close(left: Point, right: Point) -> bool {
 impl MacMouseInjector {
     #[must_use]
     pub fn new(initial_position: Point) -> Self {
+        Self::new_with_smoothing(initial_position, 52)
+    }
+
+    #[must_use]
+    pub fn new_with_smoothing(initial_position: Point, smoothing: u8) -> Self {
         let now = Instant::now();
         Self {
             position: initial_position,
             pressed: BTreeSet::new(),
             clicks: ClickTracker::default(),
-            motion: MotionSmoother::new(initial_position, now),
+            motion: MotionSmoother::new(initial_position, now, smoothing),
         }
     }
 
@@ -2352,15 +2360,14 @@ mod tests {
     #[test]
     fn motion_smoother_waits_for_its_jitter_buffer() {
         let start = Instant::now();
-        let mut motion = MotionSmoother::new(Point::new(0.0, 0.0), start);
+        let mut motion = MotionSmoother::new(Point::new(0.0, 0.0), start, 52);
         motion.set_target(Point::new(100.0, 0.0), start + Duration::from_millis(4));
 
         assert_eq!(motion.sample(start + Duration::from_millis(3)), None);
         assert_eq!(motion.sample(start + Duration::from_millis(4)), None);
         assert_eq!(motion.sample(start + Duration::from_millis(8)), None);
-        assert_eq!(motion.sample(start + Duration::from_millis(12)), None);
         let first = motion
-            .sample(start + Duration::from_millis(16))
+            .sample(start + Duration::from_millis(12))
             .expect("the buffered sample should become ready");
         assert!(first.x > 0.0 && first.x < 100.0);
         assert_eq!(first.y, 0.0);
@@ -2377,7 +2384,7 @@ mod tests {
     #[test]
     fn motion_smoother_interpolates_between_buffered_samples() {
         let start = Instant::now();
-        let mut motion = MotionSmoother::new(Point::new(0.0, 0.0), start);
+        let mut motion = MotionSmoother::new(Point::new(0.0, 0.0), start, 52);
         motion.set_target(Point::new(40.0, 0.0), start + Duration::from_millis(4));
         motion.set_target(Point::new(80.0, 0.0), start + Duration::from_millis(8));
 
@@ -2389,7 +2396,7 @@ mod tests {
     #[test]
     fn motion_smoother_never_predicts_past_the_latest_real_sample() {
         let start = Instant::now();
-        let mut motion = MotionSmoother::new(Point::new(0.0, 0.0), start);
+        let mut motion = MotionSmoother::new(Point::new(0.0, 0.0), start, 52);
         motion.set_target(Point::new(10.0, 0.0), start + Duration::from_millis(4));
         motion.set_target(Point::new(20.0, 0.0), start + Duration::from_millis(8));
         let _ = motion.desired_position(start + Duration::from_millis(8));
@@ -2402,7 +2409,7 @@ mod tests {
     #[test]
     fn reliable_control_flushes_the_latest_buffered_position() {
         let start = Instant::now();
-        let mut motion = MotionSmoother::new(Point::new(0.0, 0.0), start);
+        let mut motion = MotionSmoother::new(Point::new(0.0, 0.0), start, 52);
         motion.set_target(Point::new(1_000.0, 0.0), start + Duration::from_millis(1));
 
         assert_eq!(

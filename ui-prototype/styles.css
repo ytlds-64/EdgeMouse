@@ -123,6 +123,7 @@ button.summary-card:hover { border-color: #b8dcd6; box-shadow: 0 5px 15px rgba(2
 .toggle span { position: absolute; top: 3px; left: 3px; width: 17px; height: 17px; border-radius: 50%; background: white; box-shadow: 0 1px 3px rgba(0,0,0,.16); transition: .2s ease; }
 .toggle.is-on { background: var(--teal); }
 .toggle.is-on span { transform: translateX(16px); }
+.toggle:disabled { cursor: not-allowed; opacity: .48; }
 .page-footer { display: flex; align-items: center; justify-content: flex-end; gap: 20px; min-height: 72px; color: var(--muted); font-size: 12px; }
 .primary-button, .secondary-button, .ghost-button, .danger-button { min-height: 40px; padding: 0 20px; border-radius: 10px; cursor: pointer; font-weight: 650; transition: .2s ease; }
 .primary-button { min-width: 150px; border: 0; color: white; background: linear-gradient(135deg, #11b7ac, #07978f); box-shadow: 0 5px 15px rgba(8, 157, 148, .18); }
@@ -205,6 +206,7 @@ button.summary-card:hover { border-color: #b8dcd6; box-shadow: 0 5px 15px rgba(2
 .range-row strong { font-size: 13px; }
 .range-row small { color: var(--muted); font-size: 11px; }
 input[type="range"] { accent-color: var(--teal); }
+input[type="range"]:disabled { cursor: not-allowed; opacity: .45; }
 .range-row output { color: var(--teal-dark); font-size: 12px; font-weight: 650; }
 .shortcut-map { display: grid; grid-template-columns: 1fr 26px 1fr; align-items: center; gap: 8px; margin-top: 16px; padding: 15px; border-radius: 12px; background: #f5f8f7; font-size: 11px; }
 .shortcut-map span { padding: 7px 8px; border: 1px solid #dce3e1; border-radius: 7px; background: white; text-align: center; }
@@ -373,6 +375,16 @@ kbd { display: inline-grid; place-items: center; min-width: 40px; height: 27px; 
 @keyframes log-in { from { opacity: 0; transform: translateY(-3px); } }
 
 .diagnostics-dialog { min-height: 500px; }
+.pairing-choice-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 0 26px 26px; }
+.pairing-choice { display: flex; flex-direction: column; align-items: stretch; gap: 9px; padding: 17px; border: 1px solid var(--line); border-radius: 13px; background: #fafcfb; }
+.pairing-choice h3, .pairing-choice p { margin: 0; text-align: center; }
+.pairing-choice p { min-height: 30px; color: var(--muted); font-size: 9px; }
+.pairing-choice label { color: var(--muted); font-size: 9px; font-weight: 650; }
+.pairing-choice input { box-sizing: border-box; width: 100%; height: 38px; padding: 0 11px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: white; }
+.pairing-code-input { text-align: center; letter-spacing: .12em; font: 700 15px/1 "SFMono-Regular", Consolas, monospace; }
+.pairing-choice .pairing-code-icon { margin-bottom: 0; }
+.diagnostic-check.is-failed .check { background: var(--danger); }
+.diagnostic-check.is-failed b { color: var(--danger); }
 .diagnostics-export-step { display: none; padding: 24px 26px 26px; }
 .diagnostics-export-step.is-active { display: block; }
 .export-intro { margin: 0 0 17px; color: var(--muted); font-size: 10px; line-height: 1.6; }

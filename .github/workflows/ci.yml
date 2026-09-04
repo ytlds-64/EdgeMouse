@@ -69,6 +69,15 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Prepare desktop sidecar on macOS
+        if: runner.os == 'macOS'
+        run: ./scripts/prepare-sidecar-macos.sh
+
+      - name: Prepare desktop sidecar on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .\scripts\prepare-sidecar-windows.ps1
+
       - name: Run static analysis
         run: cargo clippy --workspace --all-targets -- -D warnings
 

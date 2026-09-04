@@ -1,7 +1,7 @@
 const navItems = [...document.querySelectorAll(".nav-item")];
 const pages = [...document.querySelectorAll(".page")];
 const toast = document.querySelector(".toast");
-let appVersion = document.querySelector('meta[name="edgemouse-version"]')?.content ?? "0.5.0";
+let appVersion = document.querySelector('meta[name="edgemouse-version"]')?.content ?? "0.6.0";
 let toastTimer;
 
 document.querySelectorAll("[data-app-version]").forEach((element) => {
@@ -30,7 +30,7 @@ function showPage(name) {
   navItems.forEach((item) => item.classList.toggle("is-active", item.dataset.page === name));
   pages.forEach((page) => page.classList.toggle("is-active", page.id === `page-${name}`));
   const current = pages.find((page) => page.id === `page-${name}`);
-  document.title = `EdgeMouse · ${current?.dataset.title ?? "UI 原型"}`;
+  document.title = `EdgeMouse · ${current?.dataset.title ?? "桌面应用"}`;
   document.querySelector(".content").scrollTo({ top: 0, behavior: "smooth" });
 }
 
@@ -102,6 +102,8 @@ const inputProfileMeta = {
 };
 
 let activeInputProfile = "mac-to-windows";
+let overviewInputProfile = "mac-to-windows";
+let localOutgoingProfile = /Windows/i.test(navigator.userAgent) ? "windows-to-mac" : "mac-to-windows";
 let inputSettingsDirty = false;
 const smoothingRange = document.querySelector("#pointer-smoothing");
 const smoothingOutput = document.querySelector('output[for="pointer-smoothing"]');
@@ -125,7 +127,7 @@ function markInputSettingsDirty() {
 }
 
 function syncOverviewInputSettings() {
-  const profile = inputProfiles["mac-to-windows"];
+  const profile = inputProfiles[overviewInputProfile];
   document.querySelectorAll("[data-overview-setting]").forEach((toggle) => {
     setToggleState(toggle, profile[toggle.dataset.overviewSetting]);
   });
@@ -134,16 +136,25 @@ function syncOverviewInputSettings() {
 function renderInputProfile() {
   const profile = inputProfiles[activeInputProfile];
   const meta = inputProfileMeta[activeInputProfile];
+  const outgoing = activeInputProfile === localOutgoingProfile;
+  const locallyOwnedSettings = new Set(outgoing
+    ? ["horizontal", "vertical", "keyboard", "dragLock"]
+    : ["smoothing", "reclaim"]);
   document.querySelectorAll(".input-profile-button").forEach((button) => {
     const selected = button.dataset.profile === activeInputProfile;
     button.classList.toggle("is-selected", selected);
     button.setAttribute("aria-selected", String(selected));
   });
   document.querySelectorAll("[data-input-setting]").forEach((toggle) => {
-    setToggleState(toggle, profile[toggle.dataset.inputSetting]);
+    const key = toggle.dataset.inputSetting;
+    setToggleState(toggle, profile[key]);
+    toggle.disabled = !locallyOwnedSettings.has(key);
+    toggle.title = toggle.disabled ? "此项由另一台电脑负责，请在另一端的 EdgeMouse 中设置" : "";
   });
   document.querySelector('[data-input-description="horizontal"]').textContent = meta.horizontalDescription;
   smoothingRange.value = String(profile.smoothing);
+  smoothingRange.disabled = !locallyOwnedSettings.has("smoothing");
+  smoothingRange.title = smoothingRange.disabled ? "指针平滑由被控制的电脑负责，请在另一端设置" : "";
   smoothingOutput.textContent = smoothingLabel(profile.smoothing);
   document.querySelectorAll("[data-map-source]").forEach((source) => {
     source.textContent = meta.sources[source.dataset.mapSource];
@@ -152,11 +163,18 @@ function renderInputProfile() {
     const key = select.dataset.inputMap;
     select.replaceChildren(...meta.choices[key].map((choice) => new Option(choice, choice)));
     select.value = profile[key];
-    select.disabled = !profile.keyboard;
+    select.disabled = true;
+    select.title = "当前版本会自动采用经过验证的跨平台映射";
   });
   document.querySelectorAll('[data-input-choice="trigger"] button').forEach((button) => {
     button.classList.toggle("is-selected", button.dataset.value === profile.trigger);
   });
+  if (!inputSettingsDirty) {
+    inputSaveStatus.textContent = outgoing
+      ? "本页可保存这台电脑发送的滚轮、键盘与拖拽设置；指针平滑和抢回请在另一端设置"
+      : "本页可保存这台电脑接收的指针平滑与抢回设置；滚轮和键盘请在另一端设置";
+    inputSaveStatus.classList.remove("is-dirty");
+  }
 }
 
 document.querySelectorAll(".input-profile-button").forEach((button) => {
@@ -177,9 +195,10 @@ document.querySelectorAll("[data-input-setting]").forEach((toggle) => {
 
 document.querySelectorAll("[data-overview-setting]").forEach((toggle) => {
   toggle.addEventListener("click", () => {
-    inputProfiles["mac-to-windows"][toggle.dataset.overviewSetting] = toggle.classList.contains("is-on");
+    inputProfiles[overviewInputProfile][toggle.dataset.overviewSetting] = toggle.classList.contains("is-on");
     markInputSettingsDirty();
-    if (activeInputProfile === "mac-to-windows") renderInputProfile();
+    document.querySelector(".overview-save-status").textContent = "滚轮方向已修改，点击保存后生效";
+    if (activeInputProfile === overviewInputProfile) renderInputProfile();
   });
 });
 
@@ -219,11 +238,29 @@ window.EdgeMouseInputSettings = {
     const profile = inputProfiles[name];
     return profile ? { ...profile } : undefined;
   },
+  setOverviewProfile(name) {
+    if (!inputProfiles[name]) return;
+    overviewInputProfile = name;
+    const label = document.querySelector("[data-overview-profile-label]");
+    if (label) label.textContent = name === "windows-to-mac" ? "Windows → Mac" : "Mac → Windows";
+    syncOverviewInputSettings();
+  },
+  getOverviewProfile() {
+    return overviewInputProfile;
+  },
+  setLocalPlatform(platform) {
+    localOutgoingProfile = platform === "windows" ? "windows-to-mac" : "mac-to-windows";
+    if (!inputSettingsDirty) renderInputProfile();
+  },
   applyLocalProfile(name, settings) {
     const profile = inputProfiles[name];
     if (!profile || inputSettingsDirty) return;
     if (typeof settings.horizontal === "boolean") profile.horizontal = settings.horizontal;
     if (typeof settings.vertical === "boolean") profile.vertical = settings.vertical;
+    if (typeof settings.smoothing === "number") profile.smoothing = settings.smoothing;
+    if (typeof settings.keyboard === "boolean") profile.keyboard = settings.keyboard;
+    if (typeof settings.reclaim === "boolean") profile.reclaim = settings.reclaim;
+    if (typeof settings.dragLock === "boolean") profile.dragLock = settings.dragLock;
     if (activeInputProfile === name) renderInputProfile();
     syncOverviewInputSettings();
   },
@@ -663,6 +700,36 @@ selectTheme(savedTheme, false);
 applyLanguage(savedLanguage, false);
 window.EdgeMouseI18n.startObserving();
 
+window.EdgeMouseDesktopSettings = {
+  apply(preferences) {
+    if (!preferences) return;
+    document.querySelectorAll("[data-general-setting]").forEach((toggle) => {
+      const key = toggle.dataset.generalSetting;
+      if (Object.hasOwn(preferences, key)) setToggleState(toggle, Boolean(preferences[key]));
+    });
+    selectTheme(preferences.theme ?? "system", false);
+    applyLanguage(preferences.language ?? "zh-CN", false);
+    updateChannelSelect.value = preferences.updateChannel ?? "stable";
+    settingsSaveStatus.textContent = "所有桌面设置均已加载";
+    settingsSaveStatus.classList.remove("is-dirty");
+  },
+  get() {
+    const toggleValue = (key) => document.querySelector(`[data-general-setting="${key}"]`)?.classList.contains("is-on") ?? false;
+    return {
+      autostart: toggleValue("autostart"),
+      background: toggleValue("background"),
+      notifications: toggleValue("notifications"),
+      theme: activeTheme,
+      language: languageSelect.value,
+      updateChannel: updateChannelSelect.value,
+    };
+  },
+  markSaved(message = "所有设置均已保存") {
+    settingsSaveStatus.textContent = message;
+    settingsSaveStatus.classList.remove("is-dirty");
+  },
+};
+
 document.querySelector(".reset-settings-button")?.addEventListener("click", openResetSettingsModal);
 document.querySelector(".reset-modal-close")?.addEventListener("click", closeResetSettingsModal);
 document.querySelector(".reset-cancel-button")?.addEventListener("click", closeResetSettingsModal);
@@ -782,6 +849,9 @@ window.EdgeMouseLayout = {
 };
 
 layoutDirectionButtons.forEach((button) => button.addEventListener("click", () => setLayoutEdge(button.dataset.edge, { dirty: true })));
+document.querySelector('[data-layout-setting="edgeProtection"]')?.addEventListener("click", () => {
+  setLayoutEdge(layoutCanvas.dataset.edge ?? "right", { dirty: true });
+});
 
 function edgeFromRects(macRect, winRect) {
   const deltaX = macRect.left + macRect.width / 2 - (winRect.left + winRect.width / 2);
@@ -896,9 +966,12 @@ document.querySelectorAll(".mini-screen").forEach((screen) => {
   }, true);
 });
 
-document.querySelectorAll(".save-button:not(.input-save-button):not(.settings-save-button):not(.layout-save-button)").forEach((button) => button.addEventListener("click", () => showToast("设置已保存（原型演示）")));
-document.querySelectorAll(".action-button").forEach((button) => button.addEventListener("click", () => showToast(`${button.textContent.trim()}（原型演示）`)));
+document.querySelectorAll(".save-button:not(.input-save-button):not(.settings-save-button):not(.layout-save-button)").forEach((button) => button.addEventListener("click", () => {
+  if (window.__TAURI__?.core?.invoke) return;
+  showToast("设置已保存（网页预览）");
+}));
 document.querySelector(".detect-button")?.addEventListener("click", (event) => {
+  if (window.__TAURI__?.core?.invoke) return;
   event.currentTarget.textContent = "检测中…";
   window.setTimeout(() => {
     event.currentTarget.textContent = "重新检测屏幕";
@@ -907,5 +980,8 @@ document.querySelector(".detect-button")?.addEventListener("click", (event) => {
 });
 
 document.querySelectorAll(".certificate-line button").forEach((button) => {
-  button.addEventListener("click", () => showToast("内容已复制（原型演示）"));
+  button.addEventListener("click", () => {
+    if (window.__TAURI__?.core?.invoke) return;
+    showToast("内容已复制（网页预览）");
+  });
 });

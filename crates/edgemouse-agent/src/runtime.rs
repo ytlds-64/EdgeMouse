@@ -257,6 +257,12 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
                     }
                     Err(_) if stopping.load(Ordering::Acquire) => return Ok(()),
                     Err(error) => {
+                        if !config.auto_reconnect {
+                            eprintln!(
+                                "Peer discovery failed: {error}; automatic reconnect is disabled"
+                            );
+                            return Ok(());
+                        }
                         reconnecting = true;
                         let delay = backoff.next_delay();
                         eprintln!(
@@ -311,6 +317,12 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
             Ok(network) => network,
             Err(_) if stopping.load(Ordering::Acquire) => return Ok(()),
             Err(error) => {
+                if !config.auto_reconnect {
+                    eprintln!(
+                        "Connection attempt failed: {error}; automatic reconnect is disabled"
+                    );
+                    return Ok(());
+                }
                 reconnecting = true;
                 let delay = backoff.next_delay();
                 eprintln!(
@@ -369,6 +381,12 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
             }
             ConnectionEnd::Disconnected(reason) => {
                 telemetry.disconnected();
+                if !config.auto_reconnect {
+                    eprintln!(
+                        "Connection lost: {reason}; local mouse control restored; automatic reconnect is disabled"
+                    );
+                    return Ok(());
+                }
                 reconnecting = true;
                 let delay = backoff.next_delay();
                 eprintln!(
@@ -427,7 +445,7 @@ fn run_connected(
         initial_pointer,
         config.windows_raw_input,
     )?;
-    let mut injector = platform::injector(initial_pointer);
+    let mut injector = platform::injector(initial_pointer, config.pointer_smoothing);
     let mut keyboard_capture = platform::start_keyboard_capture()?;
     let mut keyboard_injector = platform::keyboard_injector();
     let mut session = Session::new(
@@ -462,6 +480,8 @@ fn run_connected(
         telemetry,
         config_path,
         config.local_node,
+        config.keyboard_enabled,
+        config.reclaim_enabled,
     );
 
     let effects = session.disconnect_peer(config.peer_node);
@@ -472,6 +492,7 @@ fn run_connected(
         &mut keyboard_capture,
         &mut session,
         session_id,
+        config.keyboard_enabled,
     ));
     if matches!(session.state(), ControlState::Recovering { .. }) {
         drop(session.complete_recovery());
@@ -544,6 +565,8 @@ fn run_loop(
     telemetry: &RuntimeTelemetry,
     config_path: &Path,
     local_node: NodeId,
+    keyboard_enabled: bool,
+    reclaim_enabled: bool,
 ) -> Result<ConnectionEnd, Box<dyn Error>> {
     let mut takeover = LocalTakeoverGesture::new(takeover_edge);
     let mut pending_layout_request = None;
@@ -637,6 +660,7 @@ fn run_loop(
                         keyboard_capture,
                         session,
                         session_id,
+                        keyboard_enabled,
                     )?;
                     network.send(WireMessage::ControlReclaimAck { owner_session_id })?;
                     println!("Peer physical mouse reclaimed control");
@@ -670,6 +694,7 @@ fn run_loop(
                         keyboard_capture,
                         session,
                         session_id,
+                        keyboard_enabled,
                     )?;
                     println!("Local physical mouse crossed {takeover_edge:?} and took control");
                 }
@@ -816,6 +841,7 @@ fn run_loop(
             keyboard_capture,
             session,
             session_id,
+            keyboard_enabled,
         )?;
         if peer_timed_out {
             return Ok(ConnectionEnd::Disconnected(
@@ -833,6 +859,7 @@ fn run_loop(
                 keyboard_capture,
                 session,
                 session_id,
+                keyboard_enabled,
             )?;
             return Ok(ConnectionEnd::Disconnected(
                 "emergency keyboard release requested".to_owned(),
@@ -841,9 +868,11 @@ fn run_loop(
         while let Some(event) = capture.try_next_event()? {
             handled_input = true;
             if remote.is_active() {
-                if remote.current_position().is_some_and(|pointer| {
-                    takeover.observe(event, now_ms, pointer, remote.local_bounds)
-                }) {
+                if reclaim_enabled
+                    && remote.current_position().is_some_and(|pointer| {
+                        takeover.observe(event, now_ms, pointer, remote.local_bounds)
+                    })
+                {
                     let owner_session_id = remote
                         .active_session()
                         .expect("remote control was checked as active");
@@ -865,9 +894,10 @@ fn run_loop(
                 keyboard_capture,
                 session,
                 session_id,
+                keyboard_enabled,
             )?;
         }
-        while let Some(event) = keyboard_capture.try_next_event()? {
+        while keyboard_enabled && let Some(event) = keyboard_capture.try_next_event()? {
             handled_input = true;
             let result = session.handle_keyboard(event);
             apply_effects(
@@ -877,6 +907,7 @@ fn run_loop(
                 keyboard_capture,
                 session,
                 session_id,
+                keyboard_enabled,
             )?;
         }
         injector.poll()?;
@@ -975,18 +1006,23 @@ fn apply_effects(
     keyboard_capture: &mut platform::NativeKeyboardCapture,
     session: &mut Session,
     session_id: u64,
+    keyboard_enabled: bool,
 ) -> Result<(), Box<dyn Error>> {
     for effect in effects {
         match effect {
             Effect::CapturePointer { anchor } => {
-                keyboard_capture.set_remote(true)?;
+                if keyboard_enabled {
+                    keyboard_capture.set_remote(true)?;
+                }
                 capture.set_mode(CaptureMode::Remote { anchor })?;
                 println!("Mouse and keyboard control handed to peer");
             }
             Effect::ReleasePointer {
                 restore_position, ..
             } => {
-                keyboard_capture.set_remote(false)?;
+                if keyboard_enabled {
+                    keyboard_capture.set_remote(false)?;
+                }
                 capture.set_mode(CaptureMode::Local {
                     restore: Some(restore_position),
                 })?;
@@ -1005,7 +1041,9 @@ fn apply_effects(
                 if peer != network.peer_node {
                     return Err("keyboard routing requested an unknown peer".into());
                 }
-                network.send(WireMessage::Keyboard { session_id, event })?;
+                if keyboard_enabled {
+                    network.send(WireMessage::Keyboard { session_id, event })?;
+                }
             }
             Effect::PeerTimedOut { peer } => {
                 eprintln!(

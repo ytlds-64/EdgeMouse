@@ -26,11 +26,36 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "externalBin": [
+      "binaries/edgemouse"
+    ],
     "icon": [
       "icons/icon.png",
       "icons/icon.ico",
       "icons/icon.icns"
-    ]
+    ],
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    },
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "installMode": "currentUser"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM2MEM1QTBGNjk5N0ZBMwpSV1NqZjVuMm9NVmdBMUtXaGRzLzJzVEluOFNDL3NmWmNpb0VEVHVOd0Y3Z3p2aTA4TE5pa1UxOQo=",
+      "endpoints": [
+        "https://github.com/ytlds-64/EdgeMouse/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }
