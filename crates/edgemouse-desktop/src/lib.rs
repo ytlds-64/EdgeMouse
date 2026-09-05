@@ -1,5 +1,5 @@
 use edgemouse_agent::config::{
-    LoadedConfig, PairingConfig, PeerAddress, SessionPreferences, edge_name,
+    LoadedConfig, PairingConfig, PeerAddress, SessionPreferences, edge_name, import_paired_config,
     initialize_unpaired_config, persist_peer_on, persist_session_preferences,
 };
 use edgemouse_agent::{control, pairing, platform};
@@ -165,6 +165,7 @@ struct PlatformSnapshot {
 struct ConfigSnapshot {
     path: Option<String>,
     valid: bool,
+    pairing_required: bool,
     error: Option<String>,
     local_name: Option<String>,
     local_node: Option<String>,
@@ -974,6 +975,101 @@ async fn set_agent_running(
     .map_err(|error| format!("后台服务操作失败：{error}"))?
 }
 
+#[tauri::command]
+async fn import_existing_pairing(
+    state: tauri::State<'_, AppState>,
+) -> Result<AgentServiceResult, String> {
+    let destination = state
+        .config_path
+        .clone()
+        .ok_or_else(|| "未找到 EdgeMouse 用户配置目录".to_owned())?;
+    let selected = tauri::async_runtime::spawn_blocking(select_existing_config)
+        .await
+        .map_err(|error| format!("打开配置选择窗口失败：{error}"))??;
+    let Some(selected) = selected else {
+        return Ok(AgentServiceResult {
+            running: false,
+            message: "已取消导入旧配对配置".to_owned(),
+        });
+    };
+    let agent_status = Arc::clone(&state.agent_status);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ = stop_agent();
+        let backup = import_paired_config(&selected, &destination)
+            .map_err(|error| format!("导入旧配对配置失败：{error}"))?;
+        let result = start_agent(&destination)?;
+        *agent_status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = AgentStatusCache::default();
+        Ok(AgentServiceResult {
+            running: result.running,
+            message: format!(
+                "旧配对配置已导入，EdgeMouse 已启动；原配置备份在 {}",
+                backup.display()
+            ),
+        })
+    })
+    .await
+    .map_err(|error| format!("导入配对配置的后台任务失败：{error}"))?
+}
+
+#[cfg(target_os = "macos")]
+fn select_existing_config() -> Result<Option<PathBuf>, String> {
+    let output = Command::new("osascript")
+        .args([
+            "-e",
+            "POSIX path of (choose file with prompt \"选择以前使用的 edgemouse.toml\")",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("无法打开 macOS 文件选择窗口：{error}"))?;
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr);
+        if error.contains("User canceled") || error.contains("-128") {
+            return Ok(None);
+        }
+        return Err(format!("macOS 文件选择窗口失败：{}", error.trim()));
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    Ok((!path.is_empty()).then(|| PathBuf::from(path)))
+}
+
+#[cfg(target_os = "windows")]
+fn select_existing_config() -> Result<Option<PathBuf>, String> {
+    let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+$dialog.Title = '选择以前使用的 edgemouse.toml'
+$dialog.Filter = 'EdgeMouse 配置 (edgemouse.toml)|edgemouse.toml|TOML 文件 (*.toml)|*.toml|所有文件 (*.*)|*.*'
+$dialog.Multiselect = $false
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+  [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+  [Console]::Write($dialog.FileName)
+}
+"#;
+    let mut command = Command::new("powershell.exe");
+    command
+        .args(["-NoProfile", "-Sta", "-Command", script])
+        .stdin(Stdio::null());
+    suppress_windows_console(&mut command);
+    let output = command
+        .output()
+        .map_err(|error| format!("无法打开 Windows 文件选择窗口：{error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Windows 文件选择窗口失败：{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    Ok((!path.is_empty()).then(|| PathBuf::from(path)))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn select_existing_config() -> Result<Option<PathBuf>, String> {
+    Err("当前平台暂不支持选择旧配置".to_owned())
+}
+
 fn start_agent(config_path: &Path) -> Result<AgentServiceResult, String> {
     if let Some(status) = control::query_status().map_err(|error| error.to_string())? {
         return Ok(AgentServiceResult {
@@ -981,7 +1077,13 @@ fn start_agent(config_path: &Path) -> Result<AgentServiceResult, String> {
             message: format!("EdgeMouse 已在运行 · PID {}", status.process_id),
         });
     }
-    LoadedConfig::load(config_path).map_err(|error| format!("启动前配置检查失败：{error}"))?;
+    LoadedConfig::load(config_path).map_err(|error| {
+        if config_requires_pairing(config_path) {
+            "尚未完成安全配对。请打开「连接」页面配对新设备，或导入以前的 edgemouse.toml".to_owned()
+        } else {
+            format!("启动前配置检查失败：{error}")
+        }
+    })?;
     let agent_path = resolve_agent_executable(config_path)?;
     let project_root = config_path.parent().unwrap_or_else(|| Path::new("."));
     let log_directory = project_root.join("logs");
@@ -1033,6 +1135,10 @@ fn start_agent(config_path: &Path) -> Result<AgentServiceResult, String> {
         }
     }
     Err(format!("后台服务启动超时；请查看 {}", error_log.display()))
+}
+
+fn config_requires_pairing(path: &Path) -> bool {
+    PairingConfig::load(path).is_ok_and(|config| !config.peer_certificate_path.is_file())
 }
 
 fn stop_agent() -> Result<AgentServiceResult, String> {
@@ -1409,6 +1515,7 @@ fn config_snapshot(path: Option<&Path>) -> ConfigSnapshot {
         Ok(config) => ConfigSnapshot {
             path: Some(path.display().to_string()),
             valid: true,
+            pairing_required: false,
             error: None,
             local_name: Some(config.transport.local_name.clone()),
             local_node: Some(format_node(config.local_node.0)),
@@ -1434,7 +1541,39 @@ fn config_snapshot(path: Option<&Path>) -> ConfigSnapshot {
             block_switch_while_dragging: Some(config.session.block_switch_while_dragging),
             auto_reconnect: Some(config.auto_reconnect),
         },
-        Err(error) => empty_config(Some(path), &error.to_string()),
+        Err(error) => {
+            if let Ok(pairing) = PairingConfig::load(path)
+                && !pairing.peer_certificate_path.is_file()
+            {
+                return ConfigSnapshot {
+                    path: Some(path.display().to_string()),
+                    valid: false,
+                    pairing_required: true,
+                    error: Some("尚未完成安全配对".to_owned()),
+                    local_name: Some(pairing.local_name),
+                    local_node: Some(format_node(pairing.local_node.0)),
+                    peer_node: None,
+                    peer_address: Some("auto (UDP 43892)".to_owned()),
+                    listen_address: Some("0.0.0.0:43891".to_owned()),
+                    local_screen_name: None,
+                    local_screen_id: None,
+                    local_screen_automatic: Some(true),
+                    peer_screen_name: None,
+                    peer_screen_id: None,
+                    peer_on: None,
+                    entry_hysteresis: None,
+                    peer_timeout_ms: None,
+                    reverse_scroll_horizontal: None,
+                    reverse_scroll_vertical: None,
+                    pointer_smoothing: None,
+                    keyboard_enabled: None,
+                    reclaim_enabled: None,
+                    block_switch_while_dragging: None,
+                    auto_reconnect: None,
+                };
+            }
+            empty_config(Some(path), &error.to_string())
+        }
     }
 }
 
@@ -1442,6 +1581,7 @@ fn empty_config(path: Option<&Path>, error: &str) -> ConfigSnapshot {
     ConfigSnapshot {
         path: path.map(|value| value.display().to_string()),
         valid: false,
+        pairing_required: false,
         error: Some(error.to_owned()),
         local_name: None,
         local_node: None,
@@ -2078,6 +2218,7 @@ pub fn run() {
             open_external_url,
             save_layout,
             set_agent_running,
+            import_existing_pairing,
             set_menu_language,
             window_action
         ])
@@ -2088,12 +2229,14 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentStatusCache, local_layout_edge, missed_agent_snapshot, parse_layout_edge,
-        scroll_settings_source,
+        AgentStatusCache, config_requires_pairing, local_layout_edge, missed_agent_snapshot,
+        parse_layout_edge, scroll_settings_source,
     };
+    use edgemouse_agent::config::initialize_unpaired_config;
     use edgemouse_agent::control::{ConnectionTelemetry, RunningStatus};
     use edgemouse_core::Edge;
     use std::sync::Mutex;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn parses_the_four_layout_edges() {
@@ -2110,6 +2253,24 @@ mod tests {
         assert_eq!(local_layout_edge(Edge::Right, true), Edge::Left);
         assert_eq!(local_layout_edge(Edge::Top, false), Edge::Top);
         assert_eq!(local_layout_edge(Edge::Top, true), Edge::Bottom);
+    }
+
+    #[test]
+    fn fresh_packaged_config_is_reported_as_requiring_pairing() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "edgemouse-desktop-unpaired-{}-{unique}",
+            std::process::id()
+        ));
+        let path = directory.join("edgemouse.toml");
+        initialize_unpaired_config(&path).unwrap();
+
+        assert!(config_requires_pairing(&path));
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

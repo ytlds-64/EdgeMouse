@@ -6,7 +6,7 @@ use std::error::Error;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerAddress {
@@ -134,6 +134,161 @@ pub fn initialize_unpaired_config(path: &Path) -> Result<(), String> {
     PairingConfig::load(path)
         .map_err(|error| format!("initial configuration is invalid: {error}"))?;
     Ok(())
+}
+
+/// Imports a complete, previously paired configuration into the packaged
+/// application's per-user directory. New key and certificate filenames are
+/// used so a failed import can never overwrite the currently selected
+/// identity. The destination config is replaced only after the imported copy
+/// has passed the same validation as a normal agent startup.
+pub fn import_paired_config(source: &Path, destination: &Path) -> Result<PathBuf, String> {
+    let source = source.canonicalize().map_err(|error| {
+        format!(
+            "failed to open existing config {}: {error}",
+            source.display()
+        )
+    })?;
+    if destination
+        .canonicalize()
+        .ok()
+        .is_some_and(|path| path == source)
+    {
+        return Err("the selected config is already the active config".to_owned());
+    }
+
+    let source_config = LoadedConfig::load(&source)
+        .map_err(|error| format!("selected config is not a complete paired config: {error}"))?;
+    let source_text = fs::read_to_string(&source)
+        .map_err(|error| format!("failed to read {}: {error}", source.display()))?;
+    let mut document = toml::from_str::<toml::Value>(&source_text)
+        .map_err(|error| format!("selected config is not valid TOML: {error}"))?;
+    let source_base = source.parent().unwrap_or_else(|| Path::new("."));
+    let local_certificate = read_import_asset(
+        source_base,
+        config_asset_path(&document, "local", "certificate")?,
+        "local certificate",
+    )?;
+    let private_key = read_import_asset(
+        source_base,
+        config_asset_path(&document, "local", "private_key")?,
+        "local private key",
+    )?;
+    let peer_certificate = read_import_asset(
+        source_base,
+        config_asset_path(&document, "peer", "certificate")?,
+        "peer certificate",
+    )?;
+
+    let destination_base = destination.parent().unwrap_or_else(|| Path::new("."));
+    let identity_directory = destination_base.join("identity");
+    fs::create_dir_all(&identity_directory).map_err(|error| {
+        format!(
+            "failed to create identity directory {}: {error}",
+            identity_directory.display()
+        )
+    })?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock is invalid: {error}"))?
+        .as_millis();
+    let certificate_relative = PathBuf::from(format!("identity/certificate-{stamp}.der"));
+    let private_key_relative = PathBuf::from(format!("identity/private-key-{stamp}.der"));
+    let peer_relative = PathBuf::from(format!("trusted-peer-{stamp}.der"));
+    let certificate_path = destination_base.join(&certificate_relative);
+    let private_key_path = destination_base.join(&private_key_relative);
+    let peer_path = destination_base.join(&peer_relative);
+    let temporary_config = destination_base.join(format!(".edgemouse-import-{stamp}.toml"));
+
+    set_config_asset_path(&mut document, "local", "certificate", &certificate_relative)?;
+    set_config_asset_path(&mut document, "local", "private_key", &private_key_relative)?;
+    set_config_asset_path(&mut document, "peer", "certificate", &peer_relative)?;
+    let imported_source = toml::to_string_pretty(&document)
+        .map_err(|error| format!("failed to normalize imported config: {error}"))?;
+
+    let result = (|| {
+        fs::write(&certificate_path, local_certificate)
+            .map_err(|error| format!("failed to save imported certificate: {error}"))?;
+        write_private_key(&private_key_path, &private_key)?;
+        fs::write(&peer_path, peer_certificate)
+            .map_err(|error| format!("failed to save imported peer certificate: {error}"))?;
+        fs::write(&temporary_config, imported_source)
+            .map_err(|error| format!("failed to stage imported config: {error}"))?;
+
+        let staged = LoadedConfig::load(&temporary_config)
+            .map_err(|error| format!("imported config failed validation: {error}"))?;
+        if staged.local_node != source_config.local_node
+            || staged.peer_node != source_config.peer_node
+        {
+            return Err("imported identity does not match the selected config".to_owned());
+        }
+
+        let backup_directory = destination_base.join("backups");
+        fs::create_dir_all(&backup_directory).map_err(|error| {
+            format!(
+                "failed to create config backup directory {}: {error}",
+                backup_directory.display()
+            )
+        })?;
+        let backup = backup_directory.join(format!("edgemouse-before-import-{stamp}.toml"));
+        if destination.is_file() {
+            fs::copy(destination, &backup)
+                .map_err(|error| format!("failed to back up the active config: {error}"))?;
+            fs::remove_file(destination)
+                .map_err(|error| format!("failed to replace the active config: {error}"))?;
+        }
+        if let Err(error) = fs::rename(&temporary_config, destination) {
+            if backup.is_file() {
+                let _ = fs::copy(&backup, destination);
+            }
+            return Err(format!("failed to activate the imported config: {error}"));
+        }
+        LoadedConfig::load(destination)
+            .map_err(|error| format!("activated config failed validation: {error}"))?;
+        Ok(backup)
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&certificate_path);
+        let _ = fs::remove_file(&private_key_path);
+        let _ = fs::remove_file(&peer_path);
+        let _ = fs::remove_file(&temporary_config);
+    }
+    result
+}
+
+fn config_asset_path<'a>(
+    document: &'a toml::Value,
+    table: &str,
+    key: &str,
+) -> Result<&'a str, String> {
+    document
+        .get(table)
+        .and_then(toml::Value::as_table)
+        .and_then(|values| values.get(key))
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| format!("selected config is missing {table}.{key}"))
+}
+
+fn set_config_asset_path(
+    document: &mut toml::Value,
+    table: &str,
+    key: &str,
+    path: &Path,
+) -> Result<(), String> {
+    let values = document
+        .get_mut(table)
+        .and_then(toml::Value::as_table_mut)
+        .ok_or_else(|| format!("selected config is missing [{table}]"))?;
+    values.insert(
+        key.to_owned(),
+        toml::Value::String(path.to_string_lossy().replace('\\', "/")),
+    );
+    Ok(())
+}
+
+fn read_import_asset(base: &Path, relative: &str, label: &str) -> Result<Vec<u8>, String> {
+    let path = resolve_relative(base, Path::new(relative));
+    fs::read(&path).map_err(|error| format!("failed to read {label} {}: {error}", path.display()))
 }
 
 fn default_device_name() -> String {
@@ -698,6 +853,81 @@ mod tests {
         assert_eq!(
             fs::read(directory.join("identity/certificate.der")).unwrap(),
             original_certificate
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn imports_a_complete_pairing_without_overwriting_existing_identity_names() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "edgemouse-import-config-{}-{unique}",
+            std::process::id()
+        ));
+        let source_directory = directory.join("source");
+        let destination_directory = directory.join("destination");
+        fs::create_dir_all(source_directory.join("legacy-identity")).unwrap();
+        let local = Identity::generate().unwrap();
+        let peer = Identity::generate().unwrap();
+        fs::write(
+            source_directory.join("legacy-identity/certificate.der"),
+            &local.certificate,
+        )
+        .unwrap();
+        fs::write(
+            source_directory.join("legacy-identity/private-key.der"),
+            &local.private_key,
+        )
+        .unwrap();
+        fs::write(source_directory.join("trusted.der"), &peer.certificate).unwrap();
+        let source_path = source_directory.join("edgemouse.toml");
+        fs::write(
+            &source_path,
+            r#"
+[local]
+name = "old-paired-machine"
+listen = "0.0.0.0:43891"
+certificate = "legacy-identity/certificate.der"
+private_key = "legacy-identity/private-key.der"
+[local.screen]
+id = 1
+name = "Local"
+auto = true
+[peer]
+address = "auto"
+certificate = "trusted.der"
+[peer.screen]
+id = 2
+name = "Peer"
+auto = true
+[layout]
+peer_on = "bottom"
+"#,
+        )
+        .unwrap();
+
+        let destination_path = destination_directory.join("edgemouse.toml");
+        initialize_unpaired_config(&destination_path).unwrap();
+        let original_identity =
+            fs::read(destination_directory.join("identity/certificate.der")).unwrap();
+        let backup = import_paired_config(&source_path, &destination_path).unwrap();
+        let imported = LoadedConfig::load(&destination_path).unwrap();
+
+        assert!(backup.is_file());
+        assert_eq!(imported.local_node, local.node_id);
+        assert_eq!(imported.peer_node, peer.node_id);
+        assert_eq!(imported.peer_on, Edge::Bottom);
+        assert_eq!(
+            fs::read(destination_directory.join("identity/certificate.der")).unwrap(),
+            original_identity
+        );
+        assert!(
+            fs::read_to_string(&destination_path)
+                .unwrap()
+                .contains("trusted-peer-")
         );
         fs::remove_dir_all(directory).unwrap();
     }

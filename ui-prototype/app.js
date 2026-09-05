@@ -17,11 +17,15 @@ window.setEdgeMouseAppVersion = (version) => {
   });
 };
 
-function showToast(message) {
+function showToast(message, kind = "auto") {
+  const isError = kind === "error" || (kind === "auto" && /^(无法|失败|错误|配对失败|设备操作失败|诊断失败)/.test(message));
+  toast.classList.toggle("is-error", isError);
+  toast.querySelector("span").textContent = isError ? "!" : "✓";
   toast.querySelector("b").textContent = message;
   toast.classList.add("is-visible");
   window.clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => toast.classList.remove("is-visible"), 1800);
+  const duration = Math.min(8000, Math.max(1800, String(message).length * 75));
+  toastTimer = window.setTimeout(() => toast.classList.remove("is-visible"), duration);
 }
 
 window.showEdgeMouseToast = showToast;

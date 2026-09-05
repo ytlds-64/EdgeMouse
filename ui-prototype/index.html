@@ -252,6 +252,7 @@
             <article class="pairing-choice"><span class="pairing-code-icon">＋</span><h3>创建配对码</h3><p>这台电脑等待另一台加入</p><button class="primary-button start-pairing-host-button" type="button">生成一次性配对码</button></article>
             <article class="pairing-choice"><span class="pairing-code-icon">→</span><h3>加入另一台电脑</h3><label for="pairing-code-input">对方显示的配对码</label><input id="pairing-code-input" class="pairing-code-input" inputmode="numeric" placeholder="例如 9274-7922" maxlength="9" autocomplete="one-time-code"/><label for="manual-peer-address">对方 IP（可选）</label><input id="manual-peer-address" inputmode="decimal" placeholder="留空则自动发现" autocomplete="off"/><p class="field-error" hidden>请输入 8 位配对码</p><button class="secondary-button join-pairing-button" type="button">安全加入</button></article>
           </div>
+          <div class="pairing-import"><div><strong>以前已经配对过？</strong><small>选择旧版使用的 edgemouse.toml，可直接沿用原设备身份和可信证书。</small></div><button class="ghost-button import-pairing-button" type="button">导入旧配对配置…</button></div>
         </div>
         <div class="pairing-step pairing-step-code">
           <div class="pairing-code-icon">↔</div><h3>在另一台电脑输入此配对码</h3><p class="pairing-host-status">一次性配对码 5 分钟内有效，最多允许尝试 3 次。</p><div class="pairing-code" aria-label="配对码">••••&nbsp;–&nbsp;••••</div>
@@ -296,7 +297,7 @@
         <div class="info-modal-content"></div><div class="info-modal-footer"><button class="primary-button info-modal-finish" type="button">完成</button></div>
       </section>
     </div>
-    <div class="toast" role="status" aria-live="polite"><span>✓</span><b>操作已完成</b></div>
+    <div class="toast" role="status" aria-live="polite"><span aria-hidden="true">✓</span><b>操作已完成</b></div>
     <script src="./i18n.js"></script>
     <script src="./app.js"></script>
     <script src="./native.js"></script>

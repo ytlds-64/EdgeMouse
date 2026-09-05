@@ -405,6 +405,7 @@
     latestSnapshot = snapshot;
     const running = snapshot.agent.running;
     const configValid = snapshot.config.valid;
+    const pairingRequired = snapshot.config.pairingRequired === true;
     const state = connectionState(snapshot);
     const connected = state === "connected";
     const peerName = snapshot.agent.connection?.peerName ?? snapshot.config.peerScreenName ?? "可信设备";
@@ -438,17 +439,20 @@
         serviceToggle.setAttribute("aria-checked", String(running));
         serviceToggle.title = snapshot.agent.error ?? "";
       }
-      setText(".service-state-label", running ? "本机服务运行中" : "本机服务未启动");
+      setText(
+        ".service-state-label",
+        running ? "本机服务运行中" : pairingRequired ? "尚未配对 · 点击设置" : "本机服务未启动",
+      );
     }
 
     setChip(
       ".connection-status-chip",
       connected,
-      connected ? `已连接 ${peerName}` : connectionLabels[state] ?? "等待连接",
+      connected ? `已连接 ${peerName}` : pairingRequired ? "需要完成配对" : connectionLabels[state] ?? "等待连接",
     );
     setText(
       ".connection-device-status b",
-      connected ? `${peerName} · 双向 TLS` : running ? "自动发现与重连已启动" : "等待 EdgeMouse 后台服务",
+      connected ? `${peerName} · 双向 TLS` : pairingRequired ? "请配对新设备或导入旧配对配置" : running ? "自动发现与重连已启动" : "等待 EdgeMouse 后台服务",
     );
     setText(
       ".peer-address",
@@ -458,7 +462,7 @@
       ".discovery-detail",
       snapshot.config.peerAddress?.startsWith("auto") ? "局域网自动发现" : "固定设备地址",
     );
-    setText(".trust-detail", configValid ? "可信证书已载入" : "配置需要检查");
+    setText(".trust-detail", configValid ? "可信证书已载入" : pairingRequired ? "尚未选择可信设备" : "配置需要检查");
     setText(".certificate-line code", groupedNode(snapshot.config.peerNode));
     const autoReconnectToggle = document.querySelector(".auto-reconnect-toggle");
     if (autoReconnectToggle) {
@@ -823,6 +827,24 @@
     }
   }, true);
 
+  document.querySelector(".import-pairing-button")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = "正在导入…";
+    try {
+      const result = await invoke("import_existing_pairing");
+      if (result.running) pairingModal.hidden = true;
+      window.showEdgeMouseToast?.(result.message);
+      await refreshSnapshot();
+    } catch (error) {
+      window.showEdgeMouseToast?.(`无法导入旧配对配置：${error}`, "error");
+    } finally {
+      button.disabled = false;
+      button.textContent = "导入旧配对配置…";
+    }
+  }, true);
+
   document.querySelector(".pairing-cancel-button")?.addEventListener("click", async (event) => {
     event.stopImmediatePropagation();
     await closeRealPairingModal();
@@ -961,6 +983,14 @@
   document.querySelector("[data-service-toggle]")?.addEventListener("click", async (event) => {
     const toggle = event.currentTarget;
     const shouldRun = toggle.classList.contains("is-on");
+    if (shouldRun && latestSnapshot?.config?.pairingRequired) {
+      toggle.classList.remove("is-on");
+      toggle.setAttribute("aria-checked", "false");
+      document.querySelector('[data-page="connection"]')?.click();
+      openRealPairingModal();
+      window.showEdgeMouseToast?.("请先完成一次安全配对，或导入以前的配对配置");
+      return;
+    }
     serviceActionPending = true;
     toggle.disabled = true;
     toggle.setAttribute("aria-busy", "true");

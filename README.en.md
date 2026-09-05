@@ -23,6 +23,13 @@ Download the latest signed packages from
 The current stable release is 0.6.1. Future signed releases can also be checked
 and installed from the Settings page in the desktop application.
 
+After installation, complete secure pairing once from the Connection page. If
+you previously used a source or command-line build, choose **Import previous
+pairing** in the pairing window and select the old `edgemouse.toml`. EdgeMouse
+copies the existing identity and trusted certificate into the per-user app data
+directory, keeps a backup of the previous app config, and preserves the pairing
+across future updates.
+
 ## Implemented
 
 - Left, right, top, or bottom edge switching with entry hysteresis.
