@@ -1,7 +1,7 @@
 const navItems = [...document.querySelectorAll(".nav-item")];
 const pages = [...document.querySelectorAll(".page")];
 const toast = document.querySelector(".toast");
-let appVersion = document.querySelector('meta[name="edgemouse-version"]')?.content ?? "0.6.3";
+let appVersion = document.querySelector('meta[name="edgemouse-version"]')?.content ?? "0.6.4";
 let toastTimer;
 
 document.querySelectorAll("[data-app-version]").forEach((element) => {
@@ -567,7 +567,7 @@ document.querySelector(".generate-diagnostics-button")?.addEventListener("click"
 });
 document.querySelector(".diagnostics-finish-button")?.addEventListener("click", () => {
   closeDiagnosticsModal();
-  showToast("诊断包已生成（原型演示）");
+  showToast("诊断包已生成");
 });
 
 const settingsSaveStatus = document.querySelector(".settings-save-status");

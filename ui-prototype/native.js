@@ -71,6 +71,7 @@
   let serviceActionPending = false;
   let pendingPermissionRepair = false;
   let updateProgressHideTimer;
+  let lastDiagnosticExportPath;
 
   function formatBytes(bytes) {
     const value = Number(bytes);
@@ -425,6 +426,8 @@
     const windowsLocal = snapshot.platform.operatingSystem.toLowerCase().includes("windows");
     const localSelector = windowsLocal ? ".windows-device" : ".mac-device";
     const peerSelector = windowsLocal ? ".mac-device" : ".windows-device";
+    const localScreenSelector = windowsLocal ? ".screen-win" : ".screen-mac";
+    const peerScreenSelector = windowsLocal ? ".screen-mac" : ".screen-win";
     const state = connectionState(snapshot);
     const connected = state === "connected";
 
@@ -435,6 +438,16 @@
       : "本机服务未启动";
     setOnlineLabel(`${localSelector} .online`, localStatus);
     setOnlineLabel(`${peerSelector} .online`, connected ? "可信设备已连接" : connectionLabels[state] ?? "可信设备待连接");
+    const localScreenBadge = document.querySelector(`${localScreenSelector} .screen-badge`);
+    const peerScreenBadge = document.querySelector(`${peerScreenSelector} .screen-badge`);
+    if (localScreenBadge) {
+      localScreenBadge.textContent = "本机";
+      localScreenBadge.classList.remove("connected");
+    }
+    if (peerScreenBadge) {
+      peerScreenBadge.textContent = connected ? "已连接" : connectionLabels[state] ?? "未连接";
+      peerScreenBadge.classList.toggle("connected", connected);
+    }
 
     const localDesktop = snapshot.platform.desktop ?? desktopFromLegacy(
       snapshot.platform.desktopWidth,
@@ -486,6 +499,12 @@
     // so using its version here makes the title bar and About page disagree.
     window.setEdgeMouseAppVersion?.(snapshot.desktopVersion);
     setText("[data-native-mode]", "桌面应用 · 实时状态");
+
+    const overviewConnectButton = document.querySelector(".overview-connect-button");
+    if (overviewConnectButton && !overviewConnectButton.dataset.pending) {
+      overviewConnectButton.disabled = false;
+      overviewConnectButton.textContent = running ? "重新连接" : "开始连接";
+    }
 
     if (!serviceActionPending) {
       const serviceToggle = document.querySelector("[data-service-toggle]");
@@ -765,6 +784,7 @@
         includeSystem: checked.has("system") || checked.has("network"),
       });
       const name = result.path.split(/[\\/]/).pop();
+      lastDiagnosticExportPath = result.path;
       setText(".export-file-name", name);
       const detail = document.querySelector(".export-file small");
       if (detail) detail.textContent = "已脱敏 · 下载目录";
@@ -773,6 +793,24 @@
     } catch (error) {
       showStep("options");
       window.showEdgeMouseToast?.(`无法生成诊断包：${error}`);
+    } finally {
+      button.disabled = false;
+    }
+  }, true);
+
+  document.querySelector(".reveal-diagnostics-button")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    const button = event.currentTarget;
+    if (!lastDiagnosticExportPath) {
+      window.showEdgeMouseToast?.("请先生成诊断包");
+      return;
+    }
+    button.disabled = true;
+    try {
+      const result = await invoke("reveal_file", { path: lastDiagnosticExportPath });
+      window.showEdgeMouseToast?.(result.message);
+    } catch (error) {
+      window.showEdgeMouseToast?.(`无法打开文件位置：${error}`);
     } finally {
       button.disabled = false;
     }
@@ -1221,21 +1259,37 @@
     }
   }, true);
 
-  document.querySelector(".reconnect-button")?.addEventListener("click", async (event) => {
-    event.stopImmediatePropagation();
-    const button = event.currentTarget;
+  async function reconnectFrom(button, overview = false) {
+    if (latestSnapshot?.config?.pairingRequired) {
+      document.querySelector('[data-page="connection"]')?.click();
+      openRealPairingModal();
+      window.showEdgeMouseToast?.("请先完成一次安全配对，或导入以前的配对配置");
+      return;
+    }
+    button.dataset.pending = "true";
     button.disabled = true;
-    button.textContent = "正在重新连接…";
+    button.textContent = overview ? "连接中…" : "正在重新连接…";
     try {
       const result = await invoke("reconnect_agent");
       window.showEdgeMouseToast?.(result.message);
     } catch (error) {
       window.showEdgeMouseToast?.(`重新连接失败：${error}`);
     } finally {
+      delete button.dataset.pending;
       button.disabled = false;
-      button.textContent = "立即重新连接";
+      if (!overview) button.textContent = "立即重新连接";
       await refreshSnapshot();
     }
+  }
+
+  document.querySelector(".reconnect-button")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    await reconnectFrom(event.currentTarget);
+  }, true);
+
+  document.querySelector(".overview-connect-button")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    await reconnectFrom(event.currentTarget, true);
   }, true);
 
   document.querySelector(".layout-save-button")?.addEventListener("click", async (event) => {

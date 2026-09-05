@@ -818,6 +818,23 @@ async fn open_logs_folder(state: tauri::State<'_, AppState>) -> Result<FileActio
 }
 
 #[tauri::command]
+async fn reveal_file(path: String) -> Result<FileActionResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = PathBuf::from(path);
+        if !path.is_file() {
+            return Err(format!("找不到文件：{}", path.display()));
+        }
+        reveal_path(&path)?;
+        Ok(FileActionResult {
+            path: path.display().to_string(),
+            message: "已打开诊断包所在位置".to_owned(),
+        })
+    })
+    .await
+    .map_err(|error| format!("打开文件位置的后台任务失败：{error}"))?
+}
+
+#[tauri::command]
 async fn export_diagnostics(
     state: tauri::State<'_, AppState>,
     include_logs: bool,
@@ -1233,6 +1250,10 @@ fn start_agent(config_path: &Path) -> Result<AgentServiceResult, String> {
             format!("启动前配置检查失败：{error}")
         }
     })?;
+    #[cfg(target_os = "macos")]
+    let agent_path =
+        std::env::current_exe().map_err(|error| format!("无法定位 EdgeMouse 主程序：{error}"))?;
+    #[cfg(not(target_os = "macos"))]
     let agent_path = resolve_agent_executable(config_path)?;
     let project_root = config_path.parent().unwrap_or_else(|| Path::new("."));
     let log_directory = project_root.join("logs");
@@ -1252,8 +1273,11 @@ fn start_agent(config_path: &Path) -> Result<AgentServiceResult, String> {
         .map_err(|error| format!("无法打开日志 {}：{error}", error_log.display()))?;
 
     let mut command = Command::new(&agent_path);
+    #[cfg(target_os = "macos")]
+    command.arg("--agent-run");
+    #[cfg(not(target_os = "macos"))]
+    command.arg("run");
     command
-        .arg("run")
         .arg(config_path)
         .current_dir(project_root)
         .stdin(Stdio::null())
@@ -1343,6 +1367,7 @@ fn restart_agent_if_running(path: &Path) -> (bool, Option<String>) {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn resolve_agent_executable(config_path: &Path) -> Result<PathBuf, String> {
     let executable_name = if cfg!(target_os = "windows") {
         "edgemouse.exe"
@@ -2141,6 +2166,27 @@ fn open_path(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("无法打开 {}：{error}", path.display()))
 }
 
+fn reveal_path(path: &Path) -> Result<(), String> {
+    let mut command = if cfg!(target_os = "macos") {
+        let mut command = Command::new("open");
+        command.arg("--reveal").arg(path);
+        command
+    } else if cfg!(target_os = "windows") {
+        let mut command = Command::new("explorer.exe");
+        command.arg(format!("/select,{}", path.display()));
+        command
+    } else {
+        let mut command = Command::new("xdg-open");
+        command.arg(path.parent().unwrap_or(path));
+        command
+    };
+    suppress_windows_console(&mut command);
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("无法打开 {} 所在的位置：{error}", path.display()))
+}
+
 fn open_url(url: &str) -> Result<(), String> {
     let mut command = if cfg!(target_os = "macos") {
         let mut command = Command::new("open");
@@ -2373,6 +2419,7 @@ pub fn run() {
             run_diagnostics,
             repair_diagnostic,
             open_logs_folder,
+            reveal_file,
             export_diagnostics,
             verify_trusted_device,
             start_pairing_host,
