@@ -425,7 +425,10 @@
       smoothing: snapshot.config.pointerSmoothing,
       reclaim: snapshot.config.reclaimEnabled,
     });
-    window.setEdgeMouseAppVersion?.(running ? snapshot.agent.version : snapshot.desktopVersion);
+    // The About and Update pages describe the desktop application itself. The
+    // background agent can temporarily be an older version during an upgrade,
+    // so using its version here makes the title bar and About page disagree.
+    window.setEdgeMouseAppVersion?.(snapshot.desktopVersion);
     setText("[data-native-mode]", "桌面应用 · 实时状态");
 
     if (!serviceActionPending) {

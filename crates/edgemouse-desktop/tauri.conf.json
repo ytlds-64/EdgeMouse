@@ -43,7 +43,12 @@
     "windows": {
       "nsis": {
         "installerIcon": "icons/icon.ico",
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "languages": [
+          "SimpChinese",
+          "English"
+        ],
+        "displayLanguageSelector": true
       }
     }
   },

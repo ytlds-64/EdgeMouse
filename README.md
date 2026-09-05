@@ -1,467 +1,276 @@
 # EdgeMouse
 
-EdgeMouse is a command-line software KVM that moves input between one
-Windows user session and one macOS user session over a LAN. Crossing a configured
-screen edge transfers mouse movement, buttons, scrolling, and the local keyboard;
-crossing back restores local control.
+**简体中文** | [English](README.en.md)
 
-This repository contains a functional mouse MVP, bidirectional keyboard
-forwarding, automatic desktop geometry exchange, and the first integrated
-cross-platform desktop application. It intentionally excludes clipboard sync,
-relay servers, tray/menu-bar integration, installers, and elevated Windows desktops.
+EdgeMouse 是一款开源的跨平台软件 KVM，让一套鼠标和键盘在 Windows 与
+macOS 之间自然切换。把指针推过设定的屏幕边缘，鼠标移动、按键、滚轮和键盘
+便会跟随到另一台电脑；推回边缘即可恢复本机控制。
 
-## Implemented
+项目通过局域网直接连接两台设备，使用双向 TLS 验证已配对的设备，不依赖云端
+中继。桌面应用、后台服务、签名安装包和应用内更新已经集成。
 
-- Left, right, top, or bottom edge switching with entry hysteresis.
-- Primary, secondary, middle, back, and forward buttons.
-- Vertical and horizontal scrolling.
-- Independent horizontal and wheel/vertical scroll reversal for each control
-  direction, saved locally on the computer that owns the physical input.
-- Bidirectional keyboard forwarding while the local mouse owns the peer,
-  including modifiers, navigation, function keys, numpad keys, and key repeat.
-- Cross-platform shortcut mapping: Windows `Ctrl` becomes Mac `Command` and Mac
-  `Command` becomes Windows `Ctrl`; the remaining Control/Windows and
-  Alt/Option keys stay available in the corresponding platform roles.
-- Ordered keyboard delivery, forced key release on handback/disconnect, held-key
-  transition safety, and `Ctrl+Alt+Shift+Esc` emergency local recovery.
-- Coordinate mapping between differently sized Windows and macOS displays.
-- Automatic resolution, scaling, rotation, and active multi-display desktop
-  bounds detection at startup and after reconnecting.
-- Authenticated desktop-geometry exchange, so neither configuration duplicates
-  the peer's current width, height, origin, orientation, or scale.
-- Native macOS `CGEventTap` capture and marked `CGEventPost` injection.
-- Native Windows `WH_MOUSE_LL` capture and marked `SendInput` injection.
-- Windows Raw Input movement capture after handoff, retaining `WH_MOUSE_LL` as
-  the fail-open suppression and automatic fallback layer.
-- Mutually authenticated QUIC/TLS with one explicitly trusted peer certificate.
-- One-time 8-digit short-code pairing that securely exchanges public certificates
-  while keeping both private keys on their original machines.
-- Latest-position QUIC datagrams for movement, with reliable ordered delivery
-  retained for clicks, scrolling, edge transitions, and final positions.
-- Versioned, bounded binary frames with strict untrusted-input validation.
-- 500 ms heartbeats, 1.5 s default timeout, local-pointer recovery, and forced
-  synthetic-button release on disconnect.
-- Automatic reconnection after an established link is interrupted, with local
-  mouse control kept available while the peer or network is offline.
-- Persistent startup retry when the peer or local network is unavailable during
-  login, without capturing the local mouse between attempts.
-- Automatic IPv4 LAN discovery of the configured certificate-pinned peer, both
-  at startup and during reconnection; static peer addresses remain supported.
-- Single-instance protection plus local `status` and graceful `stop` commands.
-- Optional per-user login startup on macOS and Windows, with persistent logs.
-- Identity generation, configuration validation, diagnostics, and simulation
-  commands.
-- A Tauri 2 desktop application that reuses the EdgeMouse UI on Windows and
-  macOS and reads the real agent version, local process state, configuration,
-  trusted node summary, platform permission state, detected desktop geometry,
-  current connection phase, reconnect count, latency, jitter, and input counters.
-- Live desktop scroll-direction controls that persist to `edgemouse.toml` and
-  update an already-running background agent without reconnecting.
-- A persistent Screen layout editor that converts the shared Windows-to-Mac
-  view into each computer's local edge, synchronizes the opposite edge over the
-  trusted connection, and reconnects both agents automatically.
-- Working light/dark/system themes and Simplified Chinese/English UI switching.
+## 下载与安装
 
-Windows uses a fixed mouse capture anchor while control is remote. Raw Input
-preserves high-polling-rate physical movement in that state, while the low-level
-hook continues to suppress local legacy events and takes over automatically if
-Raw Input is unavailable. Both platforms fail open if capture cannot keep up,
-and keys held before a handoff remain local until physically released.
-Set `session.windows_raw_input = false` on Windows to force the established
-low-level-hook movement path; the default is `true`.
+请从 [GitHub Releases](https://github.com/ytlds-64/EdgeMouse/releases/latest)
+下载最新稳定版：
 
-## Build
+- Windows：下载 `.exe` 安装程序。
+- macOS：下载通用版 `.dmg`，同时支持 Apple 芯片和 Intel Mac。
 
-Install a stable Rust toolchain (Rust 1.85 or newer), then build on each target
-machine:
+Windows 安装程序会根据系统语言显示简体中文或英文，也可以在安装开始前手动
+选择语言。macOS 第一次使用时，需要在 **系统设置 → 隐私与安全性** 中允许
+EdgeMouse 使用 **辅助功能** 和 **本地网络**。
+
+> 当前稳定版：0.6.0。应用的“设置”页面可以检查并安装后续签名更新。
+
+## 已实现功能
+
+- 支持从左、右、上、下任一屏幕边缘切换，并带有防误触迟滞。
+- 双向传递鼠标移动、左键、右键、中键、前进/后退键和滚轮。
+- 双向键盘跟随，支持组合键、修饰键、方向键、功能键、小键盘和按键重复。
+- 跨平台快捷键映射：Windows `Ctrl` 对应 Mac `Command`，Mac `Command`
+  对应 Windows `Ctrl`；Control/Windows 与 Alt/Option 的平台角色仍然保留。
+- Windows → Mac 与 Mac → Windows 可分别设置横向、纵向滚动反转。
+- 自动识别分辨率、缩放、旋转方向、负坐标和多显示器排列。
+- 在可信连接中交换两端完整屏幕拓扑，不需要手动填写对方分辨率。
+- 屏幕布局页按真实数量、相对位置和分辨率绘制两台电脑的显示器。
+- 通过拖动设备卡片或选择方向设置穿越边缘，并将相反方向同步到另一端。
+- 自动发现局域网内已经配对的设备，DHCP 地址变化后无需修改 IP 或重新配对。
+- 断线自动恢复、启动时持续重试、心跳超时保护和本机指针自动取回。
+- 支持由接收端物理鼠标主动取回控制，避免输入卡在另一台电脑。
+- Windows Raw Input 与低级钩子协作，macOS 使用原生 CoreGraphics 捕获和注入。
+- 鼠标移动使用低延迟 QUIC 数据报；点击、滚轮、切换与最终位置可靠有序传输。
+- macOS 接收端使用稳定的抖动缓冲和插值，减少高频鼠标移动时的卡顿与跳动。
+- 一次性 8 位短码安全配对，私钥始终只保存在各自电脑上。
+- 单实例保护、安全停止、本机状态查询和紧急恢复快捷键
+  `Ctrl+Alt+Shift+Esc`。
+- Windows 和 macOS 登录后自动启动，并在后台保存当前及历史日志。
+- 桌面应用提供实时连接状态、延迟、抖动、重连次数、输入计数和诊断导出。
+- 支持浅色、深色、跟随系统主题，以及简体中文/英文界面。
+- 支持签名安装包和应用内检查更新。
+
+## 快速开始
+
+### 1. 准备两台电脑
+
+两台电脑应连接到同一个局域网。Windows 防火墙需要允许以下入站端口：
+
+- UDP `43891`：QUIC 鼠标和键盘数据
+- UDP `43892`：局域网发现与配对广播
+- TCP `43893`：一次性安全配对
+
+macOS 需要为 EdgeMouse 开启“辅助功能”和“本地网络”权限。Windows 不需要
+macOS 式的输入权限；如果防火墙提示是否允许网络访问，请选择允许专用网络。
+
+### 2. 生成配置与身份
+
+从源码运行时，可以使用项目自带脚本。已有身份、证书和 `edgemouse.toml`
+不会被覆盖。
+
+macOS：
+
+```sh
+./scripts/bootstrap-macos.sh
+```
+
+Windows PowerShell：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-windows.ps1
+```
+
+两端配置中的 `peer.address` 建议保持为 `"auto"`，这样电脑重启或路由器重新
+分配 IP 后仍会自动发现可信设备。`local.screen.auto = true` 会启用自动屏幕
+识别。
+
+### 3. 安全配对
+
+先停止两端正在运行的 EdgeMouse。推荐让 Windows 显示一次性配对码：
+
+```powershell
+.\target\release\edgemouse.exe pair host .\edgemouse.toml
+```
+
+然后在 Mac 输入该配对码：
+
+```sh
+./target/release/edgemouse pair join ./edgemouse.toml 1234-5678
+```
+
+如果有线与 Wi-Fi 之间不转发 UDP 广播，可以在命令末尾临时追加 Windows IP：
+
+```sh
+./target/release/edgemouse pair join ./edgemouse.toml 1234-5678 192.168.8.202
+```
+
+配对码 5 分钟后失效，最多允许 3 次尝试。配对只交换公开证书，私钥不会离开
+本机。以后 IP 地址变化不需要重新配对。
+
+### 4. 检查并启动
+
+在两端检查配置：
+
+```sh
+edgemouse check-config ./edgemouse.toml
+```
+
+只测试自动发现而不接管鼠标时，可在两台电脑上同时运行：
+
+```sh
+edgemouse discover ./edgemouse.toml
+```
+
+启动后台服务：
+
+```sh
+edgemouse run ./edgemouse.toml
+```
+
+也可以直接使用桌面应用概览页的“本机服务”开关启动或停止服务。关闭窗口后
+是否继续在后台运行、是否登录时启动，都可以在设置页调整。
+
+## 登录后自动运行
+
+确认手动运行正常后，可以安装当前用户的登录启动项，不需要系统服务或管理员
+权限。
+
+macOS：
+
+```sh
+./scripts/manage-autostart-macos.sh install ./edgemouse.toml
+```
+
+Windows PowerShell：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\manage-autostart-windows.ps1 Install .\edgemouse.toml
+```
+
+把 `install` / `Install` 换成 `status`、`start`、`stop` 或 `uninstall`，可以
+查看状态、启动、停止或移除登录启动项。后台日志保存在：
+
+- macOS：`logs/mac-autostart.out.log` 和 `logs/mac-autostart.err.log`
+- Windows：`windows-current.log` 以及 `logs/` 中按时间保存的历史日志
+
+本机状态/停止通道只监听 `127.0.0.1:43894`，局域网中的其他设备无法访问，
+也不需要添加防火墙规则。
+
+## 自动屏幕与布局
+
+启用 `local.screen.auto = true` 后，Windows 会读取完整的虚拟桌面，macOS 会
+读取所有活动 CoreGraphics 显示器的并集。旋转、Retina/Windows 缩放、辅助
+屏幕负坐标和分辨率变化会在启动及重连后自动更新。
+
+认证完成后，两端会交换完整显示器拓扑。屏幕布局页显示每块屏幕的相对位置、
+物理像素分辨率和主屏标记。保存“Mac 位于 Windows 的哪一侧”时，另一台电脑
+会自动保存相反的本机边缘并重新连接。
+
+旧版手动字段 `origin_x`、`origin_y`、`width`、`height` 和 `scale` 仍然可用，
+但必须明确设置 `auto = false`。
+
+## 输入与安全恢复
+
+控制权在另一台电脑时，EdgeMouse 会按顺序传递键盘事件，并在归还、断线、
+紧急恢复和退出时强制释放所有已按下的按键与鼠标按钮，避免修饰键“粘住”。
+切换发生前已经按住的键会继续留在本机，直到物理释放。
+
+如果输入意外卡在远端，可按 `Ctrl+Alt+Shift+Esc` 立即恢复本机控制。接收端也
+可以把自己的物理鼠标坚定地推向已配置的边缘，请求经过认证的控制权交接；若
+1.5 秒内没有收到确认，会恢复本机输入并重新连接。
+
+Windows 远程控制期间使用固定捕获锚点和 Raw Input 保留高轮询率移动，低级
+钩子负责阻止本机遗留事件，并在 Raw Input 不可用时自动回退。需要强制使用旧
+路径时，可在 Windows 配置中设置：
+
+```toml
+[session]
+windows_raw_input = false
+```
+
+## 连接与安全设计
+
+- 正常会话使用 QUIC 和双向 TLS，只接受配置中证书完全匹配的可信设备。
+- 自动发现广播只包含节点 ID、设备名和 QUIC 端口；来源地址只作为连接提示。
+- 伪造的局域网广播仍然无法通过固定证书验证，不能冒充已经配对的设备。
+- 配对使用随机一次性会话、SPAKE2 派生密钥和完整握手记录认证。
+- 短码及其哈希不会通过广播发送，公开证书可以交换，私钥永不离开本机。
+- 移动数据采用有界、带版本的二进制帧，并严格校验所有不可信输入。
+- 500 ms 心跳和默认 1.5 秒超时会在断线时恢复本机指针并释放合成按键。
+
+## 从源码构建
+
+需要 Rust 1.85 或更高版本。
+
+只构建后台服务：
 
 ```sh
 cargo build --release -p edgemouse-agent
 ```
 
-The executable is `target/release/edgemouse` on macOS and
-`target\release\edgemouse.exe` on Windows.
+可执行文件位于 macOS 的 `target/release/edgemouse` 或 Windows 的
+`target\release\edgemouse.exe`。
 
-### Desktop application
-
-The desktop application keeps the proven background agent separate
-from the window. This means opening or closing the window does not interrupt an
-active mouse/keyboard session. Connection state and the diagnostics quality chart
-are live. The horizontal and wheel-direction switches on the Input page are
-connected to the local background agent. Dragging or choosing a direction on
-the Screen layout page is also live once saved; configuration controls that
-still say “prototype” remain demonstrations until their Rust commands are
-connected in the next stages.
-
-Build and open the desktop window on macOS from the repository root:
+构建桌面应用：
 
 ```sh
 cargo build -p edgemouse-desktop
 ./target/debug/edgemouse-desktop --config ./edgemouse.toml
 ```
 
-On Windows, after pulling the latest `main`, use the included PowerShell script:
+Windows 可以使用一条命令更新源码、构建后台服务和桌面应用并启动：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build-run-desktop-windows.ps1
 ```
 
-It safely restarts and rebuilds both the background service and desktop app,
-validates the existing `edgemouse.toml`, starts the updated background service,
-then opens the desktop window. Windows 11 already includes the WebView2 runtime
-used by Tauri; older Windows installations may need the current WebView2 Runtime
-installed first.
-
-## One-command preparation
-
-The preparation scripts check the Rust installation, run formatting and static
-analysis, execute all tests, create a release build, run platform diagnostics,
-generate a local identity if needed, and copy the correct configuration template
-to `edgemouse.toml`. Existing identity and configuration files are never
-overwritten.
-
-On macOS:
-
-```sh
-./scripts/bootstrap-macos.sh
-```
-
-On Windows PowerShell:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-windows.ps1
-```
-
-Use `--verify-only` on macOS or `-VerifyOnly` on Windows to run the full source
-verification without creating an identity or configuration. Generated private
-keys, certificates, and `edgemouse.toml` are ignored by Git.
-
-After the first Windows setup, this single command checks that the tracked source
-tree is clean, fast-forwards `main` from GitHub, builds the release executable,
-prints its version, then starts EdgeMouse with current and timestamped logs:
+开发期间更新、构建并带日志启动后台服务：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\update-build-run-windows.ps1
 ```
 
-Machine-specific configuration, certificates, private keys, and logs are ignored
-by Git and are not overwritten. The script deliberately stops instead of stashing
-or discarding tracked local source changes. It retries a temporarily unavailable
-GitHub connection three times. `-SkipUpdate` builds and starts the source already
-present on disk, while `run-windows-with-log.ps1` starts the existing release
-executable without contacting GitHub.
+这些脚本不会覆盖设备身份、配置、证书、私钥或日志，也不会自动丢弃本地源码
+改动。
 
-GitHub Actions repeats the formatting, static-analysis, test, and release-build
-steps on both macOS and Windows after every push to `main`. A successful run also
-publishes downloadable platform packages under the run's **Artifacts** section.
-
-The scripts deliberately leave firewall and permission decisions to the user:
-allow inbound UDP ports `43891` and `43892` plus TCP port `43893` through Windows
-Firewall, and grant macOS Accessibility permission. Screen geometry is detected
-automatically when `[local.screen]` contains `auto = true`.
-
-## Pair the two machines
-
-1. Generate a different identity on each machine and create its configuration.
-   The preparation scripts do both without overwriting existing files:
-
-   ```powershell
-   # Windows
-   powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-windows.ps1
-   ```
-
-   ```sh
-   # macOS
-   ./scripts/bootstrap-macos.sh
-   ```
-
-2. Edit [the Windows example](examples/windows.toml) and
-   [the macOS example](examples/macos.toml). The two files must use matching
-   screen IDs with opposite `layout.peer_on` values. Keep `auto = true` under
-   each local screen; the peer sends its current desktop geometry after the
-   authenticated connection. The peer certificate named in each config does not
-   need to exist before pairing.
-3. Keep `peer.address = "auto"` on both computers to follow DHCP address changes
-   automatically; no IP edit or re-pairing is needed after a reboot. Alternatively,
-   set it to the other machine's static LAN address, such as
-   `192.168.8.202:43891`. Permit inbound UDP `43891` (QUIC mouse traffic), UDP
-   `43892` (discovery/pairing offer), and TCP `43893` (one-time pairing) in
-   Windows Firewall.
-4. Stop any running EdgeMouse agents. On Windows, display a one-time code:
-
-   ```powershell
-   .\target\release\edgemouse.exe pair host .\edgemouse.toml
-   ```
-
-   On the Mac, enter that code exactly as displayed:
-
-   ```sh
-   ./target/release/edgemouse pair join ./edgemouse.toml 1234-5678
-   ```
-
-   If UDP broadcast does not cross the wired/Wi-Fi network, append the Windows
-   IP address to bypass discovery while keeping the same authenticated pairing:
-
-   ```sh
-   ./target/release/edgemouse pair join ./edgemouse.toml 1234-5678 192.168.8.202
-   ```
-
-   Either platform can technically host, but Windows-host/Mac-join avoids adding
-   a new inbound TCP rule to macOS. The code expires after five minutes and the
-   host stops after three rejected attempts. Existing identical peer
-   certificates are kept; a different existing certificate is never replaced
-   silently.
-5. Validate both files after pairing:
-
-   ```sh
-   edgemouse check-config ./edgemouse.toml
-   ```
-
-   To test discovery without capturing either mouse, run this command on both
-   computers at about the same time:
-
-   ```sh
-   edgemouse discover ./edgemouse.toml
-   ```
-
-6. On macOS, enable EdgeMouse under **System Settings → Privacy & Security →
-   Accessibility**. Check status with `edgemouse doctor`.
-7. Start both sides:
-
-   ```sh
-   edgemouse run ./edgemouse.toml
-   ```
-
-   On macOS, the included launcher can start the release executable while showing
-   and saving the complete terminal output:
-
-   ```sh
-   ./scripts/run-macos-with-log.sh
-   ```
-
-   The newest run is written to `mac-current.log`, and timestamped copies are
-   kept under `logs/`. An alternative configuration path may be passed as the
-   script's only argument.
-
-   Windows has an equivalent PowerShell launcher:
-
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File .\scripts\run-windows-with-log.ps1
-   ```
-
-   It writes the newest run to `windows-current.log` and preserves timestamped
-   copies under `logs/`, so restarting the agent does not destroy the prior log.
-
-## Run automatically after login
-
-After manual operation has been verified, install the per-user login agent. This
-does not require a system service or administrator privileges.
-
-On macOS:
+## 验证源码
 
 ```sh
-./scripts/manage-autostart-macos.sh install ./edgemouse.toml
-```
-
-The installer creates a background-only `~/Applications/EdgeMouse.app` and
-associates the login agent with its stable `com.edgemouse.agent` identity. On
-first install, allow EdgeMouse in **System Settings > Privacy & Security > Local
-Network** and **Accessibility**. The Local Network permission lets EdgeMouse
-automatically discover its trusted peer after either computer receives a new
-DHCP address; Accessibility permits mouse capture and injection. These
-permissions are attributed to EdgeMouse instead of Terminal.
-
-For repeated local development builds, create a fixed signing identity once
-before installing the login agent:
-
-```sh
-./scripts/setup-macos-local-signing.sh install
-./scripts/manage-autostart-macos.sh install ./edgemouse.toml
-```
-
-The signing certificate and private key remain in the current user's login
-keychain and are used only for code signing. The certificate is valid for ten
-years. Switching from an older ad-hoc build to this fixed identity requires one
-final removal and re-addition of EdgeMouse under Accessibility. Later EdgeMouse
-upgrades signed with the same identity retain that permission. Without the
-fixed identity, the installer still works but warns that an ad-hoc signature
-may require Accessibility permission to be renewed after an upgrade.
-
-On Windows PowerShell:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\manage-autostart-windows.ps1 Install .\edgemouse.toml
-```
-
-Replace `install`/`Install` with `status`, `start`, `stop`, or `uninstall` as
-needed. The commands are case-insensitive on macOS and PowerShell accepts the
-capitalized forms shown above. `stop` asks the running agent to release captured
-input and injected buttons before it exits. Starting a second agent is refused,
-so a manual launcher cannot accidentally compete with the login agent.
-
-The macOS login agent writes `logs/mac-autostart.out.log` and
-`logs/mac-autostart.err.log`. The Windows login shortcut uses the normal logging
-launcher and writes `windows-current.log` plus timestamped files under `logs/`.
-The local status/stop channel binds only `127.0.0.1:43894`; it is not reachable
-from the LAN and needs no firewall rule.
-
-The certificate with the lower derived node ID initiates the connection; the
-other side accepts it. Either process may be started first. After a successful
-connection, a temporary network loss or peer restart restores local mouse control
-and makes both agents retry automatically. Press Ctrl+C while input is still
-local to shut down cleanly; while Windows input belongs to macOS, Ctrl+C is
-forwarded as Command+C. `edgemouse status` reports the local process and version;
-`edgemouse stop` performs the same safe shutdown when the agent is running in the
-background.
-
-Discovery packets contain only the node ID, device name, and QUIC port. Their IP
-address is taken from the UDP source and they are treated only as connection
-hints: a discovered endpoint must still present the exact certificate already
-configured for that peer and complete mutual TLS. A forged LAN broadcast cannot
-become a trusted EdgeMouse peer.
-
-Pairing offers contain only a random one-time session ID, device name, and TCP
-port; the short code and its hash are never broadcast. If a direct host IP is
-provided, the same fresh offer is sent over TCP instead. SPAKE2 derives a session
-key from the code without sending the code itself. Both certificate records and
-the final confirmation are authenticated over the complete handshake transcript
-before either certificate is saved. Certificates are public; private keys never
-leave their machine. The saved certificate remains the trust anchor for normal
-mutual TLS connections after pairing.
-
-With `local.screen.auto = true`, Windows reads the complete per-monitor-aware
-virtual desktop and macOS reads the union of active CoreGraphics displays.
-Rotation, negative secondary-display origins, Retina/Windows scaling, and
-resolution changes are therefore reflected automatically on startup and after a
-reconnect. The authenticated `Hello` exchange supplies that result to the peer.
-Older manual `origin_x`, `origin_y`, `width`, `height`, and `scale` fields remain
-supported when `auto = false` is set explicitly. In 0.3.0, omitting `auto`
-selects automatic detection so an existing machine configuration upgrades
-without requiring a manual geometry edit.
-
-Remote absolute movement is emitted every 4–12 ms according to current RTT,
-always using the newest position. Stale movement is discarded during network
-jitter instead of being replayed later. Buttons, wheels, enter, leave, and the
-last position before each control event remain reliable and strictly ordered.
-On macOS, received movement keeps a short arrival-timestamped history and is
-rendered on a stable 4 ms cadence through a fixed 12 ms jitter buffer.
-Positions between received samples are interpolated instead of jumping from one
-network packet to the next. The renderer never extrapolates beyond the newest
-real position, so stopping cannot produce prediction overshoot followed by a
-visible correction. Buttons, wheels, leave events, and drag transitions flush
-the newest real position immediately, so buffering never changes control-event
-ordering or click accuracy.
-If the peer's physical mouse becomes unresponsive while it controls this
-computer, deliberately pushing this computer's physical mouse toward the
-configured peer edge requests an authenticated control handoff. The detector
-models the distance from the current remote pointer to that edge and requires a
-firm overshoot, so ordinary trackpad movement does not steal control. Synthetic
-cursor movement is excluded. The original sender releases held buttons and keys
-before acknowledging; if it cannot acknowledge within 1.5 seconds, the receiver
-restores local input and reconnects instead of leaving the pointer trapped.
-While movement is active, the agent prints a five-second link summary containing
-QUIC RTT, the current movement interval, sent updates, skipped congested updates,
-merged updates, receive-side arrival jitter, and the largest active-movement
-arrival gap. Windows requests 1 ms timer resolution while EdgeMouse is running
-so the 4–12 ms movement schedule does not collapse to the default roughly
-15.6 ms system timer period.
-
-The authenticated physical-mouse reclaim handshake uses protocol v5 in
-EdgeMouse 0.3.1. Both computers must run 0.3.1 or newer; earlier builds
-intentionally refuse this connection instead of silently using incompatible
-control messages. EdgeMouse 0.3.2 fixes physical-versus-synthetic movement
-classification during that handoff and keeps the Windows takeover reference
-synchronized with the currently injected pointer.
-EdgeMouse 0.3.3 adds low-latency macOS receive smoothing and arrival-jitter
-diagnostics without changing protocol v5, so it remains connection-compatible
-with 0.3.1 and 0.3.2 during a staged upgrade.
-EdgeMouse 0.3.4 replaces the fixed macOS receive filter with an adaptive 8–12 ms
-jitter buffer, arrival-time interpolation, and short bounded prediction. It
-still uses protocol v5 and remains connection-compatible with 0.3.1–0.3.3.
-EdgeMouse 0.3.5 removes prediction and stabilizes the receive timeline at 12 ms
-after real-world testing exposed stop-time correction jumps. It also resamples
-and seeds the Windows pointer after connection setup, so the first outward edge
-movement is preserved even when the program becomes ready with the cursor
-already at the screen boundary. Protocol v5 is unchanged.
-EdgeMouse 0.4.0 adds native macOS keyboard capture and completes bidirectional
-keyboard following. Mac `Command` shortcuts map to Windows `Control`, keys held
-before a handoff remain local, and all captured keys are released during
-handback, emergency recovery, disconnect, or shutdown. Protocol v5 remains
-unchanged, but both computers should run 0.4.0 when testing reverse keyboard
-control.
-EdgeMouse 0.5.0 adds Windows Raw Input movement and ordered raw button/wheel
-capture after handoff. The existing low-level hook remains active as the safety
-suppression and automatic fallback layer. Protocol v5 is unchanged.
-EdgeMouse 0.5.1 adds live local telemetry for the desktop app: connection phase,
-reconnect count, five-second RTT and arrival-jitter samples, and recent movement
-counters. The UI plots the latest 60 seconds without parsing runtime log text.
-EdgeMouse 0.5.2 reports smoothed RTT variation consistently in both control
-directions, clarifies that Windows needs no macOS-style input permission, and
-makes the Input page's horizontal and wheel-direction switches persistent and
-live. Each computer stores the preferences for the physical input attached to
-that computer; existing configurations default both switches to off.
-EdgeMouse 0.5.3 makes the Screen layout page persistent. Saving writes the
-local `layout.peer_on`, sends the corresponding edge over the authenticated
-connection, and makes the trusted peer store the opposite edge before both
-agents reconnect automatically. This layout update and acknowledgement use
-protocol v6, so both computers must update to 0.5.3 before using this release.
-EdgeMouse 0.5.4 gives macOS its native decorated window and localized system
-menus while retaining the custom Windows title bar. The desktop status panel
-also keeps the last confirmed agent state across two isolated local-control
-poll misses, so a brief status-channel delay is shown as confirmation in
-progress instead of incorrectly claiming that the background service stopped.
-Protocol v6 is unchanged and remains connection-compatible with 0.5.3.
-EdgeMouse 0.5.5 gives the frameless Windows desktop window rounded transparent
-corners and regenerates the macOS application icon with a real alpha channel,
-removing the unwanted white square shown behind the icon in the Dock. Protocol
-v6 is unchanged and remains connection-compatible with 0.5.3.
-EdgeMouse 0.5.6 makes the Windows webview slightly overscan its transparent
-host so display scaling cannot expose a dark seam around the rounded corners.
-It also replaces the improvised macOS device mark with a crisp vector Apple
-silhouette. Protocol v6 is unchanged and remains connection-compatible with
-0.5.3.
-EdgeMouse 0.5.7 replaces that approximate device mark with the standardized
-Simple Icons Apple vector and starts the Windows background agent through
-Windows Script Host without opening a PowerShell window. Runtime output is
-still written to the current and archived log files, while the visible runner
-remains available for manual diagnostics. Protocol v6 is unchanged and remains
-connection-compatible with 0.5.3.
-EdgeMouse 0.5.8 upgrades the connection protocol to v7 and exchanges the full
-per-display topology after authentication. The desktop app now draws every
-Windows and macOS monitor at its real relative position, labels its physical
-pixel resolution and primary-display status, and derives both layout summaries
-from live device data. Both computers must update to 0.5.8 before connecting.
-EdgeMouse 0.5.9 makes the Overview layout label follow the same canonical
-Mac-relative-to-Windows direction used by the Screen layout page. It also turns
-the Overview power switch into a live local-service control: the desktop app
-starts only a matching agent version with file logging, suppresses the Windows
-console window, and uses the safe control channel when stopping. Protocol v7 is
-unchanged and remains connection-compatible with 0.5.8.
-
-## Verify the source tree
-
-```sh
+cargo fmt --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p edgemouse-agent -- doctor
 cargo run -p edgemouse-agent -- demo
 ```
 
-The transport test binds two loopback UDP sockets and performs a real mutual-TLS
-handshake. Some sandboxes require permission for that test.
+每次推送到 `main` 后，GitHub Actions 会在 Windows 和 macOS 上重复格式检查、
+静态分析、测试和发布构建。正式版本会附带签名安装包、通用 macOS 应用和应用内
+更新所需的签名文件。
 
-## Workspace
+## 工作区结构
 
-- `edgemouse-core`: geometry, topology, routing, safety state machine, and
-  platform adapter traits.
-- `edgemouse-protocol`: binary message serialization and strict validation.
-- `edgemouse-transport`: pinned-peer mutual TLS, QUIC connection, framing, and
-  identity material.
-- `edgemouse-platform-macos`: CoreGraphics capture/injection adapter.
-- `edgemouse-platform-windows`: Win32 capture/injection adapter.
-- `edgemouse-agent`: CLI, TOML configuration, network worker, heartbeats, and
-  runtime coordination.
+- `edgemouse-core`：几何、屏幕拓扑、路由、安全状态机和平台接口。
+- `edgemouse-protocol`：二进制消息序列化和严格校验。
+- `edgemouse-transport`：固定可信证书的双向 TLS、QUIC、组帧和身份材料。
+- `edgemouse-platform-macos`：macOS CoreGraphics 捕获与注入。
+- `edgemouse-platform-windows`：Windows Win32 捕获与注入。
+- `edgemouse-agent`：命令行、TOML 配置、网络、心跳和运行时协调。
+- `edgemouse-desktop`：Windows 与 macOS 桌面应用、后台控制、诊断和更新。
 
-The provisional project name can be changed before packaging. The code is MIT
-licensed and contains no copied GPL implementation code from Deskflow, Barrier,
-Input Leap, or Lan Mouse.
+## 兼容性与版本记录
+
+- 0.3.x：完成自动发现、断线恢复、物理鼠标取回和 macOS 移动平滑。
+- 0.4.0：加入 macOS 原生键盘捕获，完成双向键盘跟随。
+- 0.5.0–0.5.2：加入 Windows Raw Input、实时诊断和双向滚动设置。
+- 0.5.3–0.5.7：加入布局同步、原生 macOS 窗口、圆角、正式图标和隐藏式后台启动。
+- 0.5.8：协议升级到 v7，交换并显示完整的多显示器拓扑。
+- 0.5.9：统一概览与布局方向，并把概览电源开关接入真实后台服务。
+- 0.6.0：绑定桌面应用功能，提供签名安装包、通用 macOS 构建和应用内更新。
+
+协议 v7 从 0.5.8 开始使用。两台电脑都应更新到兼容版本后再连接。
+
+## 开源许可
+
+EdgeMouse 使用 [MIT License](LICENSE)。项目不包含从 Deskflow、Barrier、
+Input Leap 或 Lan Mouse 复制的 GPL 实现代码。
+
+详细英文说明请查看 [README.en.md](README.en.md)。
