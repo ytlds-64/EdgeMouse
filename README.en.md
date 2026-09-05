@@ -20,7 +20,7 @@ Download the latest signed packages from
 - Windows: use the `.exe` installer. It supports Simplified Chinese and English.
 - macOS: use the universal `.dmg`, which supports both Apple silicon and Intel Macs.
 
-The current stable release is 0.6.2. Future signed releases can also be checked
+The current stable release is 0.6.3. Future signed releases can also be checked
 and installed from the Settings page in the desktop application.
 
 After installation, complete secure pairing once from the Connection page. If
@@ -467,6 +467,10 @@ EdgeMouse 0.6.2 fixes startup when packaged installations have not yet imported
 their trusted peer certificate, adds one-time import of a previous
 `edgemouse.toml` pairing, and corrects error-toast icon sizing and long messages.
 Protocol v7 is unchanged.
+EdgeMouse 0.6.3 adds live download progress, transferred size, and installation
+stages to in-app updates. Diagnostics can now repair pairing, discovery, and the
+background service directly, open the correct macOS permission page, and recheck
+permission status automatically when the user returns. Protocol v7 is unchanged.
 
 ## Verify the source tree
 

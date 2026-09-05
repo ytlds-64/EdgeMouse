@@ -348,6 +348,24 @@ pub fn persist_peer_on(path: &Path, peer_on: Edge) -> Result<(), String> {
     Ok(())
 }
 
+pub fn persist_peer_address_auto(path: &Path) -> Result<(), String> {
+    let original = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let updated = replace_table_value(&original, "peer", "address", "\"auto\"");
+    fs::write(path, updated)
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+    if let Err(error) = LoadedConfig::load(path) {
+        let restore_error = fs::write(path, original).err();
+        return Err(match restore_error {
+            Some(restore_error) => format!(
+                "saved configuration is invalid: {error}; restoring the original also failed: {restore_error}"
+            ),
+            None => format!("saved configuration is invalid; restored the original: {error}"),
+        });
+    }
+    Ok(())
+}
+
 pub fn persist_session_preferences(
     path: &Path,
     preferences: SessionPreferences,
@@ -1116,6 +1134,57 @@ peer_on = "right"
             fs::read_to_string(&config_path)
                 .unwrap()
                 .contains("peer_on = \"bottom\"")
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn persist_peer_address_auto_replaces_a_static_address() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "edgemouse-auto-address-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let local = Identity::generate().unwrap();
+        let peer = Identity::generate().unwrap();
+        fs::write(directory.join("local.der"), &local.certificate).unwrap();
+        fs::write(directory.join("local-key.der"), &local.private_key).unwrap();
+        fs::write(directory.join("peer.der"), &peer.certificate).unwrap();
+        let config_path = directory.join("edgemouse.toml");
+        fs::write(
+            &config_path,
+            r#"
+[local]
+name = "local"
+listen = "0.0.0.0:43891"
+certificate = "local.der"
+private_key = "local-key.der"
+[local.screen]
+id = 1
+name = "Local"
+auto = true
+[peer]
+address = "192.168.8.201:43891"
+certificate = "peer.der"
+[peer.screen]
+id = 2
+name = "Peer"
+auto = true
+[layout]
+peer_on = "right"
+"#,
+        )
+        .unwrap();
+
+        persist_peer_address_auto(&config_path).unwrap();
+
+        assert_eq!(
+            LoadedConfig::load(&config_path).unwrap().peer_address,
+            PeerAddress::Auto
         );
         fs::remove_dir_all(directory).unwrap();
     }

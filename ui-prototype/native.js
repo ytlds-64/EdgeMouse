@@ -69,6 +69,61 @@
   let pairingPollTimer;
   let pairingHostActive = false;
   let serviceActionPending = false;
+  let pendingPermissionRepair = false;
+  let updateProgressHideTimer;
+
+  function formatBytes(bytes) {
+    const value = Number(bytes);
+    if (!Number.isFinite(value) || value < 0) return "";
+    if (value < 1024) return `${Math.round(value)} B`;
+    if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`;
+    return `${(value / (1024 ** 2)).toFixed(1)} MB`;
+  }
+
+  function hideUpdateProgress(delay = 0) {
+    window.clearTimeout(updateProgressHideTimer);
+    updateProgressHideTimer = window.setTimeout(() => {
+      const popover = document.querySelector(".update-progress-popover");
+      if (popover) popover.hidden = true;
+      document.body.classList.remove("is-updating");
+    }, delay);
+  }
+
+  function renderUpdateProgress(progress) {
+    const popover = document.querySelector(".update-progress-popover");
+    if (!popover) return;
+    window.clearTimeout(updateProgressHideTimer);
+    const phase = progress?.phase ?? "downloading";
+    const percent = Number.isFinite(Number(progress?.percent)) ? Math.max(0, Math.min(100, Number(progress.percent))) : null;
+    const downloaded = Number(progress?.downloaded) || 0;
+    const total = Number(progress?.total) || 0;
+    const version = progress?.version ? ` ${progress.version}` : "";
+    const titles = {
+      downloading: `正在下载 EdgeMouse${version}`,
+      installing: `正在安装 EdgeMouse${version}`,
+      restarting: `EdgeMouse${version} 安装完成`,
+      error: "更新失败",
+    };
+    const icons = { downloading: "↓", installing: "…", restarting: "✓", error: "!" };
+    const detail = phase === "downloading" && downloaded > 0
+      ? `${formatBytes(downloaded)}${total > 0 ? ` / ${formatBytes(total)}` : ""}`
+      : progress?.message ?? "正在连接更新服务器…";
+    popover.hidden = false;
+    popover.classList.toggle("is-indeterminate", phase === "downloading" && percent === null);
+    popover.classList.toggle("is-error", phase === "error");
+    setText(".update-progress-title", titles[phase] ?? "正在更新 EdgeMouse");
+    setText(".update-progress-detail", detail);
+    setText(".update-progress-percent", percent === null ? "—" : `${Math.round(percent)}%`);
+    setText(".update-progress-icon", icons[phase] ?? "↓");
+    const bar = popover.querySelector(".update-progress-track i");
+    if (bar) bar.style.width = `${percent ?? 0}%`;
+    document.body.classList.add("is-updating");
+  }
+
+  const updateProgressSubscription = window.__TAURI__?.event?.listen?.("update-progress", (event) => {
+    renderUpdateProgress(event.payload);
+  });
+  updateProgressSubscription?.catch((error) => console.error("Unable to subscribe to update progress", error));
 
   const connectionLabels = {
     starting: "正在启动",
@@ -351,7 +406,7 @@
       setMetricHealth("permissions", true);
     } else {
       setMetricValue("permissions", permission === true ? "已授权" : permission === false ? "未授权" : "待确认");
-      setText('[data-metric="permissions"] p', permission === false ? "请检查系统输入权限" : "辅助功能与输入监控");
+      setText('[data-metric="permissions"] p', permission === false ? "请检查系统输入权限" : "辅助功能权限");
       setText('[data-check="permissions"] small', permission === false ? "请检查系统输入权限" : "捕获与注入可用");
       setMetricHealth("permissions", permission !== false);
     }
@@ -581,6 +636,15 @@
       if (icon) icon.textContent = check.passed ? "✓" : "×";
       const detail = row.querySelector("small");
       if (detail) detail.textContent = check.detail;
+      row.querySelector(".diagnostic-repair-button")?.remove();
+      if (!check.passed && check.repairAction && check.repairLabel) {
+        const repair = document.createElement("button");
+        repair.type = "button";
+        repair.className = "diagnostic-repair-button";
+        repair.dataset.repairAction = check.repairAction;
+        repair.textContent = check.repairLabel;
+        row.append(repair);
+      }
     });
     const overall = document.querySelector(".diagnostics-overall");
     if (overall) {
@@ -613,6 +677,34 @@
     return report;
   }
 
+  document.querySelector(".checklist")?.addEventListener("click", async (event) => {
+    const button = event.target.closest(".diagnostic-repair-button");
+    if (!button) return;
+    event.stopImmediatePropagation();
+    const action = button.dataset.repairAction;
+    if (action === "pair") {
+      document.querySelector('.nav-item[data-page="connection"]')?.click();
+      openRealPairingModal();
+      window.showEdgeMouseToast?.("请完成安全配对；完成后诊断会自动恢复");
+      return;
+    }
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = "正在修复…";
+    try {
+      const result = await invoke("repair_diagnostic", { action });
+      pendingPermissionRepair = Boolean(result.requiresUserAction);
+      window.showEdgeMouseToast?.(result.message);
+      await new Promise((resolve) => window.setTimeout(resolve, result.requiresUserAction ? 250 : 900));
+      await refreshSnapshot();
+      await readDiagnosticReport();
+    } catch (error) {
+      window.showEdgeMouseToast?.(`修复失败：${error}`, "error");
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
+  }, true);
+
   document.querySelector(".run-diagnostics-button")?.addEventListener("click", async (event) => {
     event.stopImmediatePropagation();
     const button = event.currentTarget;
@@ -627,7 +719,8 @@
     try {
       const report = await readDiagnosticReport();
       const passed = report.checks.filter((check) => check.passed).length;
-      window.showEdgeMouseToast?.(passed === report.checks.length ? "完整检查已通过" : `检查完成：${passed}/${report.checks.length} 项通过`);
+      const failed = report.checks.length - passed;
+      window.showEdgeMouseToast?.(failed === 0 ? "完整检查已通过" : `${failed} 项需要处理，可点击对应的修复按钮`);
     } catch (error) {
       window.showEdgeMouseToast?.(`诊断失败：${error}`);
     } finally {
@@ -903,6 +996,7 @@
     button.addEventListener("click", async (event) => {
       event.stopImmediatePropagation();
       const install = button.dataset.installUpdate === "true";
+      const updateVersion = button.dataset.updateVersion ?? "";
       const buttons = [...document.querySelectorAll(".check-updates-button")];
       buttons.forEach((item) => {
         item.disabled = true;
@@ -912,6 +1006,9 @@
       status?.classList.remove("good");
       status?.classList.add("pending");
       if (status) status.textContent = install ? "正在安装" : "正在检查";
+      if (install) {
+        renderUpdateProgress({ phase: "downloading", version: updateVersion, downloaded: 0, total: null, percent: null, message: "正在连接更新服务器…" });
+      }
       try {
         const result = await invoke("check_for_updates", { install });
         setText(".update-last-check", "最后检查：刚刚");
@@ -919,6 +1016,7 @@
           if (status) status.textContent = `可更新至 ${result.version}`;
           buttons.forEach((item) => {
             item.dataset.installUpdate = "true";
+            item.dataset.updateVersion = result.version;
             item.textContent = `下载并安装 ${result.version}`;
           });
         } else {
@@ -927,6 +1025,7 @@
           if (status) status.textContent = "已是最新版";
           buttons.forEach((item) => {
             delete item.dataset.installUpdate;
+            delete item.dataset.updateVersion;
             item.textContent = "再次检查更新";
           });
         }
@@ -936,7 +1035,11 @@
         buttons.forEach((item) => {
           item.textContent = "重新检查更新";
         });
-        window.showEdgeMouseToast?.(`${error}`);
+        if (install) {
+          renderUpdateProgress({ phase: "error", downloaded: 0, total: null, percent: 0, message: `${error}` });
+          hideUpdateProgress(8000);
+        }
+        window.showEdgeMouseToast?.(`${error}`, "error");
       } finally {
         buttons.forEach((item) => { item.disabled = false; });
       }
@@ -1161,6 +1264,18 @@
   refreshDesktopPreferences();
   refreshSnapshot();
   window.setInterval(refreshSnapshot, 1000);
+  window.addEventListener("focus", () => {
+    if (!pendingPermissionRepair) return;
+    window.setTimeout(async () => {
+      try {
+        const report = await readDiagnosticReport();
+        pendingPermissionRepair = report.checks.some((check) => check.key === "permissions" && !check.passed);
+        if (!pendingPermissionRepair) window.showEdgeMouseToast?.("输入权限已生效，诊断已自动复检通过");
+      } catch (error) {
+        console.error("Unable to recheck permissions", error);
+      }
+    }, 500);
+  });
   window.addEventListener("resize", () => {
     if (latestSnapshot) updateDeviceCards(latestSnapshot);
   });

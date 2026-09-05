@@ -176,6 +176,7 @@
     "无需授权": "No permission required",
     "Windows 输入接口可用": "Windows input interface available",
     "辅助功能与输入监控": "Accessibility and Input Monitoring",
+    "辅助功能权限": "Accessibility permission",
     "最近 60 秒 · 每秒刷新": "Last 60 seconds · Updated every second",
     "等待连接质量数据…": "Waiting for connection quality data…",
     "实时监控正常": "Live monitoring healthy",
@@ -214,6 +215,11 @@
     "UDP 43892 可用": "UDP 43892 available",
     "捕获与注入可用": "Capture and injection available",
     "心跳和紧急快捷键正常": "Heartbeat and emergency shortcut healthy",
+    "修复配对": "Repair pairing",
+    "启用自动发现": "Enable auto discovery",
+    "打开权限设置": "Open permission settings",
+    "恢复服务": "Restore service",
+    "正在修复…": "Repairing…",
     "最近日志": "Recent log",
     "网络": "Network",
     "敏感字段会在导出时自动隐藏": "Sensitive fields are hidden automatically during export",
@@ -251,6 +257,12 @@
     "稳定版": "Stable",
     "预览版": "Preview",
     "检查更新": "Check for updates",
+    "正在准备更新": "Preparing update",
+    "正在连接更新服务器…": "Connecting to the update server…",
+    "正在下载安装包…": "Downloading the update package…",
+    "下载完成，正在验证并安装…": "Download complete; verifying and installing…",
+    "安装完成，正在重新启动…": "Installation complete; restarting…",
+    "更新失败": "Update failed",
     "重置": "Reset",
     "保留证书": "Certificates kept",
     "恢复界面、输入和连接偏好，不会删除设备身份、私钥或可信证书。": "Restore appearance, input, and connection preferences without deleting identities, private keys, or trusted certificates.",
@@ -397,6 +409,11 @@
     "刚刚重新验证": "Verified again just now",
     "安全配对完成，已保存可信证书": "Secure pairing complete and trusted certificate saved",
     "完整检查已通过": "Full check passed",
+    "请完成安全配对；完成后诊断会自动恢复": "Complete secure pairing; diagnostics will recover automatically afterward",
+    "输入权限已生效，诊断已自动复检通过": "Input permission is active; the automatic recheck passed",
+    "已启用局域网自动发现并重新启动后台服务": "Local-network auto discovery is enabled and the background service has restarted",
+    "后台服务与自动重连已恢复": "The background service and automatic reconnection have been restored",
+    "已打开辅助功能设置；请允许 EdgeMouse，返回软件后会自动复检": "Accessibility settings opened; allow EdgeMouse and the app will recheck automatically when you return",
     "诊断摘要已复制": "Diagnostic summary copied",
     "已打开日志文件夹": "Log folder opened",
     "诊断包已生成": "Diagnostics package generated",
@@ -417,6 +434,16 @@
   function translateDynamic(value) {
     const checks = value.match(/^检查中 (\d+) \/ (\d+)$/);
     if (checks) return `Checking ${checks[1]} / ${checks[2]}`;
+    const checksPassed = value.match(/^(\d+)\/(\d+) 项通过$/);
+    if (checksPassed) return `${checksPassed[1]}/${checksPassed[2]} passed`;
+    const repairs = value.match(/^(\d+) 项需要处理，可点击对应的修复按钮$/);
+    if (repairs) return `${repairs[1]} ${repairs[1] === "1" ? "issue needs" : "issues need"} attention; use the corresponding repair button`;
+    const updateDownload = value.match(/^正在下载 EdgeMouse(?: (.+))?$/);
+    if (updateDownload) return `Downloading EdgeMouse${updateDownload[1] ? ` ${updateDownload[1]}` : ""}`;
+    const updateInstall = value.match(/^正在安装 EdgeMouse(?: (.+))?$/);
+    if (updateInstall) return `Installing EdgeMouse${updateInstall[1] ? ` ${updateInstall[1]}` : ""}`;
+    const updateComplete = value.match(/^EdgeMouse(?: (.+))? 安装完成$/);
+    if (updateComplete) return `EdgeMouse${updateComplete[1] ? ` ${updateComplete[1]}` : ""} installed`;
     const connectedTo = value.match(/^已连接 (.+)$/);
     if (connectedTo) return `Connected to ${connectedTo[1]}`;
     const justConnected = value.match(/^刚刚连接 · 重连 (\d+) 次$/);

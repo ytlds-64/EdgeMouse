@@ -49,9 +49,9 @@ jobs:
           tagName: v__VERSION__
           releaseName: EdgeMouse __VERSION__
           releaseBody: |
-            EdgeMouse 0.6.2 修复安装版首次运行时缺少旧配对证书而无法启动的问题，新增旧配对配置的一次性导入，并修正错误提示图标比例与长文本显示。
+            EdgeMouse 0.6.3 为应用内更新加入实时下载进度、已下载大小与安装阶段提示；诊断页现在可以直接修复配对、自动发现和后台服务问题，并可打开 macOS 辅助功能设置、返回后自动复检。
 
-            Windows 请下载 `.exe` 安装程序；macOS 请下载通用版 `.dmg`，同时支持 Apple 芯片和 Intel Mac。升级后可在“连接”页面选择“导入旧配对配置…”，两台电脑各导入一次原来的 `edgemouse.toml`，以后更新将保留配对关系。
+            Windows 请下载 `.exe` 安装程序；macOS 请下载通用版 `.dmg`，同时支持 Apple 芯片和 Intel Mac。已安装旧版本时，也可以直接在 EdgeMouse 的“设置”或“关于”页面检查并安装更新。
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}

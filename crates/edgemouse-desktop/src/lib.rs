@@ -1,6 +1,7 @@
 use edgemouse_agent::config::{
     LoadedConfig, PairingConfig, PeerAddress, SessionPreferences, edge_name, import_paired_config,
-    initialize_unpaired_config, persist_peer_on, persist_session_preferences,
+    initialize_unpaired_config, persist_peer_address_auto, persist_peer_on,
+    persist_session_preferences,
 };
 use edgemouse_agent::{control, pairing, platform};
 use edgemouse_core::{DisplayGeometry, Edge, Rect};
@@ -14,7 +15,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 struct AppState {
     config_path: Option<PathBuf>,
@@ -233,6 +234,8 @@ struct DiagnosticCheck {
     key: String,
     passed: bool,
     detail: String,
+    repair_action: Option<String>,
+    repair_label: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -241,6 +244,14 @@ struct DiagnosticReport {
     checks: Vec<DiagnosticCheck>,
     summary: String,
     log_lines: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticRepairResult {
+    resolved: bool,
+    requires_user_action: bool,
+    message: String,
 }
 
 #[derive(Serialize)]
@@ -301,6 +312,17 @@ struct AppUpdateResult {
     message: String,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateProgress {
+    phase: String,
+    version: String,
+    downloaded: u64,
+    total: Option<u64>,
+    percent: Option<u8>,
+    message: String,
+}
+
 #[tauri::command]
 async fn get_app_snapshot(state: tauri::State<'_, AppState>) -> Result<AppSnapshot, String> {
     let config_path = state.config_path.clone();
@@ -346,10 +368,68 @@ async fn check_for_updates(
             message: format!("发现 EdgeMouse {version}，可以下载并安装"),
         });
     }
+    let progress_app = app.clone();
+    let progress_version = version.clone();
+    let mut downloaded = 0_u64;
+    let finish_app = app.clone();
+    let finish_version = version.clone();
+    let _ = app.emit(
+        "update-progress",
+        AppUpdateProgress {
+            phase: "downloading".to_owned(),
+            version: version.clone(),
+            downloaded: 0,
+            total: None,
+            percent: None,
+            message: "正在准备下载…".to_owned(),
+        },
+    );
     update
-        .download_and_install(|_, _| {}, || {})
+        .download_and_install(
+            move |chunk_length, content_length| {
+                downloaded = downloaded.saturating_add(chunk_length as u64);
+                let percent = content_length
+                    .filter(|total| *total > 0)
+                    .map(|total| ((downloaded.saturating_mul(100) / total).min(100)) as u8);
+                let _ = progress_app.emit(
+                    "update-progress",
+                    AppUpdateProgress {
+                        phase: "downloading".to_owned(),
+                        version: progress_version.clone(),
+                        downloaded,
+                        total: content_length,
+                        percent,
+                        message: "正在下载安装包…".to_owned(),
+                    },
+                );
+            },
+            move || {
+                let _ = finish_app.emit(
+                    "update-progress",
+                    AppUpdateProgress {
+                        phase: "installing".to_owned(),
+                        version: finish_version,
+                        downloaded: 0,
+                        total: None,
+                        percent: Some(100),
+                        message: "下载完成，正在验证并安装…".to_owned(),
+                    },
+                );
+            },
+        )
         .await
         .map_err(|error| format!("下载或安装 EdgeMouse {version} 失败：{error}"))?;
+    let _ = app.emit(
+        "update-progress",
+        AppUpdateProgress {
+            phase: "restarting".to_owned(),
+            version,
+            downloaded: 0,
+            total: None,
+            percent: Some(100),
+            message: "安装完成，正在重新启动…".to_owned(),
+        },
+    );
     app.restart();
 }
 
@@ -649,6 +729,75 @@ async fn run_diagnostics(state: tauri::State<'_, AppState>) -> Result<Diagnostic
     tauri::async_runtime::spawn_blocking(move || build_diagnostic_report(config_path.as_deref()))
         .await
         .map_err(|error| format!("运行诊断的后台任务失败：{error}"))
+}
+
+#[tauri::command]
+async fn repair_diagnostic(
+    state: tauri::State<'_, AppState>,
+    action: String,
+) -> Result<DiagnosticRepairResult, String> {
+    let config_path = state.config_path.clone();
+    let agent_status = Arc::clone(&state.agent_status);
+    tauri::async_runtime::spawn_blocking(move || match action.as_str() {
+        "enable_discovery" => {
+            let path = config_path.ok_or_else(|| "未找到 edgemouse.toml".to_owned())?;
+            persist_peer_address_auto(&path)
+                .map_err(|error| format!("无法启用自动发现：{error}"))?;
+            stop_agent()?;
+            let result = start_agent(&path)?;
+            *agent_status
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = AgentStatusCache::default();
+            Ok(DiagnosticRepairResult {
+                resolved: result.running,
+                requires_user_action: false,
+                message: "已启用局域网自动发现并重新启动后台服务".to_owned(),
+            })
+        }
+        "restore_service" => {
+            let path = config_path.ok_or_else(|| "未找到 edgemouse.toml".to_owned())?;
+            let config = LoadedConfig::load(&path)
+                .map_err(|error| format!("后台服务配置不可用：{error}"))?;
+            if !config.auto_reconnect {
+                let mut preferences = session_preferences(&config);
+                preferences.auto_reconnect = true;
+                persist_session_preferences(&path, preferences)
+                    .map_err(|error| format!("无法启用自动重连：{error}"))?;
+            }
+            stop_agent()?;
+            let result = start_agent(&path)?;
+            *agent_status
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = AgentStatusCache::default();
+            Ok(DiagnosticRepairResult {
+                resolved: result.running,
+                requires_user_action: false,
+                message: "后台服务与自动重连已恢复".to_owned(),
+            })
+        }
+        "open_permissions" => {
+            if cfg!(target_os = "macos") {
+                open_url(
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+                )?;
+                Ok(DiagnosticRepairResult {
+                    resolved: false,
+                    requires_user_action: true,
+                    message: "已打开辅助功能设置；请允许 EdgeMouse，返回软件后会自动复检"
+                        .to_owned(),
+                })
+            } else {
+                Ok(DiagnosticRepairResult {
+                    resolved: true,
+                    requires_user_action: false,
+                    message: "Windows 输入接口无需额外授权".to_owned(),
+                })
+            }
+        }
+        _ => Err(format!("不支持的诊断修复操作：{action}")),
+    })
+    .await
+    .map_err(|error| format!("执行诊断修复的后台任务失败：{error}"))?
 }
 
 #[tauri::command]
@@ -1709,11 +1858,15 @@ fn build_diagnostic_report(config_path: Option<&Path>) -> DiagnosticReport {
                 &format_node(config.peer_node.0)[..4],
                 &format_node(config.peer_node.0)[28..]
             ),
+            repair_action: None,
+            repair_label: None,
         },
         Err(error) => DiagnosticCheck {
             key: "certificate".to_owned(),
             passed: false,
             detail: format!("配置或可信证书不可用：{error}"),
+            repair_action: Some("pair".to_owned()),
+            repair_label: Some("修复配对".to_owned()),
         },
     };
     let discovery = match &config_result {
@@ -1727,12 +1880,16 @@ fn build_diagnostic_report(config_path: Option<&Path>) -> DiagnosticReport {
                 } else {
                     "当前使用固定地址，IP 变化后不会自动发现".to_owned()
                 },
+                repair_action: (!automatic).then(|| "enable_discovery".to_owned()),
+                repair_label: (!automatic).then(|| "启用自动发现".to_owned()),
             }
         }
         Err(_) => DiagnosticCheck {
             key: "discovery".to_owned(),
             passed: false,
             detail: "无法从配置确认发现模式".to_owned(),
+            repair_action: None,
+            repair_label: None,
         },
     };
     let permission_ok = platform.permission_granted != Some(false);
@@ -1744,8 +1901,12 @@ fn build_diagnostic_report(config_path: Option<&Path>) -> DiagnosticReport {
         } else if permission_ok {
             "macOS 输入权限可用".to_owned()
         } else {
-            "macOS 辅助功能或输入监控权限尚未授予".to_owned()
+            "macOS 辅助功能权限尚未授予".to_owned()
         },
+        repair_action: (!permission_ok && platform.operating_system.eq_ignore_ascii_case("macos"))
+            .then(|| "open_permissions".to_owned()),
+        repair_label: (!permission_ok && platform.operating_system.eq_ignore_ascii_case("macos"))
+            .then(|| "打开权限设置".to_owned()),
     };
     let recovery_ok = running.is_some()
         && config_result
@@ -1759,6 +1920,9 @@ fn build_diagnostic_report(config_path: Option<&Path>) -> DiagnosticReport {
             Some(_) => "后台服务在线，但自动重连已关闭".to_owned(),
             None => "后台服务未运行，无法验证自动恢复链路".to_owned(),
         },
+        repair_action: (!recovery_ok && config_result.is_ok())
+            .then(|| "restore_service".to_owned()),
+        repair_label: (!recovery_ok && config_result.is_ok()).then(|| "恢复服务".to_owned()),
     };
     let checks = vec![certificate, discovery, permissions, recovery];
     let passed = checks.iter().filter(|check| check.passed).count();
@@ -2207,6 +2371,7 @@ pub fn run() {
             show_system_notification,
             reset_preferences,
             run_diagnostics,
+            repair_diagnostic,
             open_logs_folder,
             export_diagnostics,
             verify_trusted_device,
