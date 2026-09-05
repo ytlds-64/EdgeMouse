@@ -16,7 +16,7 @@ jobs:
       matrix:
         include:
           - platform: macos-14
-            args: --target universal-apple-darwin --bundles dmg
+            args: --target universal-apple-darwin --bundles app,dmg
             sidecar: universal-apple-darwin
           - platform: windows-2022
             args: --target x86_64-pc-windows-msvc --bundles nsis
