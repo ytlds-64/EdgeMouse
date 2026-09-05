@@ -49,9 +49,9 @@ jobs:
           tagName: v__VERSION__
           releaseName: EdgeMouse __VERSION__
           releaseBody: |
-            EdgeMouse 0.6.1 修复桌面应用版本显示不一致的问题，为 Windows 安装器加入简体中文和英文，并将项目首页改为中文默认、英文可切换。
+            EdgeMouse 0.6.2 修复安装版首次运行时缺少旧配对证书而无法启动的问题，新增旧配对配置的一次性导入，并修正错误提示图标比例与长文本显示。
 
-            Windows 请下载 `.exe` 安装程序；macOS 请下载通用版 `.dmg`，同时支持 Apple 芯片和 Intel Mac。首次启动会在本机安全生成设备身份，然后可直接在“连接”页面完成配对。
+            Windows 请下载 `.exe` 安装程序；macOS 请下载通用版 `.dmg`，同时支持 Apple 芯片和 Intel Mac。升级后可在“连接”页面选择“导入旧配对配置…”，两台电脑各导入一次原来的 `edgemouse.toml`，以后更新将保留配对关系。
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}

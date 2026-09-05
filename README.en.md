@@ -20,7 +20,7 @@ Download the latest signed packages from
 - Windows: use the `.exe` installer. It supports Simplified Chinese and English.
 - macOS: use the universal `.dmg`, which supports both Apple silicon and Intel Macs.
 
-The current stable release is 0.6.1. Future signed releases can also be checked
+The current stable release is 0.6.2. Future signed releases can also be checked
 and installed from the Settings page in the desktop application.
 
 After installation, complete secure pairing once from the Connection page. If
@@ -463,6 +463,10 @@ updates. Protocol v7 is unchanged and remains connection-compatible with 0.5.8.
 EdgeMouse 0.6.1 unifies the desktop application version shown throughout the UI,
 adds Simplified Chinese and English Windows installer interfaces, and provides a
 Chinese-first bilingual project home page. Protocol v7 is unchanged.
+EdgeMouse 0.6.2 fixes startup when packaged installations have not yet imported
+their trusted peer certificate, adds one-time import of a previous
+`edgemouse.toml` pairing, and corrects error-toast icon sizing and long messages.
+Protocol v7 is unchanged.
 
 ## Verify the source tree
 
