@@ -325,6 +325,36 @@ fn write_private_key(path: &Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// Keep pending UI edits beside the config so old v7 clients can still read the
+/// strict TOML schema. Only an acknowledgement (or conflict resolution) clears it.
+pub fn save_layout_for_sync(path: &Path, peer_on: Edge) -> Result<(), String> {
+    persist_peer_on(path, peer_on)?;
+    fs::write(path.with_extension("layout-pending"), edge_name(peer_on))
+        .map_err(|error| format!("failed to queue layout synchronization: {error}"))
+}
+
+pub fn pending_layout_sync(path: &Path) -> Result<Option<Edge>, String> {
+    match fs::read_to_string(path.with_extension("layout-pending")) {
+        Ok(value) => match value.trim() {
+            "left" => Ok(Some(Edge::Left)),
+            "right" => Ok(Some(Edge::Right)),
+            "top" => Ok(Some(Edge::Top)),
+            "bottom" => Ok(Some(Edge::Bottom)),
+            _ => Err("invalid pending layout direction".to_owned()),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("failed to read pending layout: {error}")),
+    }
+}
+
+pub fn complete_layout_sync(path: &Path, expected: Edge) -> Result<(), String> {
+    if pending_layout_sync(path)? == Some(expected) {
+        fs::remove_file(path.with_extension("layout-pending"))
+            .map_err(|error| format!("failed to clear pending layout: {error}"))?;
+    }
+    Ok(())
+}
+
 pub fn persist_peer_on(path: &Path, peer_on: Edge) -> Result<(), String> {
     let original = fs::read_to_string(path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
@@ -1134,6 +1164,22 @@ peer_on = "right"
             fs::read_to_string(&config_path)
                 .unwrap()
                 .contains("peer_on = \"bottom\"")
+        );
+        assert_eq!(pending_layout_sync(&config_path).unwrap(), None);
+        save_layout_for_sync(&config_path, Edge::Bottom).unwrap();
+        // Re-reading from disk simulates stopping/restarting while offline.
+        assert_eq!(
+            pending_layout_sync(&config_path).unwrap(),
+            Some(Edge::Bottom)
+        );
+        save_layout_for_sync(&config_path, Edge::Left).unwrap();
+        complete_layout_sync(&config_path, Edge::Bottom).unwrap();
+        assert_eq!(pending_layout_sync(&config_path).unwrap(), Some(Edge::Left));
+        complete_layout_sync(&config_path, Edge::Left).unwrap();
+        assert_eq!(pending_layout_sync(&config_path).unwrap(), None);
+        assert_eq!(
+            LoadedConfig::load(&config_path).unwrap().peer_on,
+            Edge::Left
         );
         fs::remove_dir_all(directory).unwrap();
     }

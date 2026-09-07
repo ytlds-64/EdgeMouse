@@ -49,16 +49,26 @@ jobs:
           tagName: v__VERSION__
           releaseName: EdgeMouse __VERSION__
           releaseBody: |
-            EdgeMouse 0.6.5
+            EdgeMouse 0.6.6
 
-            - 修复鼠标正常返回与物理鼠标取回同时发生时服务退出的问题。
-            - 会话异常时先释放按键和鼠标，再按设置自动重连。
-            - 修复 Windows 任务栏和托盘图标被低分辨率缩略图放大导致的模糊；安装后通知系统刷新旧图标缓存。
-            - 诊断包补充后台错误日志，并修复中文及省略号乱码。
+            - Windows 手动安装默认简体中文，仍可选择 English，不再沿用旧版保存的英文而跳过语言选择。
+            - 更新前安全停止后台；安装器检查文件占用和后台版本，避免只更新界面程序。
+            - 任一端保存屏幕布局后自动同步；离线保存的修改会在重启或连接后补同步。
+            - 首次连接时统一旧版遗留的布局差异，不再仅凭已连接就显示“两端一致”。
+            - 输入页支持在任意一端修改两个控制方向的设置；滚动、平滑度、键盘跟随、抢回、拖拽保护、防误触与自动重连逐项同步。
+            - 输入卡片增加标题间距并按行对齐；左侧导航可收起为图标并记住本机状态。
 
-            Fixes a control-handoff race that could stop the service, restores reconnect behavior after session errors, uses full-resolution Windows icons, refreshes shell icon caches on installation, and improves diagnostic logs.
+            Defaults Windows installation to Chinese with an English option, safely stops the background service before updates, verifies installed component versions, and synchronizes layouts, both input profiles, edge protection and automatic reconnect per field, including offline edits. Input cards are aligned with clearer spacing; the sidebar can collapse to icons. Protocol v7 remains compatible through capability negotiation; update both computers for the complete synchronization behavior.
 
             Windows 请下载 `.exe` 安装程序；macOS 请下载通用版 `.dmg`，同时支持 Apple 芯片和 Intel Mac。已安装旧版本时，也可以直接在 EdgeMouse 的“设置”或“关于”页面检查并安装更新。
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Verify the actual Windows release installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem 'target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe' | Select-Object -First 1
+          $version = (Select-String '^version = "(.+)"' Cargo.toml).Matches.Groups[1].Value
+          ./scripts/test-windows-installer.ps1 -Installer $installer.FullName -Version $version

@@ -1,9 +1,9 @@
 use edgemouse_agent::config::{
-    LoadedConfig, PairingConfig, PeerAddress, SessionPreferences, edge_name, import_paired_config,
-    initialize_unpaired_config, persist_peer_address_auto, persist_peer_on,
-    persist_session_preferences,
+    LoadedConfig, PairingConfig, PeerAddress, edge_name, import_paired_config,
+    initialize_unpaired_config, pending_layout_sync, persist_peer_address_auto,
+    save_layout_for_sync,
 };
-use edgemouse_agent::{control, pairing, platform};
+use edgemouse_agent::{control, pairing, platform, settings_sync};
 use edgemouse_core::{DisplayGeometry, Edge, Rect};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
@@ -179,6 +179,8 @@ struct ConfigSnapshot {
     peer_screen_name: Option<String>,
     peer_screen_id: Option<u64>,
     peer_on: Option<String>,
+    layout_sync_pending: bool,
+    shared_settings: Option<SharedSettingsSnapshot>,
     entry_hysteresis: Option<f64>,
     peer_timeout_ms: Option<u64>,
     reverse_scroll_horizontal: Option<bool>,
@@ -188,6 +190,25 @@ struct ConfigSnapshot {
     reclaim_enabled: Option<bool>,
     block_switch_while_dragging: Option<bool>,
     auto_reconnect: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct SharedSettingsSnapshot {
+    values: std::collections::BTreeMap<u8, f64>,
+    pending: bool,
+}
+
+fn shared_settings_snapshot(path: &Path) -> Option<SharedSettingsSnapshot> {
+    settings_sync::snapshot(path, cfg!(target_os = "windows"))
+        .ok()
+        .map(|snapshot| SharedSettingsSnapshot {
+            values: snapshot
+                .entries
+                .iter()
+                .map(|entry| (entry.key, entry.value))
+                .collect(),
+            pending: snapshot.pending,
+        })
 }
 
 #[derive(Serialize)]
@@ -342,8 +363,15 @@ async fn check_for_updates(
     use tauri_plugin_updater::UpdaterExt;
 
     let current_version = env!("CARGO_PKG_VERSION").to_owned();
-    let updater = app
-        .updater()
+    let updater_builder = app.updater_builder();
+    #[cfg(target_os = "windows")]
+    let updater_builder = {
+        let state = app.state::<AppState>();
+        let preferences = state.preferences.lock().unwrap_or_else(|p| p.into_inner());
+        updater_builder.installer_arg(windows_installer_language(&preferences.language))
+    };
+    let updater = updater_builder
+        .build()
         .map_err(|error| format!("无法初始化更新服务：{error}"))?;
     let Some(update) = updater
         .check()
@@ -384,8 +412,8 @@ async fn check_for_updates(
             message: "正在准备下载…".to_owned(),
         },
     );
-    update
-        .download_and_install(
+    let bytes = update
+        .download(
             move |chunk_length, content_length| {
                 downloaded = downloaded.saturating_add(chunk_length as u64);
                 let percent = content_length
@@ -418,7 +446,15 @@ async fn check_for_updates(
             },
         )
         .await
-        .map_err(|error| format!("下载或安装 EdgeMouse {version} 失败：{error}"))?;
+        .map_err(|error| format!("下载或验证 EdgeMouse {version} 失败：{error}"))?;
+    // Download verifies the signature first. Only interrupt input when the
+    // installer is ready, and never install if graceful shutdown fails.
+    tauri::async_runtime::spawn_blocking(stop_agent)
+        .await
+        .map_err(|error| format!("更新前停止后台服务失败：{error}"))??;
+    update.install(bytes).map_err(|error| {
+        format!("安装 EdgeMouse {version} 失败：{error}。后台服务已安全停止，可在概览中重新启动")
+    })?;
     let _ = app.emit(
         "update-progress",
         AppUpdateProgress {
@@ -431,6 +467,15 @@ async fn check_for_updates(
         },
     );
     app.restart();
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_installer_language(language: &str) -> &'static str {
+    if language == "en" {
+        "/LANG=1033"
+    } else {
+        "/LANG=2052"
+    }
 }
 
 #[tauri::command]
@@ -471,6 +516,7 @@ async fn save_input_settings(
     keyboard_enabled: bool,
     reclaim_enabled: bool,
     drag_lock: bool,
+    fields: Vec<String>,
 ) -> Result<SavedInputSettings, String> {
     let path = state
         .config_path
@@ -478,33 +524,26 @@ async fn save_input_settings(
         .ok_or_else(|| "未找到 edgemouse.toml；无法保存输入设置".to_owned())?;
     let agent_status = Arc::clone(&state.agent_status);
     tauri::async_runtime::spawn_blocking(move || {
-        let config =
-            LoadedConfig::load(&path).map_err(|error| format!("读取输入配置失败：{error}"))?;
-        let mut preferences = session_preferences(&config);
-        let outgoing_profile = if cfg!(target_os = "windows") {
-            "windows-to-mac"
-        } else {
-            "mac-to-windows"
+        let base = match profile.as_str() {
+            "mac-to-windows" => settings_sync::MAC_PROFILE,
+            "windows-to-mac" => settings_sync::WINDOWS_PROFILE,
+            _ => return Err(format!("不支持的输入方向：{profile}")),
         };
-        let incoming_profile = if cfg!(target_os = "windows") {
-            "mac-to-windows"
-        } else {
-            "windows-to-mac"
-        };
-        if profile == outgoing_profile {
-            preferences.reverse_scroll_horizontal = reverse_horizontal;
-            preferences.reverse_scroll_vertical = reverse_vertical;
-            preferences.keyboard_enabled = keyboard_enabled;
-            preferences.block_switch_while_dragging = drag_lock;
-        } else if profile == incoming_profile {
-            preferences.pointer_smoothing = pointer_smoothing;
-            preferences.reclaim_enabled = reclaim_enabled;
-        } else {
-            return Err(format!("不支持的输入方向：{profile}"));
-        }
-        persist_session_preferences(&path, preferences)
+        let changes = fields
+            .iter()
+            .map(|field| match field.as_str() {
+                "horizontal" => Ok((base, f64::from(reverse_horizontal))),
+                "vertical" => Ok((base + 1, f64::from(reverse_vertical))),
+                "smoothing" => Ok((base + 2, f64::from(pointer_smoothing))),
+                "keyboard" => Ok((base + 3, f64::from(keyboard_enabled))),
+                "reclaim" => Ok((base + 4, f64::from(reclaim_enabled))),
+                "dragLock" => Ok((base + 5, f64::from(drag_lock))),
+                _ => Err(format!("不支持同步的输入设置：{field}")),
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        settings_sync::edit(&path, cfg!(target_os = "windows"), &changes)
             .map_err(|error| format!("保存输入设置失败：{error}"))?;
-        let (restarted, warning) = restart_agent_if_running(&path);
+        let (restarted, warning) = settings_sync_status();
         let mut cache = agent_status
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -526,13 +565,13 @@ async fn save_connection_settings(
         .ok_or_else(|| "未找到 edgemouse.toml；无法保存连接设置".to_owned())?;
     let agent_status = Arc::clone(&state.agent_status);
     tauri::async_runtime::spawn_blocking(move || {
-        let config =
-            LoadedConfig::load(&path).map_err(|error| format!("读取连接配置失败：{error}"))?;
-        let mut preferences = session_preferences(&config);
-        preferences.auto_reconnect = auto_reconnect;
-        persist_session_preferences(&path, preferences)
-            .map_err(|error| format!("保存连接设置失败：{error}"))?;
-        let (restarted, warning) = restart_agent_if_running(&path);
+        settings_sync::edit(
+            &path,
+            cfg!(target_os = "windows"),
+            &[(settings_sync::AUTO_RECONNECT, f64::from(auto_reconnect))],
+        )
+        .map_err(|error| format!("保存连接设置失败：{error}"))?;
+        let (restarted, warning) = settings_sync_status();
         let mut cache = agent_status
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -693,21 +732,22 @@ fn reset_preferences(
     use tauri_plugin_autostart::ManagerExt;
 
     if let Some(path) = state.config_path.as_deref() {
-        persist_session_preferences(
-            path,
-            SessionPreferences {
-                entry_hysteresis: 8.0,
-                reverse_scroll_horizontal: false,
-                reverse_scroll_vertical: false,
-                pointer_smoothing: 52,
-                keyboard_enabled: true,
-                reclaim_enabled: true,
-                block_switch_while_dragging: true,
-                auto_reconnect: true,
-            },
-        )
-        .map_err(|error| format!("恢复输入与连接设置失败：{error}"))?;
-        let _ = restart_agent_if_running(path);
+        let mut changes = vec![
+            (settings_sync::HYSTERESIS, 8.0),
+            (settings_sync::AUTO_RECONNECT, 1.0),
+        ];
+        for base in [settings_sync::MAC_PROFILE, settings_sync::WINDOWS_PROFILE] {
+            changes.extend([
+                (base, 0.0),
+                (base + 1, 0.0),
+                (base + 2, 52.0),
+                (base + 3, 1.0),
+                (base + 4, 1.0),
+                (base + 5, 1.0),
+            ]);
+        }
+        settings_sync::edit(path, cfg!(target_os = "windows"), &changes)
+            .map_err(|error| format!("恢复输入与连接设置失败：{error}"))?;
     }
     let _ = app.autolaunch().disable();
     let preferences = DesktopPreferences::default();
@@ -759,10 +799,12 @@ async fn repair_diagnostic(
             let config = LoadedConfig::load(&path)
                 .map_err(|error| format!("后台服务配置不可用：{error}"))?;
             if !config.auto_reconnect {
-                let mut preferences = session_preferences(&config);
-                preferences.auto_reconnect = true;
-                persist_session_preferences(&path, preferences)
-                    .map_err(|error| format!("无法启用自动重连：{error}"))?;
+                settings_sync::edit(
+                    &path,
+                    cfg!(target_os = "windows"),
+                    &[(settings_sync::AUTO_RECONNECT, 1.0)],
+                )
+                .map_err(|error| format!("无法启用自动重连：{error}"))?;
             }
             stop_agent()?;
             let result = start_agent(&path)?;
@@ -1090,18 +1132,27 @@ async fn save_layout(
     tauri::async_runtime::spawn_blocking(move || {
         let windows_to_mac = parse_layout_edge(&peer_on)?;
         let local_peer_on = local_layout_edge(windows_to_mac, cfg!(target_os = "macos"));
-        persist_peer_on(&path, local_peer_on)?;
-        let config =
-            LoadedConfig::load(&path).map_err(|error| format!("读取边缘设置失败：{error}"))?;
-        let mut preferences = session_preferences(&config);
-        preferences.entry_hysteresis = if edge_protection { 8.0 } else { 0.0 };
-        persist_session_preferences(&path, preferences)
-            .map_err(|error| format!("保存边缘设置失败：{error}"))?;
+        save_layout_for_sync(&path, local_peer_on)?;
+        settings_sync::edit(
+            &path,
+            cfg!(target_os = "windows"),
+            &[
+                (
+                    settings_sync::LAYOUT,
+                    settings_sync::edge_value(windows_to_mac),
+                ),
+                (
+                    settings_sync::HYSTERESIS,
+                    if edge_protection { 8.0 } else { 0.0 },
+                ),
+            ],
+        )
+        .map_err(|error| format!("保存边缘设置失败：{error}"))?;
         let (applied_live, warning) = match control::update_layout(local_peer_on) {
             Ok(Some(_)) => (true, None),
             Ok(None) => (
                 false,
-                Some("布局已保存；后台服务未运行，启动服务后请再点一次保存以同步对端".to_owned()),
+                Some("布局已保存；下次连接后将自动同步到另一台电脑，无需再次保存".to_owned()),
             ),
             Err(error) => (false, Some(format!("布局已保存；实时同步失败：{error}"))),
         };
@@ -1337,34 +1388,11 @@ fn stop_agent() -> Result<AgentServiceResult, String> {
     Err("后台服务没有在 5 秒内停止；本地控制权已请求恢复".to_owned())
 }
 
-fn session_preferences(config: &LoadedConfig) -> SessionPreferences {
-    SessionPreferences {
-        entry_hysteresis: config.session.entry_hysteresis,
-        reverse_scroll_horizontal: config.reverse_scroll_horizontal,
-        reverse_scroll_vertical: config.reverse_scroll_vertical,
-        pointer_smoothing: config.pointer_smoothing,
-        keyboard_enabled: config.keyboard_enabled,
-        reclaim_enabled: config.reclaim_enabled,
-        block_switch_while_dragging: config.session.block_switch_while_dragging,
-        auto_reconnect: config.auto_reconnect,
-    }
-}
-
-fn restart_agent_if_running(path: &Path) -> (bool, Option<String>) {
-    match control::query_status() {
-        Ok(Some(_)) => match stop_agent().and_then(|_| start_agent(path)) {
-            Ok(_) => (true, None),
-            Err(error) => (
-                false,
-                Some(format!("设置已保存，但后台服务重启失败：{error}")),
-            ),
-        },
-        Ok(None) => (false, Some("设置已保存；后台服务下次启动时生效".to_owned())),
-        Err(error) => (
-            false,
-            Some(format!("设置已保存；无法确认后台服务状态：{error}")),
-        ),
-    }
+fn settings_sync_status() -> (bool, Option<String>) {
+    (
+        false,
+        Some("设置已保存；连接后自动同步并生效，无需在另一端重复设置".to_owned()),
+    )
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1414,7 +1442,7 @@ fn resolve_agent_executable(config_path: &Path) -> Result<PathBuf, String> {
         format!("找到的版本不匹配：{}", found_versions.join("；"))
     };
     Err(format!(
-        "{detail}。请先同时构建 edgemouse-agent 与 edgemouse-desktop {}",
+        "{detail}。后台组件未完整更新，请退出 EdgeMouse 后重新运行 {} 安装包覆盖修复；无需删除配对或配置",
         env!("CARGO_PKG_VERSION")
     ))
 }
@@ -1705,6 +1733,8 @@ fn config_snapshot(path: Option<&Path>) -> ConfigSnapshot {
             peer_screen_name: Some(config.peer_screen_name.clone()),
             peer_screen_id: Some(config.peer_screen.0),
             peer_on: Some(format!("{:?}", config.peer_on).to_ascii_lowercase()),
+            layout_sync_pending: pending_layout_sync(path).map_or(true, |edge| edge.is_some()),
+            shared_settings: shared_settings_snapshot(path),
             entry_hysteresis: Some(config.session.entry_hysteresis),
             peer_timeout_ms: Some(config.session.peer_timeout_ms),
             reverse_scroll_horizontal: Some(config.reverse_scroll_horizontal),
@@ -1735,6 +1765,8 @@ fn config_snapshot(path: Option<&Path>) -> ConfigSnapshot {
                     peer_screen_name: None,
                     peer_screen_id: None,
                     peer_on: None,
+                    layout_sync_pending: false,
+                    shared_settings: None,
                     entry_hysteresis: None,
                     peer_timeout_ms: None,
                     reverse_scroll_horizontal: None,
@@ -1768,6 +1800,8 @@ fn empty_config(path: Option<&Path>, error: &str) -> ConfigSnapshot {
         peer_screen_name: None,
         peer_screen_id: None,
         peer_on: None,
+        layout_sync_pending: false,
+        shared_settings: None,
         entry_hysteresis: None,
         peer_timeout_ms: None,
         reverse_scroll_horizontal: None,
@@ -1785,22 +1819,23 @@ fn persist_scroll_settings(
     reverse_horizontal: bool,
     reverse_vertical: bool,
 ) -> Result<(), String> {
-    let original = fs::read_to_string(path)
-        .map_err(|error| format!("读取 {} 失败：{error}", path.display()))?;
-    let updated = scroll_settings_source(&original, reverse_horizontal, reverse_vertical);
-    fs::write(path, updated).map_err(|error| format!("写入 {} 失败：{error}", path.display()))?;
-    if let Err(error) = LoadedConfig::load(path) {
-        let restore_error = fs::write(path, original).err();
-        return Err(match restore_error {
-            Some(restore_error) => {
-                format!("保存后的配置无效：{error}；恢复原配置也失败：{restore_error}")
-            }
-            None => format!("保存后的配置无效，已恢复原配置：{error}"),
-        });
-    }
-    Ok(())
+    let windows = cfg!(target_os = "windows");
+    let base = if windows {
+        settings_sync::WINDOWS_PROFILE
+    } else {
+        settings_sync::MAC_PROFILE
+    };
+    settings_sync::edit(
+        path,
+        windows,
+        &[
+            (base, f64::from(reverse_horizontal)),
+            (base + 1, f64::from(reverse_vertical)),
+        ],
+    )
 }
 
+#[cfg(test)]
 fn scroll_settings_source(
     source: &str,
     reverse_horizontal: bool,
@@ -2474,6 +2509,13 @@ mod tests {
     use edgemouse_core::Edge;
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn windows_updates_follow_the_app_language_and_default_to_chinese() {
+        assert_eq!(super::windows_installer_language("zh-CN"), "/LANG=2052");
+        assert_eq!(super::windows_installer_language("en"), "/LANG=1033");
+        assert_eq!(super::windows_installer_language(""), "/LANG=2052");
+    }
 
     #[test]
     fn application_and_tray_icons_have_transparent_corners_and_enough_pixels() {

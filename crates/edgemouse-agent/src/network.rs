@@ -96,6 +96,7 @@ pub struct Network {
     pub peer_node: NodeId,
     pub peer_name: String,
     pub peer_screen: ScreenInfo,
+    pub settings_sync: bool,
 }
 
 #[derive(Default)]
@@ -278,8 +279,9 @@ impl Network {
                     let peer_node = link.peer_node();
                     let peer_name = link.peer_name().to_owned();
                     let peer_screen = link.peer_screen().clone();
+                    let settings_sync = link.supports_settings_sync();
                     if startup_sender
-                        .send(Ok((peer_node, peer_name, peer_screen)))
+                        .send(Ok((peer_node, peer_name, peer_screen, settings_sync)))
                         .is_err()
                     {
                         return;
@@ -298,7 +300,7 @@ impl Network {
             .map_err(|error| format!("failed to start network thread: {error}"))?;
 
         match startup_receiver.recv() {
-            Ok(Ok((peer_node, peer_name, peer_screen))) => Ok(Self {
+            Ok(Ok((peer_node, peer_name, peer_screen, settings_sync))) => Ok(Self {
                 commands: commands_sender,
                 events: event_receiver,
                 pending_move,
@@ -307,6 +309,7 @@ impl Network {
                 peer_node,
                 peer_name,
                 peer_screen,
+                settings_sync,
             }),
             Ok(Err(error)) => {
                 drop(thread.join());

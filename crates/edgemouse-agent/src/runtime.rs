@@ -1,10 +1,14 @@
-use crate::config::{LoadedConfig, PeerAddress, ResolvedScreen, persist_peer_on};
+use crate::config::{
+    LoadedConfig, PeerAddress, ResolvedScreen, complete_layout_sync, pending_layout_sync,
+    persist_peer_on,
+};
 use crate::control::{ControlServer, LinkMetrics, RuntimeTelemetry};
 use crate::discovery::{
     DISCOVERY_PORT, DiscoveryRequest, discover_trusted_peer, respond_to_trusted_peer,
 };
 use crate::network::{Network, NetworkEvent};
 use crate::platform;
+use crate::settings_sync;
 use edgemouse_core::{
     CaptureMode, ControlState, DisplayGeometry, Edge, Effect, KeyboardCaptureBackend,
     KeyboardInjectionBackend, MouseCaptureBackend, MouseInjectionBackend, NodeId,
@@ -182,6 +186,12 @@ fn accepts_remote_layout(local_node: NodeId, peer_node: NodeId, local_pending: b
     !local_pending || local_node > peer_node
 }
 
+fn accepts_layout_snapshot(local_node: NodeId, peer_node: NodeId, local_pending: bool) -> bool {
+    // An initial snapshot must never override a user's queued (including offline)
+    // edit. With no edits, both machines use the same deterministic authority.
+    !local_pending && peer_node < local_node
+}
+
 fn accept_control_reclaim(
     session: &mut Session,
     incoming_active: bool,
@@ -219,12 +229,19 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     let _control_server = ControlServer::start(Arc::clone(&stopping), telemetry.clone())?;
     let mut reconnecting = false;
     let mut backoff = ReconnectBackoff::default();
+    let mut initial_layout_synced = false;
 
     loop {
         if stopping.load(Ordering::Acquire) {
             return Ok(());
         }
+        settings_sync::reconcile(config_path, cfg!(target_os = "windows"))?;
         let config = LoadedConfig::load(config_path)?;
+        if telemetry.layout_update().is_none()
+            && let Some(edge) = pending_layout_sync(config_path)?
+        {
+            telemetry.request_layout_update(edge);
+        }
         telemetry.set_scroll_settings(crate::control::ScrollSettings {
             reverse_horizontal: config.reverse_scroll_horizontal,
             reverse_vertical: config.reverse_scroll_vertical,
@@ -392,13 +409,14 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
             &stopping,
             &telemetry,
             config_path,
+            &mut initial_layout_synced,
         )? {
             ConnectionEnd::Stopped => return Ok(()),
             ConnectionEnd::LayoutChanged => {
                 telemetry.disconnected();
                 reconnecting = true;
                 backoff.reset();
-                println!("Screen layout updated; reconnecting with the new edge…");
+                println!("Shared settings updated; reconnecting with the saved configuration…");
             }
             ConnectionEnd::Disconnected(reason) => {
                 telemetry.disconnected();
@@ -459,6 +477,7 @@ fn run_connected(
     stopping: &AtomicBool,
     telemetry: &RuntimeTelemetry,
     config_path: &Path,
+    initial_layout_synced: &mut bool,
 ) -> Result<ConnectionEnd, Box<dyn Error>> {
     let mut capture = platform::start_capture(
         local.screen.bounds,
@@ -503,6 +522,8 @@ fn run_connected(
         config.local_node,
         config.keyboard_enabled,
         config.reclaim_enabled,
+        initial_layout_synced,
+        settings_sync::preferences(config),
     );
 
     let effects = session.disconnect_peer(config.peer_node);
@@ -593,15 +614,79 @@ fn run_loop(
     local_node: NodeId,
     keyboard_enabled: bool,
     reclaim_enabled: bool,
+    initial_layout_synced: &mut bool,
+    active_preferences: crate::config::SessionPreferences,
 ) -> Result<ConnectionEnd, Box<dyn Error>> {
     let mut takeover = LocalTakeoverGesture::new(takeover_edge);
     let mut pending_layout_request = None;
+    // Request zero is a v7-compatible initial snapshot. After acknowledgement,
+    // do not repeat it on every reconnect: old clients rebuild even equal layouts.
+    let windows = cfg!(target_os = "windows");
+    let mut shared_poll = Instant::now() - Duration::from_secs(1);
+    let mut shared_sent = None;
+    let mut shared_pending: Option<(u64, Vec<edgemouse_protocol::SettingEntry>)> = None;
+    let mut shared_request = 0_u64;
+    let mut shared_retry = Instant::now();
+    let mut shared_settle = Instant::now();
+    let mut shared_reload: Option<Instant> = None;
+    if !network.settings_sync
+        && !*initial_layout_synced
+        && local_node < network.peer_node
+        && telemetry.layout_update().is_none()
+    {
+        network.send(WireMessage::LayoutUpdate {
+            request_id: 0,
+            peer_on: takeover_edge,
+        })?;
+    }
     while !stopping.load(Ordering::Acquire) {
         let now_ms = elapsed_ms(clock);
-        if pending_layout_request.is_none()
+        if shared_reload.is_some_and(|started| started.elapsed() >= Duration::from_secs(1)) {
+            return Ok(ConnectionEnd::LayoutChanged);
+        }
+        if !network.settings_sync && shared_poll.elapsed() >= Duration::from_millis(250) {
+            shared_poll = Instant::now();
+            let latest = LoadedConfig::load(config_path)?;
+            if settings_sync::preferences(&latest) != active_preferences
+                && telemetry.layout_update().is_none()
+            {
+                return Ok(ConnectionEnd::LayoutChanged);
+            }
+        }
+        if network.settings_sync && shared_poll.elapsed() >= Duration::from_millis(250) {
+            shared_poll = Instant::now();
+            let shared = settings_sync::snapshot(config_path, windows)?;
+            if shared_pending.is_some() && shared_retry.elapsed() > Duration::from_secs(5) {
+                shared_pending = None;
+                shared_sent = None;
+            }
+            if shared_pending.is_none() && shared_sent.as_ref() != Some(&shared.entries) {
+                shared_request = shared_request.wrapping_add(1).max(1);
+                network.send(WireMessage::SettingsUpdate {
+                    request_id: shared_request,
+                    entries: shared.entries.clone(),
+                })?;
+                shared_sent = Some(shared.entries.clone());
+                shared_pending = Some((shared_request, shared.entries));
+                shared_retry = Instant::now();
+            } else if shared_pending.is_none()
+                && shared_settle.elapsed() >= Duration::from_millis(300)
+            {
+                let latest = LoadedConfig::load(config_path)?;
+                if shared_reload.is_none()
+                    && (latest.peer_on != takeover_edge
+                        || settings_sync::preferences(&latest) != active_preferences)
+                {
+                    network.send(WireMessage::SettingsReconnect)?;
+                    shared_reload = Some(Instant::now());
+                }
+            }
+        }
+        if !network.settings_sync
+            && pending_layout_request.is_none()
             && let Some(peer_on) = telemetry.layout_update()
         {
-            let request_id = new_session_id(u128::from(session_id));
+            let request_id = new_session_id(u128::from(session_id)).max(1);
             network.send(WireMessage::LayoutUpdate {
                 request_id,
                 peer_on,
@@ -611,6 +696,47 @@ fn run_loop(
         }
         while let Some(event) = network.try_receive()? {
             match event {
+                NetworkEvent::Message(WireMessage::SettingsReconnect) => {
+                    if !network.settings_sync {
+                        return Err("unnegotiated settings reload".into());
+                    }
+                    network.send(WireMessage::SettingsReconnectAck)?;
+                    shared_reload.get_or_insert_with(Instant::now);
+                }
+                NetworkEvent::Message(WireMessage::SettingsReconnectAck) => {
+                    if shared_reload.is_some() {
+                        return Ok(ConnectionEnd::LayoutChanged);
+                    }
+                }
+                NetworkEvent::Message(WireMessage::SettingsUpdate {
+                    request_id,
+                    entries,
+                }) => {
+                    if !network.settings_sync {
+                        return Err("unnegotiated settings synchronization".into());
+                    }
+                    settings_sync::receive(config_path, windows, &entries)?;
+                    network.send(WireMessage::SettingsUpdateAck { request_id })?;
+                    shared_settle = Instant::now();
+                }
+                NetworkEvent::Message(WireMessage::SettingsUpdateAck { request_id }) => {
+                    if shared_pending
+                        .as_ref()
+                        .is_some_and(|(pending, _)| *pending == request_id)
+                    {
+                        let (_, sent) = shared_pending.take().unwrap();
+                        settings_sync::acknowledge(config_path, windows, &sent)?;
+                        let shared = settings_sync::snapshot(config_path, windows)?;
+                        if !shared.pending {
+                            if let Some(edge) = pending_layout_sync(config_path)? {
+                                complete_layout_sync(config_path, edge)?;
+                            }
+                            telemetry.discard_layout_update();
+                            *initial_layout_synced = true;
+                        }
+                        shared_settle = Instant::now();
+                    }
+                }
                 NetworkEvent::Message(WireMessage::Heartbeat {
                     session_id: remote_session,
                     ..
@@ -720,26 +846,50 @@ fn run_loop(
                     request_id,
                     peer_on,
                 }) => {
-                    if !accepts_remote_layout(
-                        local_node,
-                        network.peer_node,
-                        telemetry.layout_update().is_some(),
-                    ) {
+                    let queued = pending_layout_sync(config_path)?;
+                    let local_pending = telemetry.layout_update().is_some() || queued.is_some();
+                    let accepted = if request_id == 0 {
+                        accepts_layout_snapshot(local_node, network.peer_node, local_pending)
+                    } else {
+                        accepts_remote_layout(local_node, network.peer_node, local_pending)
+                    };
+                    if !accepted {
                         println!(
                             "Ignoring a simultaneous peer layout update because this node owns the deterministic tie-break"
                         );
                         continue;
                     }
+                    let discarded = telemetry.layout_update().or(queued);
                     telemetry.discard_layout_update();
+                    pending_layout_request = None;
                     let local_peer_on = peer_on.opposite();
                     persist_peer_on(config_path, local_peer_on)?;
+                    let shared_edge = if windows { local_peer_on } else { peer_on };
+                    settings_sync::edit(
+                        config_path,
+                        windows,
+                        &[(
+                            settings_sync::LAYOUT,
+                            settings_sync::edge_value(shared_edge),
+                        )],
+                    )?;
+                    if let Some(edge) = discarded {
+                        complete_layout_sync(config_path, edge)?;
+                    }
                     network.send(WireMessage::LayoutUpdateAck { request_id })?;
+                    *initial_layout_synced = true;
                     println!(
                         "Trusted peer updated the screen layout; local peer edge is now {local_peer_on:?}"
                     );
-                    return Ok(ConnectionEnd::LayoutChanged);
+                    if request_id != 0 || local_peer_on != takeover_edge {
+                        return Ok(ConnectionEnd::LayoutChanged);
+                    }
                 }
                 NetworkEvent::Message(WireMessage::LayoutUpdateAck { request_id }) => {
+                    if request_id == 0 {
+                        *initial_layout_synced = true;
+                        continue;
+                    }
                     let Some((pending_request_id, peer_on)) = pending_layout_request else {
                         continue;
                     };
@@ -747,6 +897,8 @@ fn run_loop(
                         continue;
                     }
                     telemetry.complete_layout_update(peer_on);
+                    complete_layout_sync(config_path, peer_on)?;
+                    *initial_layout_synced = true;
                     println!("Trusted peer saved the synchronized screen layout");
                     return Ok(ConnectionEnd::LayoutChanged);
                 }
@@ -776,6 +928,9 @@ fn run_loop(
                     return Err("peer sent a duplicate Hello message".into());
                 }
                 NetworkEvent::Message(WireMessage::Goodbye { .. }) => {
+                    if shared_reload.is_some() {
+                        return Ok(ConnectionEnd::LayoutChanged);
+                    }
                     return Ok(ConnectionEnd::Disconnected("peer shut down".to_owned()));
                 }
                 NetworkEvent::Message(WireMessage::MouseDatagram { .. }) => {
@@ -822,7 +977,11 @@ fn run_loop(
                     if let Some(position) = remote.reset(injector) {
                         restore_incoming_control(remote.local_screen, position, capture, session)?;
                     }
-                    return Ok(ConnectionEnd::Disconnected(reason));
+                    return Ok(if shared_reload.is_some() {
+                        ConnectionEnd::LayoutChanged
+                    } else {
+                        ConnectionEnd::Disconnected(reason)
+                    });
                 }
             }
         }
@@ -1455,6 +1614,23 @@ mod tests {
         assert!(!accepts_remote_layout(lower, higher, true));
         assert!(accepts_remote_layout(higher, lower, true));
         assert!(accepts_remote_layout(lower, higher, false));
+    }
+
+    #[test]
+    fn initial_layout_sync_never_overrides_a_saved_offline_edit() {
+        let lower = NodeId(1);
+        let higher = NodeId(2);
+        assert!(accepts_layout_snapshot(higher, lower, false));
+        assert!(!accepts_layout_snapshot(lower, higher, false));
+        assert!(!accepts_layout_snapshot(higher, lower, true));
+        assert!(!accepts_layout_snapshot(lower, higher, true));
+        // A deliberate edit from either side wins over an unedited snapshot.
+        assert!(accepts_remote_layout(lower, higher, false));
+        assert!(accepts_remote_layout(higher, lower, false));
+        for edge in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] {
+            let peer_local_edge = edge.opposite();
+            assert_eq!(peer_local_edge.opposite(), edge);
+        }
     }
 
     #[derive(Default)]

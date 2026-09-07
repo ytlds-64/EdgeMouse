@@ -20,7 +20,7 @@ Download the latest signed packages from
 - Windows: use the `.exe` installer. It supports Simplified Chinese and English.
 - macOS: use the universal `.dmg`, which supports both Apple silicon and Intel Macs.
 
-The current stable release is 0.6.5. Future signed releases can also be checked
+The current stable release is 0.6.6. Future signed releases can also be checked
 and installed from the Settings page in the desktop application.
 
 After installation, complete secure pairing once from the Connection page. If
@@ -36,7 +36,7 @@ across future updates.
 - Primary, secondary, middle, back, and forward buttons.
 - Vertical and horizontal scrolling.
 - Independent horizontal and wheel/vertical scroll reversal for each control
-  direction, saved locally on the computer that owns the physical input.
+  direction, editable on either device and synchronized to the owning computer.
 - Bidirectional keyboard forwarding while the local mouse owns the peer,
   including modifiers, navigation, function keys, numpad keys, and key repeat.
 - Cross-platform shortcut mapping: Windows `Ctrl` becomes Mac `Command` and Mac
@@ -92,7 +92,7 @@ low-level-hook movement path; the default is `true`.
 
 ## Build
 
-Install a stable Rust toolchain (Rust 1.85 or newer), then build on each target
+Install a stable Rust toolchain (Rust 1.89 or newer), then build on each target
 machine:
 
 ```sh
@@ -482,6 +482,19 @@ following the reconnect setting. Windows now uses full-resolution window and
 tray icons, and installation asks the shell to refresh cached icons. Diagnostic
 exports include background stderr and preserve Unicode log text. Protocol v7 is
 unchanged.
+EdgeMouse 0.6.6 defaults manual Windows installation to Simplified Chinese with
+an English option, stops the background service before replacement, and verifies
+the installed component version. Layout edits saved on either device propagate
+automatically; offline edits survive restarts and initial connections reconcile
+legacy layout differences. Input settings for both directions, edge protection
+and automatic reconnect merge per field using logical revisions and a device-ID
+tie-break. Saved edits outrank initial defaults; offline edits survive restarts.
+Theme, language, sidebar expansion, startup settings, identities and permissions
+remain local. Both devices need 0.6.6 for full synchronization. The optional
+extension is capability-negotiated on protocol v7, retaining legacy connections.
+Input cards have improved spacing and aligned rows; the sidebar can collapse to
+icons and remembers its state locally. Fixed key mappings and dwell switching
+remain non-editable.
 
 ## Verify the source tree
 

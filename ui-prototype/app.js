@@ -1,8 +1,23 @@
 const navItems = [...document.querySelectorAll(".nav-item")];
 const pages = [...document.querySelectorAll(".page")];
 const toast = document.querySelector(".toast");
-let appVersion = document.querySelector('meta[name="edgemouse-version"]')?.content ?? "0.6.5";
+let appVersion = document.querySelector('meta[name="edgemouse-version"]')?.content ?? "0.6.6";
 let toastTimer;
+
+const sidebarToggle = document.querySelector(".sidebar-toggle");
+function setSidebarCollapsed(collapsed) {
+  document.querySelector(".app-window").classList.toggle("sidebar-collapsed", collapsed);
+  sidebarToggle.setAttribute("aria-expanded", String(!collapsed));
+  const sourceLabel = collapsed ? "展开侧栏" : "收起侧栏";
+  const label = window.EdgeMouseI18n?.translate(sourceLabel) ?? sourceLabel;
+  sidebarToggle.setAttribute("aria-label", label);
+  sidebarToggle.title = label;
+  sidebarToggle.querySelector("span").textContent = label;
+  navItems.forEach((item) => { item.title = item.querySelector("span").textContent; });
+  try { localStorage.setItem("edgemouse-sidebar-collapsed", String(collapsed)); } catch { /* Optional local UI preference. */ }
+}
+try { setSidebarCollapsed(localStorage.getItem("edgemouse-sidebar-collapsed") === "true"); } catch { setSidebarCollapsed(false); }
+sidebarToggle.addEventListener("click", () => setSidebarCollapsed(sidebarToggle.getAttribute("aria-expanded") === "true"));
 
 document.querySelectorAll("[data-app-version]").forEach((element) => {
   element.textContent = appVersion;
@@ -107,8 +122,8 @@ const inputProfileMeta = {
 
 let activeInputProfile = "mac-to-windows";
 let overviewInputProfile = "mac-to-windows";
-let localOutgoingProfile = /Windows/i.test(navigator.userAgent) ? "windows-to-mac" : "mac-to-windows";
 let inputSettingsDirty = false;
+const inputDirtyFields = { "mac-to-windows": new Set(), "windows-to-mac": new Set() };
 const smoothingRange = document.querySelector("#pointer-smoothing");
 const smoothingOutput = document.querySelector('output[for="pointer-smoothing"]');
 const inputSaveStatus = document.querySelector(".input-save-status");
@@ -124,7 +139,8 @@ function setToggleState(toggle, enabled) {
   toggle.setAttribute("aria-checked", String(enabled));
 }
 
-function markInputSettingsDirty() {
+function markInputSettingsDirty(field, profile = activeInputProfile) {
+  if (field) inputDirtyFields[profile].add(field);
   inputSettingsDirty = true;
   inputSaveStatus.textContent = "有尚未保存的输入设置";
   inputSaveStatus.classList.add("is-dirty");
@@ -140,10 +156,6 @@ function syncOverviewInputSettings() {
 function renderInputProfile() {
   const profile = inputProfiles[activeInputProfile];
   const meta = inputProfileMeta[activeInputProfile];
-  const outgoing = activeInputProfile === localOutgoingProfile;
-  const locallyOwnedSettings = new Set(outgoing
-    ? ["horizontal", "vertical", "keyboard", "dragLock"]
-    : ["smoothing", "reclaim"]);
   document.querySelectorAll(".input-profile-button").forEach((button) => {
     const selected = button.dataset.profile === activeInputProfile;
     button.classList.toggle("is-selected", selected);
@@ -152,13 +164,14 @@ function renderInputProfile() {
   document.querySelectorAll("[data-input-setting]").forEach((toggle) => {
     const key = toggle.dataset.inputSetting;
     setToggleState(toggle, profile[key]);
-    toggle.disabled = !locallyOwnedSettings.has(key);
-    toggle.title = toggle.disabled ? "此项由另一台电脑负责，请在另一端的 EdgeMouse 中设置" : "";
+    toggle.disabled = false;
+    toggle.setAttribute("aria-label", toggle.closest(".setting-row").querySelector("strong").textContent);
+    toggle.title = "保存后自动同步到另一台电脑";
   });
   document.querySelector('[data-input-description="horizontal"]').textContent = meta.horizontalDescription;
   smoothingRange.value = String(profile.smoothing);
-  smoothingRange.disabled = !locallyOwnedSettings.has("smoothing");
-  smoothingRange.title = smoothingRange.disabled ? "指针平滑由被控制的电脑负责，请在另一端设置" : "";
+  smoothingRange.disabled = false;
+  smoothingRange.title = "保存后自动同步到另一台电脑";
   smoothingOutput.textContent = smoothingLabel(profile.smoothing);
   document.querySelectorAll("[data-map-source]").forEach((source) => {
     source.textContent = meta.sources[source.dataset.mapSource];
@@ -174,9 +187,7 @@ function renderInputProfile() {
     button.classList.toggle("is-selected", button.dataset.value === profile.trigger);
   });
   if (!inputSettingsDirty) {
-    inputSaveStatus.textContent = outgoing
-      ? "本页可保存这台电脑发送的滚轮、键盘与拖拽设置；指针平滑和抢回请在另一端设置"
-      : "本页可保存这台电脑接收的指针平滑与抢回设置；滚轮和键盘请在另一端设置";
+    inputSaveStatus.textContent = "任意一端修改并保存即可同步；两个控制方向独立保存";
     inputSaveStatus.classList.remove("is-dirty");
   }
 }
@@ -191,7 +202,7 @@ document.querySelectorAll(".input-profile-button").forEach((button) => {
 document.querySelectorAll("[data-input-setting]").forEach((toggle) => {
   toggle.addEventListener("click", () => {
     inputProfiles[activeInputProfile][toggle.dataset.inputSetting] = toggle.classList.contains("is-on");
-    markInputSettingsDirty();
+    markInputSettingsDirty(toggle.dataset.inputSetting);
     syncOverviewInputSettings();
     if (toggle.dataset.inputSetting === "keyboard") renderInputProfile();
   });
@@ -200,7 +211,7 @@ document.querySelectorAll("[data-input-setting]").forEach((toggle) => {
 document.querySelectorAll("[data-overview-setting]").forEach((toggle) => {
   toggle.addEventListener("click", () => {
     inputProfiles[overviewInputProfile][toggle.dataset.overviewSetting] = toggle.classList.contains("is-on");
-    markInputSettingsDirty();
+    markInputSettingsDirty(toggle.dataset.overviewSetting, overviewInputProfile);
     document.querySelector(".overview-save-status").textContent = "滚轮方向已修改，点击保存后生效";
     if (activeInputProfile === overviewInputProfile) renderInputProfile();
   });
@@ -209,7 +220,7 @@ document.querySelectorAll("[data-overview-setting]").forEach((toggle) => {
 smoothingRange.addEventListener("input", () => {
   inputProfiles[activeInputProfile].smoothing = Number(smoothingRange.value);
   smoothingOutput.textContent = smoothingLabel(Number(smoothingRange.value));
-  markInputSettingsDirty();
+  markInputSettingsDirty("smoothing");
 });
 
 document.querySelectorAll("[data-input-map]").forEach((select) => {
@@ -252,26 +263,22 @@ window.EdgeMouseInputSettings = {
   getOverviewProfile() {
     return overviewInputProfile;
   },
-  setLocalPlatform(platform) {
-    localOutgoingProfile = platform === "windows" ? "windows-to-mac" : "mac-to-windows";
-    if (!inputSettingsDirty) renderInputProfile();
-  },
+  getDirtyFields(name) { return [...inputDirtyFields[name]]; },
+  isDirty() { return inputSettingsDirty; },
   applyLocalProfile(name, settings) {
     const profile = inputProfiles[name];
-    if (!profile || inputSettingsDirty) return;
-    if (typeof settings.horizontal === "boolean") profile.horizontal = settings.horizontal;
-    if (typeof settings.vertical === "boolean") profile.vertical = settings.vertical;
-    if (typeof settings.smoothing === "number") profile.smoothing = settings.smoothing;
-    if (typeof settings.keyboard === "boolean") profile.keyboard = settings.keyboard;
-    if (typeof settings.reclaim === "boolean") profile.reclaim = settings.reclaim;
-    if (typeof settings.dragLock === "boolean") profile.dragLock = settings.dragLock;
+    if (!profile) return;
+    for (const key of ["horizontal", "vertical", "smoothing", "keyboard", "reclaim", "dragLock"]) {
+      if (!inputDirtyFields[name].has(key) && typeof settings[key] === (key === "smoothing" ? "number" : "boolean")) profile[key] = settings[key];
+    }
     if (activeInputProfile === name) renderInputProfile();
     syncOverviewInputSettings();
   },
-  markSaved(message) {
-    inputSettingsDirty = false;
+  markSaved(message, name = activeInputProfile, fields = [...inputDirtyFields[name]]) {
+    fields.forEach((field) => inputDirtyFields[name].delete(field));
+    inputSettingsDirty = Object.values(inputDirtyFields).some((fields) => fields.size > 0);
     inputSaveStatus.textContent = message;
-    inputSaveStatus.classList.remove("is-dirty");
+    inputSaveStatus.classList.toggle("is-dirty", inputSettingsDirty);
   },
 };
 

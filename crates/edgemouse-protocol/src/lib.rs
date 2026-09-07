@@ -17,8 +17,33 @@ pub const PROTOCOL_VERSION: u16 = 7;
 pub const HEADER_LEN: usize = 12;
 pub const MAX_FRAME_LEN: usize = 64 * 1024;
 pub const MAX_DISPLAY_COUNT: usize = 32;
+pub const CAPABILITY_SETTINGS_SYNC: u32 = 1 << 2;
+pub const SETTINGS_COUNT: usize = 15;
 pub const MOUSE_DATAGRAM_FRAME_LEN: usize = HEADER_LEN + 6 * std::mem::size_of::<u64>();
 const MAGIC: [u8; 4] = *b"EMOU";
+
+/// Bounded, per-field logical revisions. No paths, credentials or arbitrary
+/// configuration text are accepted over this optional protocol extension.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettingEntry {
+    pub key: u8,
+    pub revision: u64,
+    pub author: NodeId,
+    pub value: f64,
+}
+
+pub fn valid_setting(key: u8, value: f64) -> bool {
+    if !value.is_finite() {
+        return false;
+    }
+    match key {
+        0 => (0.0..=3.0).contains(&value) && value.fract() == 0.0,
+        1 => (0.0..=10000.0).contains(&value),
+        5 | 11 => (0.0..=100.0).contains(&value) && value.fract() == 0.0,
+        2..=14 => value == 0.0 || value == 1.0,
+        _ => false,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScreenInfo {
@@ -65,6 +90,17 @@ pub enum WireMessage {
     LayoutUpdateAck {
         request_id: u64,
     },
+    SettingsUpdate {
+        request_id: u64,
+        entries: Vec<SettingEntry>,
+    },
+    SettingsUpdateAck {
+        request_id: u64,
+    },
+    /// A coordinated reload, distinct from connection loss. Even with automatic
+    /// reconnect disabled, applying settings must preserve the active pairing.
+    SettingsReconnect,
+    SettingsReconnectAck,
     /// An unreliable absolute movement update. `after_sequence` identifies the
     /// newest reliable mouse event that must be applied before this position.
     MouseDatagram {
@@ -230,6 +266,27 @@ pub fn encode_frame(message: &WireMessage) -> Result<Vec<u8>, EncodeError> {
             payload.push(encode_edge(*peer_on));
         }
         WireMessage::LayoutUpdateAck { request_id } => put_u64(&mut payload, *request_id),
+        WireMessage::SettingsUpdate {
+            request_id,
+            entries,
+        } => {
+            if entries.len() > SETTINGS_COUNT {
+                return Err(EncodeError::FrameTooLarge);
+            }
+            put_u64(&mut payload, *request_id);
+            payload.push(entries.len() as u8);
+            for entry in entries {
+                if !valid_setting(entry.key, entry.value) {
+                    return Err(EncodeError::NonFiniteNumber);
+                }
+                payload.push(entry.key);
+                put_u64(&mut payload, entry.revision);
+                put_u128(&mut payload, entry.author.0);
+                put_f64(&mut payload, entry.value);
+            }
+        }
+        WireMessage::SettingsUpdateAck { request_id } => put_u64(&mut payload, *request_id),
+        WireMessage::SettingsReconnect | WireMessage::SettingsReconnectAck => {}
         WireMessage::MouseDatagram {
             session_id,
             after_sequence,
@@ -326,6 +383,37 @@ pub fn decode_frame(frame: &[u8]) -> Result<WireMessage, DecodeError> {
         15 => WireMessage::LayoutUpdateAck {
             request_id: payload.u64()?,
         },
+        16 => {
+            let request_id = payload.u64()?;
+            let count = usize::from(payload.u8()?);
+            if count > SETTINGS_COUNT {
+                return Err(DecodeError::InvalidLength);
+            }
+            let mut entries = Vec::with_capacity(count);
+            let mut seen = [false; SETTINGS_COUNT];
+            for _ in 0..count {
+                let entry = SettingEntry {
+                    key: payload.u8()?,
+                    revision: payload.u64()?,
+                    author: NodeId(payload.u128()?),
+                    value: payload.f64()?,
+                };
+                if !valid_setting(entry.key, entry.value) || seen[usize::from(entry.key)] {
+                    return Err(DecodeError::InvalidEnum);
+                }
+                seen[usize::from(entry.key)] = true;
+                entries.push(entry);
+            }
+            WireMessage::SettingsUpdate {
+                request_id,
+                entries,
+            }
+        }
+        17 => WireMessage::SettingsUpdateAck {
+            request_id: payload.u64()?,
+        },
+        18 => WireMessage::SettingsReconnect,
+        19 => WireMessage::SettingsReconnectAck,
         other => return Err(DecodeError::InvalidTag(other)),
     };
     if !payload.is_empty() {
@@ -370,6 +458,10 @@ fn tag_for(message: &WireMessage) -> u8 {
         WireMessage::ControlReclaimAck { .. } => 13,
         WireMessage::LayoutUpdate { .. } => 14,
         WireMessage::LayoutUpdateAck { .. } => 15,
+        WireMessage::SettingsUpdate { .. } => 16,
+        WireMessage::SettingsUpdateAck { .. } => 17,
+        WireMessage::SettingsReconnect => 18,
+        WireMessage::SettingsReconnectAck => 19,
         WireMessage::Heartbeat { .. } => 8,
         WireMessage::Goodbye { .. } => 9,
     }
@@ -685,6 +777,39 @@ mod tests {
         let encoded = encode_frame(&message).unwrap();
         assert_eq!(expected_frame_len(&encoded).unwrap(), Some(encoded.len()));
         assert_eq!(decode_frame(&encoded).unwrap(), message);
+    }
+
+    #[test]
+    fn shared_settings_extension_round_trips_and_rejects_bad_fields() {
+        round_trip(WireMessage::SettingsReconnect);
+        round_trip(WireMessage::SettingsReconnectAck);
+        let entry = SettingEntry {
+            key: 5,
+            revision: 1,
+            author: NodeId(42),
+            value: 63.0,
+        };
+        round_trip(WireMessage::SettingsUpdate {
+            request_id: 7,
+            entries: vec![entry.clone()],
+        });
+        round_trip(WireMessage::SettingsUpdateAck { request_id: 7 });
+        let duplicate = encode_frame(&WireMessage::SettingsUpdate {
+            request_id: 7,
+            entries: vec![entry.clone(), entry.clone()],
+        })
+        .unwrap();
+        assert!(decode_frame(&duplicate).is_err());
+        let mut corrupt = encode_frame(&WireMessage::SettingsUpdate {
+            request_id: 7,
+            entries: vec![entry],
+        })
+        .unwrap();
+        corrupt[HEADER_LEN + 9] = 255;
+        assert!(decode_frame(&corrupt).is_err());
+        for (key, value) in [(2, 0.5), (5, 101.0), (11, f64::NAN), (15, 1.0), (1, -1.0)] {
+            assert!(!valid_setting(key, value));
+        }
     }
 
     #[test]

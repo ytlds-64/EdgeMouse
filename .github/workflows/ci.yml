@@ -50,7 +50,8 @@ jobs:
             'scripts/run-windows-with-log.ps1',
             'scripts/update-build-run-windows.ps1',
             'scripts/build-run-desktop-windows.ps1',
-            'scripts/manage-autostart-windows.ps1'
+            'scripts/manage-autostart-windows.ps1',
+            'scripts/test-windows-installer.ps1'
           )
           foreach ($scriptPath in $scriptPaths) {
             $tokens = $null
@@ -86,6 +87,21 @@ jobs:
 
       - name: Build release executables
         run: cargo build --release -p edgemouse-agent -p edgemouse-desktop
+
+      - name: Build Windows installer for smoke tests
+        if: runner.os == 'Windows'
+        uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: crates/edgemouse-desktop
+          args: --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Verify Windows installer language and component replacement
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem 'target/release/bundle/nsis/*-setup.exe' | Select-Object -First 1
+          $version = (Select-String '^version = "(.+)"' Cargo.toml).Matches.Groups[1].Value
+          ./scripts/test-windows-installer.ps1 -Installer $installer.FullName -Version $version
 
       - name: Upload runnable package
         uses: actions/upload-artifact@v4

@@ -146,6 +146,7 @@ pub struct PeerLink {
     peer_node: NodeId,
     peer_name: String,
     peer_screen: ScreenInfo,
+    peer_capabilities: u32,
 }
 
 impl PeerLink {
@@ -196,6 +197,7 @@ impl PeerLink {
             peer_node,
             peer_name: String::new(),
             peer_screen: local_screen.clone(),
+            peer_capabilities: 0,
         };
         if link.guard.connection.max_datagram_size().is_none() {
             return Err(TransportError::new(
@@ -220,6 +222,10 @@ impl PeerLink {
     #[must_use]
     pub fn peer_screen(&self) -> &ScreenInfo {
         &self.peer_screen
+    }
+
+    pub fn supports_settings_sync(&self) -> bool {
+        self.peer_capabilities & edgemouse_protocol::CAPABILITY_SETTINGS_SYNC != 0
     }
 
     pub fn local_address(&self) -> Result<SocketAddr, TransportError> {
@@ -272,7 +278,7 @@ impl PeerLink {
         self.send(&WireMessage::Hello {
             node: local_node,
             name: local_name.to_owned(),
-            capabilities: REQUIRED_CAPABILITIES,
+            capabilities: REQUIRED_CAPABILITIES | edgemouse_protocol::CAPABILITY_SETTINGS_SYNC,
             screen: local_screen,
         })
         .await?;
@@ -287,6 +293,7 @@ impl PeerLink {
             {
                 self.peer_name = name;
                 self.peer_screen = screen;
+                self.peer_capabilities = capabilities;
                 Ok(())
             }
             WireMessage::Hello {
@@ -651,6 +658,26 @@ mod tests {
         assert_eq!(second_link.peer_name(), "first");
         assert_eq!(first_link.peer_screen(), &test_screen(2));
         assert_eq!(second_link.peer_screen(), &test_screen(1));
+        assert!(first_link.supports_settings_sync() && second_link.supports_settings_sync());
+        let update = WireMessage::SettingsUpdate {
+            request_id: 8,
+            entries: vec![edgemouse_protocol::SettingEntry {
+                key: 11,
+                revision: 2,
+                author: second_link.peer_node(),
+                value: 73.0,
+            }],
+        };
+        first_link.send(&update).await.unwrap();
+        assert_eq!(second_link.receive().await.unwrap(), update);
+        second_link
+            .send(&WireMessage::SettingsUpdateAck { request_id: 8 })
+            .await
+            .unwrap();
+        assert_eq!(
+            first_link.receive().await.unwrap(),
+            WireMessage::SettingsUpdateAck { request_id: 8 }
+        );
 
         let heartbeat = WireMessage::Heartbeat {
             session_id: 42,

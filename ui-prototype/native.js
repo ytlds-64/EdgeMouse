@@ -482,7 +482,6 @@
       ? "windows-to-mac"
       : "mac-to-windows";
     const incomingInputProfile = windowsLocal ? "mac-to-windows" : "windows-to-mac";
-    window.EdgeMouseInputSettings?.setLocalPlatform(windowsLocal ? "windows" : "macos");
     window.EdgeMouseInputSettings?.setOverviewProfile(localInputProfile);
     window.EdgeMouseInputSettings?.applyLocalProfile(localInputProfile, {
       horizontal: snapshot.config.reverseScrollHorizontal,
@@ -494,6 +493,22 @@
       smoothing: snapshot.config.pointerSmoothing,
       reclaim: snapshot.config.reclaimEnabled,
     });
+    const shared = snapshot.config.sharedSettings;
+    if (shared) {
+      for (const [name, base] of [["mac-to-windows", 3], ["windows-to-mac", 9]]) {
+        const settings = {};
+        ["horizontal", "vertical", "smoothing", "keyboard", "reclaim", "dragLock"].forEach((key, offset) => {
+          const value = shared.values[base + offset];
+          if (typeof value === "number") settings[key] = key === "smoothing" ? value : value !== 0;
+        });
+        window.EdgeMouseInputSettings?.applyLocalProfile(name, settings);
+      }
+      if (!window.EdgeMouseInputSettings?.isDirty()) {
+        setText(".input-save-status", shared.pending
+          ? "设置已保存在本机，等待另一端同步（两端需更新到 0.6.6 或更高版本）"
+          : "输入设置已同步；在任意一端修改并保存即可");
+      }
+    }
     // The About and Update pages describe the desktop application itself. The
     // background agent can temporarily be an older version during an upgrade,
     // so using its version here makes the title bar and About page disagree.
@@ -575,8 +590,10 @@
     if (configStatus) {
       configStatus.textContent = window.EdgeMouseLayout?.isDirty()
         ? "尚未保存"
+        : snapshot.config.layoutSyncPending
+          ? connected ? "正在同步布局" : "等待连接后自动同步"
         : configValid && connected
-          ? "两端一致"
+          ? "已连接 · 布局已保存"
           : configValid
             ? "等待连接同步"
             : "配置读取失败";
@@ -585,7 +602,9 @@
 
     const layoutSaveStatus = document.querySelector(".layout-save-status");
     if (layoutSaveStatus && !window.EdgeMouseLayout?.isDirty() && connected) {
-      layoutSaveStatus.textContent = "布局已保存，两端配置一致";
+      layoutSaveStatus.textContent = snapshot.config.layoutSyncPending
+        ? "布局已保存，正在等待另一端确认"
+        : "布局已保存；在任意一端修改并保存即可自动同步";
     }
 
     updateDeviceCards(snapshot);
@@ -1165,6 +1184,8 @@
     const profile = settingsApi?.getActiveProfile();
     const settings = settingsApi?.getProfile(profile);
     if (!settings) return;
+    const fields = settingsApi.getDirtyFields(profile);
+    if (!fields.length) return;
     button.disabled = true;
     try {
       const result = await invoke("save_input_settings", {
@@ -1175,14 +1196,15 @@
         keyboardEnabled: Boolean(settings.keyboard),
         reclaimEnabled: Boolean(settings.reclaim),
         dragLock: Boolean(settings.dragLock),
+        fields,
       });
       const message = result.warning ?? (result.restarted ? "输入设置已保存，后台服务已重新连接" : "输入设置已保存");
-      settingsApi.markSaved(message);
+      settingsApi.markSaved(message, profile, fields);
       window.showEdgeMouseToast?.(message);
       await refreshSnapshot();
     } catch (error) {
-      console.error("Unable to save scroll settings", error);
-      window.showEdgeMouseToast?.(`无法保存滚动方向：${error}`);
+      console.error("Unable to save input settings", error);
+      window.showEdgeMouseToast?.(`无法保存输入设置：${error}`);
     } finally {
       button.disabled = false;
     }
@@ -1198,6 +1220,8 @@
       window.showEdgeMouseToast?.("正在读取本机配置，请稍后重试");
       return;
     }
+    const fields = settingsApi.getDirtyFields(profile).filter((field) => ["horizontal", "vertical"].includes(field));
+    if (!fields.length) return;
     button.disabled = true;
     try {
       const result = await invoke("save_input_settings", {
@@ -1208,9 +1232,10 @@
         keyboardEnabled: Boolean(settings.keyboard),
         reclaimEnabled: Boolean(settings.reclaim),
         dragLock: Boolean(settings.dragLock),
+        fields,
       });
       const message = result.warning ?? (result.restarted ? "滚轮方向已保存，后台服务已重新连接" : "滚轮方向已保存");
-      settingsApi.markSaved(message);
+      settingsApi.markSaved(message, profile, fields);
       setText(".overview-save-status", message);
       window.showEdgeMouseToast?.(message);
       await refreshSnapshot();
