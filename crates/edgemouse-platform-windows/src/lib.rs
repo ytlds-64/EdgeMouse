@@ -607,7 +607,7 @@ impl WindowsMouseCapture {
     fn discard_queued_movements(&mut self) -> Result<(), PlatformError> {
         loop {
             match self.receiver.try_recv() {
-                Ok(PhysicalMouseEvent::Move { .. }) => {}
+                Ok(PhysicalMouseEvent::Move { .. } | PhysicalMouseEvent::LocalMove { .. }) => {}
                 Ok(event) => self.deferred_events.push_back(event),
                 Err(mpsc::TryRecvError::Empty) => return Ok(()),
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -1566,6 +1566,10 @@ fn hook_event(
             });
             if !remote {
                 *last = Some(point);
+                return Some(PhysicalMouseEvent::LocalMove {
+                    position: point,
+                    movement,
+                });
             }
             Some(PhysicalMouseEvent::Move { movement })
         }
@@ -2097,7 +2101,8 @@ mod tests {
 
         assert_eq!(
             hook_event(WM_MOUSEMOVE, &data, &reference, false, 1.0),
-            Some(PhysicalMouseEvent::Move {
+            Some(PhysicalMouseEvent::LocalMove {
+                position: Point::new(1_920.0, 500.0),
                 movement: Vector::new(1.0, 0.0),
             })
         );

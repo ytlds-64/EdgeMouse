@@ -1994,7 +1994,17 @@ unsafe extern "C" fn event_tap_callback(
         return event;
     }
 
-    if let Some(physical) = physical_event(event_type, event) {
+    let suppressed = state.suppress.load(Ordering::Acquire);
+    if let Some(mut physical) = physical_event(event_type, event) {
+        if !suppressed && let PhysicalMouseEvent::Move { movement } = physical {
+            // SAFETY: event is a live CGEventRef. Its global display location
+            // uses the same coordinate space as CGDisplayBounds.
+            let position = unsafe { CGEventGetLocation(event) };
+            physical = PhysicalMouseEvent::LocalMove {
+                position: Point::new(position.x, position.y),
+                movement,
+            };
+        }
         match state.sender.try_send(physical) {
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(_)) => {
@@ -2004,7 +2014,7 @@ unsafe extern "C" fn event_tap_callback(
             }
             Err(mpsc::TrySendError::Disconnected(_)) => return event,
         }
-        if state.suppress.load(Ordering::Acquire) {
+        if suppressed {
             return ptr::null_mut();
         }
     }

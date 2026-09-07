@@ -141,6 +141,10 @@ impl Topology {
         self.screens.get(&id)
     }
 
+    pub(crate) fn require_bounds(&self, id: ScreenId) -> Result<Rect, TopologyError> {
+        Ok(self.require_screen(id)?.bounds)
+    }
+
     #[must_use]
     pub fn portal(&self, screen: ScreenId, edge: Edge) -> Option<Portal> {
         self.portals.get(&(screen, edge)).copied()

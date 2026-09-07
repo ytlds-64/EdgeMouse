@@ -141,6 +141,9 @@ impl Session {
         }
 
         match event {
+            PhysicalMouseEvent::LocalMove { position, movement } => {
+                self.handle_local_motion(position, movement, now_ms)
+            }
             PhysicalMouseEvent::Move { movement } => self.handle_motion(movement, now_ms),
             PhysicalMouseEvent::Button { button, state } => Ok(self.handle_button(button, state)),
             PhysicalMouseEvent::Wheel {
@@ -216,6 +219,58 @@ impl Session {
         self.last_peer_activity_ms = None;
         self.pressed_buttons.clear();
         Ok(())
+    }
+
+    fn handle_local_motion(
+        &mut self,
+        position: Point,
+        movement: crate::Vector,
+        now_ms: u64,
+    ) -> Result<InputResult, SessionError> {
+        // An OS warp, clipping at a display boundary, or acceleration can make
+        // accumulated deltas disagree with the visible cursor. Re-anchor every
+        // local event, without clearing held buttons or the handback guard.
+        if self.state != ControlState::Local {
+            return Ok(InputResult::suppress(Vec::new()));
+        }
+        if !position.is_finite() || !movement.is_finite() {
+            return Err(SessionError::Topology(TopologyError::NonFiniteMovement));
+        }
+        let bounds = self.topology.require_bounds(self.current_screen)?;
+        self.pointer = bounds.clamp_inside(position, 1.0);
+        self.update_entry_guard();
+
+        // Native cursors stop on the last pixel. Only outward motion at an
+        // actual desktop edge may attempt a portal; a large delta or an old
+        // routing position must never cause a crossing halfway down a portrait
+        // screen. Remote motion continues to use unbounded relative deltas.
+        let at_edge = [
+            (
+                Edge::Left,
+                position.x <= bounds.left() + 1.0 && movement.dx < 0.0,
+            ),
+            (
+                Edge::Right,
+                position.x >= bounds.right() - 1.0 && movement.dx > 0.0,
+            ),
+            (
+                Edge::Top,
+                position.y <= bounds.top() + 1.0 && movement.dy < 0.0,
+            ),
+            (
+                Edge::Bottom,
+                position.y >= bounds.bottom() - 1.0 && movement.dy > 0.0,
+            ),
+        ]
+        .into_iter()
+        .any(|(edge, outward)| {
+            outward && self.topology.portal(self.current_screen, edge).is_some()
+        });
+        if at_edge {
+            self.handle_motion(movement, now_ms)
+        } else {
+            Ok(InputResult::pass_through())
+        }
     }
 
     fn handle_motion(
@@ -830,5 +885,194 @@ mod tests {
             session.synchronize_local_pointer(LOCAL_SCREEN, Point::new(25.0, 75.0)),
             Err(SessionError::CannotSynchronizeWhileRemote)
         ));
+    }
+
+    fn portrait_session(edge: Edge) -> Session {
+        let mut topology = Topology::default();
+        for (id, node, bounds, scale) in [
+            (
+                LOCAL_SCREEN,
+                LOCAL,
+                Rect::new(Point::new(-3840.0, 0.0), 6000.0, 3840.0).unwrap(),
+                2.0,
+            ),
+            (
+                REMOTE_SCREEN,
+                REMOTE,
+                Rect::new(Point::new(-253.0, -1080.0), 1920.0, 2036.0).unwrap(),
+                1.0,
+            ),
+        ] {
+            topology
+                .add_screen(Screen::new(id, node, "desktop", bounds, scale).unwrap())
+                .unwrap();
+        }
+        topology
+            .connect_bidirectional(LOCAL_SCREEN, edge, REMOTE_SCREEN)
+            .unwrap();
+        Session::new(
+            LOCAL,
+            topology,
+            LOCAL_SCREEN,
+            Point::new(1000.0, 3830.0),
+            SessionConfig::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn portrait_lower_half_remains_local_despite_stale_routing_position() {
+        let mut session = portrait_session(Edge::Bottom);
+        // The visible cursor was moved/clipped independently of the old routing
+        // position. Even a large physical delta cannot cross at 1/3 height.
+        for y in [1280.0, 1920.0, 2160.0, 2800.0, 3600.0, 3838.0] {
+            let result = session
+                .handle_input(
+                    PhysicalMouseEvent::LocalMove {
+                        position: Point::new(1000.0, y),
+                        movement: Vector::new(0.0, 1500.0),
+                    },
+                    10,
+                )
+                .unwrap();
+            assert_eq!(session.state(), ControlState::Local);
+            assert_eq!(session.pointer(), Point::new(1000.0, y));
+            assert!(result.effects.is_empty());
+        }
+        let result = session
+            .handle_input(
+                PhysicalMouseEvent::LocalMove {
+                    position: Point::new(1000.0, 3839.0),
+                    movement: Vector::new(0.0, 3.0),
+                },
+                20,
+            )
+            .unwrap();
+        assert_eq!(session.state(), ControlState::Remote { peer: REMOTE });
+        assert!(
+            result
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::CapturePointer { .. }))
+        );
+    }
+
+    #[test]
+    fn real_local_edges_work_in_all_directions_with_negative_origins() {
+        for (edge, position, movement) in [
+            (
+                Edge::Left,
+                Point::new(-3840.0, 1200.0),
+                Vector::new(-3.0, 0.0),
+            ),
+            (
+                Edge::Right,
+                Point::new(2159.0, 1200.0),
+                Vector::new(3.0, 0.0),
+            ),
+            (Edge::Top, Point::new(1000.0, 0.0), Vector::new(0.0, -3.0)),
+            (
+                Edge::Bottom,
+                Point::new(1000.0, 3839.0),
+                Vector::new(0.0, 3.0),
+            ),
+        ] {
+            let mut session = portrait_session(edge);
+            // Tangential/inward motion at the boundary must not cross.
+            session
+                .handle_input(
+                    PhysicalMouseEvent::LocalMove {
+                        position,
+                        movement: movement.scaled(-1.0),
+                    },
+                    1,
+                )
+                .unwrap();
+            assert_eq!(session.state(), ControlState::Local);
+            session
+                .handle_input(PhysicalMouseEvent::LocalMove { position, movement }, 2)
+                .unwrap();
+            assert_eq!(session.state(), ControlState::Remote { peer: REMOTE });
+            let remote_pointer = session.pointer();
+            session
+                .handle_input(PhysicalMouseEvent::LocalMove { position, movement }, 3)
+                .unwrap();
+            assert_eq!(
+                session.pointer(),
+                remote_pointer,
+                "queued local motion must not move the remote cursor"
+            );
+        }
+    }
+
+    #[test]
+    fn real_local_coordinates_preserve_drag_lock() {
+        let mut session = portrait_session(Edge::Bottom);
+        session
+            .handle_input(
+                PhysicalMouseEvent::Button {
+                    button: MouseButton::Primary,
+                    state: ButtonState::Pressed,
+                },
+                1,
+            )
+            .unwrap();
+        let motion = PhysicalMouseEvent::LocalMove {
+            position: Point::new(1000.0, 3839.0),
+            movement: Vector::new(0.0, 3.0),
+        };
+        session.handle_input(motion, 2).unwrap();
+        assert_eq!(session.state(), ControlState::Local);
+        session
+            .handle_input(
+                PhysicalMouseEvent::Button {
+                    button: MouseButton::Primary,
+                    state: ButtonState::Released,
+                },
+                3,
+            )
+            .unwrap();
+        session.handle_input(motion, 4).unwrap();
+        assert_eq!(session.state(), ControlState::Remote { peer: REMOTE });
+    }
+
+    #[test]
+    fn real_local_coordinates_preserve_handback_hysteresis() {
+        let mut session = portrait_session(Edge::Bottom);
+        let edge_motion = PhysicalMouseEvent::LocalMove {
+            position: Point::new(1000.0, 3839.0),
+            movement: Vector::new(0.0, 3.0),
+        };
+        session.handle_input(edge_motion, 1).unwrap();
+        session
+            .handle_input(
+                PhysicalMouseEvent::Move {
+                    movement: Vector::new(0.0, 30.0),
+                },
+                2,
+            )
+            .unwrap();
+        session
+            .handle_input(
+                PhysicalMouseEvent::Move {
+                    movement: Vector::new(0.0, -50.0),
+                },
+                3,
+            )
+            .unwrap();
+        assert_eq!(session.state(), ControlState::Local);
+        session.handle_input(edge_motion, 4).unwrap();
+        assert_eq!(session.state(), ControlState::Local);
+        session
+            .handle_input(
+                PhysicalMouseEvent::LocalMove {
+                    position: Point::new(1000.0, 3750.0),
+                    movement: Vector::new(0.0, -80.0),
+                },
+                5,
+            )
+            .unwrap();
+        session.handle_input(edge_motion, 6).unwrap();
+        assert_eq!(session.state(), ControlState::Remote { peer: REMOTE });
     }
 }

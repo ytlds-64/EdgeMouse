@@ -123,6 +123,12 @@ pub struct RoutedKeyboardEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PhysicalMouseEvent {
+    /// A pass-through OS event with its authoritative desktop position. Never
+    /// integrate this position into an outgoing remote-control session.
+    LocalMove {
+        position: Point,
+        movement: Vector,
+    },
     Move {
         movement: Vector,
     },

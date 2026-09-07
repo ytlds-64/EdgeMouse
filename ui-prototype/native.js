@@ -75,7 +75,7 @@
 
   function setServiceActionPending(pending) {
     serviceActionPending = pending;
-    document.querySelectorAll('.overview-connect-button, .reconnect-button, [data-service-toggle]').forEach((control) => {
+    document.querySelectorAll('.overview-connect-button, .overview-stop-button, .reconnect-button, [data-service-toggle]').forEach((control) => {
       control.disabled = pending;
       control.setAttribute('aria-busy', String(pending));
     });
@@ -539,6 +539,11 @@
     }
 
     if (!serviceActionPending) {
+      const stopButton = document.querySelector(".overview-stop-button");
+      if (stopButton) {
+        stopButton.disabled = !running;
+        stopButton.textContent = "停止连接";
+      }
       const serviceToggle = document.querySelector("[data-service-toggle]");
       if (serviceToggle) {
         serviceToggle.classList.toggle("is-on", running);
@@ -1354,6 +1359,23 @@
   document.querySelector(".overview-connect-button")?.addEventListener("click", async (event) => {
     event.stopImmediatePropagation();
     await reconnectFrom(event.currentTarget, true);
+  }, true);
+
+  document.querySelector(".overview-stop-button")?.addEventListener("click", async (event) => {
+    event.stopImmediatePropagation();
+    if (serviceActionPending || !latestSnapshot?.agent?.running) return;
+    setServiceActionPending(true);
+    event.currentTarget.textContent = "正在停止…";
+    setText(".service-state-label", "正在停止…");
+    try {
+      const result = await invoke("set_agent_running", { running: false });
+      window.showEdgeMouseToast?.(result.message);
+    } catch (error) {
+      window.showEdgeMouseToast?.(`无法停止 EdgeMouse：${error}`);
+    } finally {
+      setServiceActionPending(false);
+      await refreshSnapshot();
+    }
   }, true);
 
   document.querySelector(".layout-save-button")?.addEventListener("click", async (event) => {

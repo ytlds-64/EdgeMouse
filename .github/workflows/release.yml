@@ -49,15 +49,15 @@ jobs:
           tagName: v__VERSION__
           releaseName: EdgeMouse __VERSION__
           releaseBody: |
-            EdgeMouse 0.6.7
+            EdgeMouse 0.6.8
 
-            - 修复 macOS 连接成功后因输入权限或捕获初始化错误而退出后台服务的问题。
-            - 未获辅助功能权限时保持服务开启并显示“等待授权”；系统认可授权后自动继续连接。
-            - 连接、开关与诊断恢复操作加互斥保护；启动或重连过程中重复点击不会停止当前服务。
-            - 原生输入后端准备完成后才报告“已连接”，避免仅完成 TLS 握手就误报可用。
-            - 修复诊断列表标题被挤成竖排的问题。
+            - 本机跨屏判断改用系统报告的真实鼠标坐标，修复累加位移与可见指针错位造成的提前穿越。
+            - 增加竖屏下半部分、负坐标多屏、四方向边缘、拖拽保护和返回防抖回归测试。
+            - 概览新增“停止连接”，等待授权或自动重连时也可安全停止本机服务；配对与偏好保持不变。
+            - 统一“收起侧栏”与其他导航菜单的字号、颜色和行高。
+            - 控制权切换日志记录源边缘与目标指针位置，便于继续排查具体多屏环境。
 
-            Keeps the macOS service alive while waiting for Accessibility permission or retrying native input initialization. Connection resumes when the OS reports permission granted. Serializes service operations and ignores duplicate connect requests during startup/reconnection. Reports connected only after input backends are ready, and fixes diagnostic list alignment.
+            Uses authoritative OS cursor coordinates for local edge switching, preventing accumulated motion drift from causing premature crossings. Adds regression coverage for portrait desktops, negative origins, all four edges, drag protection and handback hysteresis. Overview now offers Stop connection, including during permission waits and reconnection, without removing pairing or preferences. Unifies sidebar toggle typography and logs handoff coordinates.
 
             注意：当前 macOS 包仍使用临时签名，尚无 Developer ID 签名及 Apple 公证；跨版本更新后，系统仍可能要求重新授权。此修复不会绕过、删除或重置系统隐私权限。更新包的加密签名验证与 macOS 应用身份签名是两回事。
 

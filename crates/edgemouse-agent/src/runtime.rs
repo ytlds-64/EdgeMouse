@@ -1255,7 +1255,13 @@ fn apply_effects(
                     keyboard_capture.set_remote(true)?;
                 }
                 capture.set_mode(CaptureMode::Remote { anchor })?;
-                println!("Mouse and keyboard control handed to peer");
+                println!(
+                    "Mouse and keyboard control handed to peer; local edge point ({:.1}, {:.1}), peer pointer ({:.1}, {:.1})",
+                    anchor.x,
+                    anchor.y,
+                    session.pointer().x,
+                    session.pointer().y
+                );
             }
             Effect::ReleasePointer {
                 restore_position, ..

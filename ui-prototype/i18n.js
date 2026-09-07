@@ -48,6 +48,7 @@
     "本机服务未启动": "Local service is stopped",
     "开始连接": "Connect",
     "重新连接": "Reconnect",
+    "停止连接": "Stop connection",
     "连接中…": "Connecting…",
     "正在启动…": "Starting…",
     "正在停止…": "Stopping…",
