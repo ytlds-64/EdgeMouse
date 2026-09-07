@@ -296,7 +296,9 @@ impl Session {
                     .ok_or(SessionError::Topology(TopologyError::MissingScreen(
                         self.current_screen,
                     )))?;
-            self.pointer = screen.bounds.clamp_inside(self.pointer + movement, 1.0);
+            self.pointer = self
+                .topology
+                .clamp_pointer(screen.id, self.pointer + movement)?;
             return Ok(self.route_motion_without_transition());
         }
 

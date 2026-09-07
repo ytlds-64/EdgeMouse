@@ -26,10 +26,12 @@ function element() {
 
 async function main() {
   const overview = element(), stop = element(), reconnect = element(), toggle = element(), label = element();
+  const inputSave = element();
   const elements = new Map([
     ['.overview-connect-button', overview], ['.reconnect-button', reconnect],
     ['.overview-stop-button', stop],
     ['[data-service-toggle]', toggle], ['.service-state-label', label],
+    ['.input-save-button', inputSave],
   ]);
   const snapshot = {
     desktopVersion: 'test', agent: { running: false },
@@ -37,6 +39,8 @@ async function main() {
     platform: { operatingSystem: 'macos', permissionGranted: false },
   };
   const calls = [], errors = [], intervals = [];
+  const profiles = { 'mac-to-windows': { speed: 100 }, 'windows-to-mac': { speed: 100 } };
+  let inputDirty = [];
   let finishConnect, finishStop, failStop;
   const invoke = async (command, args) => {
     calls.push({ command, args });
@@ -55,6 +59,15 @@ async function main() {
     addEventListener() {},
   };
   const window = {
+    EdgeMouseInputSettings: {
+      setOverviewProfile() {}, getActiveProfile: () => 'mac-to-windows',
+      getProfile: (name) => profiles[name], getDirtyFields: () => inputDirty,
+      isDirty: () => inputDirty.length > 0,
+      applyLocalProfile(name, settings) {
+        for (const [key, value] of Object.entries(settings)) if (value !== undefined && !inputDirty.includes(key)) profiles[name][key] = value;
+      },
+      markSaved() { inputDirty = []; },
+    },
     __TAURI__: { core: { invoke } }, localStorage: { getItem() { return null; } },
     setInterval: (callback) => intervals.push(callback), setTimeout, clearTimeout,
     addEventListener() {},
@@ -115,6 +128,23 @@ async function main() {
   assert.ok(stop.disabled && !toggle.classList.contains('is-on'));
   assert.equal(overview.textContent, '开始连接');
   assert.deepEqual(errors, []);
+  snapshot.config.pointerSpeed = 150;
+  snapshot.config.sharedSettings = { values: { 15: 150, 16: 80 }, pending: false };
+  await intervals[0]();
+  assert.equal(profiles['mac-to-windows'].speed, 150);
+  assert.equal(profiles['windows-to-mac'].speed, 80);
+  profiles['mac-to-windows'].speed = 175;
+  inputDirty = ['speed'];
+  await intervals[0](); // Polling must not overwrite an unsaved speed edit.
+  assert.equal(profiles['mac-to-windows'].speed, 175);
+  await inputSave.click();
+  const savedInput = calls.find((call) => call.command === 'save_input_settings');
+  assert.equal(savedInput.args.pointerSpeed, 175);
+  assert.equal(savedInput.args.profile, 'mac-to-windows');
+  assert.deepEqual(savedInput.args.fields, ['speed']);
+  assert.equal(profiles['windows-to-mac'].speed, 80);
+  assert.deepEqual(errors, []);
   console.log('Native service UI: connect/stop, duplicate clicks, polling, failures, permission wait, and recovery states passed');
+  console.log('Native input UI: independent speed profiles, shared snapshots, dirty edits, and save IPC passed');
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

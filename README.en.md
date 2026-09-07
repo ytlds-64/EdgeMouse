@@ -20,7 +20,7 @@ Download the latest signed packages from
 - Windows: use the `.exe` installer. It supports Simplified Chinese and English.
 - macOS: use the universal `.dmg`, which supports both Apple silicon and Intel Macs.
 
-The current stable release is 0.6.8. Future signed releases can also be checked
+The current stable release is 0.6.9. Future signed releases can also be checked
 and installed from the Settings page in the desktop application.
 
 macOS packages currently use ad-hoc signing, without Developer ID signing or
@@ -30,10 +30,14 @@ permission granted, then continues automatically. Updater signature verification
 is separate from macOS application identity signing; no privacy permissions are
 bypassed or reset.
 
-Version 0.6.8 anchors local edge switching to actual OS cursor coordinates, preventing
-accumulated motion drift from triggering a crossing inside a portrait display. It
-also adds **Stop connection** to Overview (safely stopping the local service without
-removing pairing or preferences) and matches the sidebar toggle typography to navigation.
+Version 0.6.9 routes the pointer inside real monitor regions and maps handoffs only
+to populated outer-edge segments. This prevents virtual movement through empty
+areas beside landscape/portrait displays from diverging from the visible OS cursor.
+Input now includes **Pointer speed** (25%–300%, default 100%), independently saved
+for both directions and synchronized when both computers run 0.6.9+. Only outgoing
+remote motion is scaled; local OS speed, scrolling and keyboard input are unchanged.
+Older peers can still connect and exchange existing settings without receiving
+unsupported speed fields. Diagnostic logs include individual peer monitor geometry.
 
 After installation, complete secure pairing once from the Connection page. If
 you previously used a source or command-line build, choose **Import previous

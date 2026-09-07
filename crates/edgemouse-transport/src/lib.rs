@@ -228,6 +228,10 @@ impl PeerLink {
         self.peer_capabilities & edgemouse_protocol::CAPABILITY_SETTINGS_SYNC != 0
     }
 
+    pub fn supports_pointer_speed(&self) -> bool {
+        self.peer_capabilities & edgemouse_protocol::CAPABILITY_POINTER_SPEED != 0
+    }
+
     pub fn local_address(&self) -> Result<SocketAddr, TransportError> {
         self.guard
             .endpoint
@@ -278,7 +282,9 @@ impl PeerLink {
         self.send(&WireMessage::Hello {
             node: local_node,
             name: local_name.to_owned(),
-            capabilities: REQUIRED_CAPABILITIES | edgemouse_protocol::CAPABILITY_SETTINGS_SYNC,
+            capabilities: REQUIRED_CAPABILITIES
+                | edgemouse_protocol::CAPABILITY_SETTINGS_SYNC
+                | edgemouse_protocol::CAPABILITY_POINTER_SPEED,
             screen: local_screen,
         })
         .await?;

@@ -29,6 +29,7 @@ pub struct LoadedConfig {
     pub reverse_scroll_horizontal: bool,
     pub reverse_scroll_vertical: bool,
     pub pointer_smoothing: u8,
+    pub pointer_speed: u16,
     pub keyboard_enabled: bool,
     pub reclaim_enabled: bool,
     pub auto_reconnect: bool,
@@ -40,6 +41,7 @@ pub struct SessionPreferences {
     pub reverse_scroll_horizontal: bool,
     pub reverse_scroll_vertical: bool,
     pub pointer_smoothing: u8,
+    pub pointer_speed: u16,
     pub keyboard_enabled: bool,
     pub reclaim_enabled: bool,
     pub block_switch_while_dragging: bool,
@@ -406,6 +408,9 @@ pub fn persist_session_preferences(
     if preferences.pointer_smoothing > 100 {
         return Err("pointer smoothing must be between 0 and 100".to_owned());
     }
+    if !(25..=300).contains(&preferences.pointer_speed) {
+        return Err("pointer speed must be between 25 and 300 percent".to_owned());
+    }
     let original = fs::read_to_string(path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
     let mut updated = original.clone();
@@ -424,6 +429,7 @@ pub fn persist_session_preferences(
             preferences.pointer_smoothing.to_string(),
         ),
         ("keyboard_enabled", preferences.keyboard_enabled.to_string()),
+        ("pointer_speed", preferences.pointer_speed.to_string()),
         ("reclaim_enabled", preferences.reclaim_enabled.to_string()),
         (
             "block_switch_while_dragging",
@@ -601,6 +607,7 @@ struct RawSession {
     reverse_scroll_horizontal: bool,
     reverse_scroll_vertical: bool,
     pointer_smoothing: u8,
+    pointer_speed: u16,
     keyboard_enabled: bool,
     reclaim_enabled: bool,
     block_switch_while_dragging: bool,
@@ -617,6 +624,7 @@ impl Default for RawSession {
             reverse_scroll_horizontal: false,
             reverse_scroll_vertical: false,
             pointer_smoothing: 52,
+            pointer_speed: 100,
             keyboard_enabled: true,
             reclaim_enabled: true,
             block_switch_while_dragging: true,
@@ -667,6 +675,9 @@ impl RawConfig {
         if self.session.pointer_smoothing > 100 {
             return Err("session.pointer_smoothing must be between 0 and 100".into());
         }
+        if !(25..=300).contains(&self.session.pointer_speed) {
+            return Err("session.pointer_speed must be between 25 and 300 percent".into());
+        }
 
         Ok(LoadedConfig {
             transport,
@@ -682,6 +693,7 @@ impl RawConfig {
             reverse_scroll_horizontal: self.session.reverse_scroll_horizontal,
             reverse_scroll_vertical: self.session.reverse_scroll_vertical,
             pointer_smoothing: self.session.pointer_smoothing,
+            pointer_speed: self.session.pointer_speed,
             keyboard_enabled: self.session.keyboard_enabled,
             reclaim_enabled: self.session.reclaim_enabled,
             auto_reconnect: self.session.auto_reconnect,
@@ -770,6 +782,12 @@ impl LoadedConfig {
         let mut topology = Topology::default();
         topology.add_screen(local)?;
         topology.add_screen(remote)?;
+        if !peer.displays.is_empty() {
+            topology.set_displays(
+                peer.id,
+                peer.displays.iter().map(|display| display.bounds).collect(),
+            )?;
+        }
         topology.connect_bidirectional(self.local_screen.id, self.peer_on, self.peer_screen)?;
         Ok(topology)
     }

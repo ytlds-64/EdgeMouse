@@ -200,6 +200,7 @@ struct ConfigSnapshot {
     reverse_scroll_horizontal: Option<bool>,
     reverse_scroll_vertical: Option<bool>,
     pointer_smoothing: Option<u8>,
+    pointer_speed: Option<u16>,
     keyboard_enabled: Option<bool>,
     reclaim_enabled: Option<bool>,
     block_switch_while_dragging: Option<bool>,
@@ -527,6 +528,7 @@ async fn save_input_settings(
     reverse_horizontal: bool,
     reverse_vertical: bool,
     pointer_smoothing: u8,
+    pointer_speed: u16,
     keyboard_enabled: bool,
     reclaim_enabled: bool,
     drag_lock: bool,
@@ -549,6 +551,10 @@ async fn save_input_settings(
                 "horizontal" => Ok((base, f64::from(reverse_horizontal))),
                 "vertical" => Ok((base + 1, f64::from(reverse_vertical))),
                 "smoothing" => Ok((base + 2, f64::from(pointer_smoothing))),
+                "speed" => Ok((
+                    settings_sync::speed_key(profile == "windows-to-mac"),
+                    f64::from(pointer_speed),
+                )),
                 "keyboard" => Ok((base + 3, f64::from(keyboard_enabled))),
                 "reclaim" => Ok((base + 4, f64::from(reclaim_enabled))),
                 "dragLock" => Ok((base + 5, f64::from(drag_lock))),
@@ -1787,6 +1793,7 @@ fn config_snapshot(path: Option<&Path>) -> ConfigSnapshot {
             reverse_scroll_horizontal: Some(config.reverse_scroll_horizontal),
             reverse_scroll_vertical: Some(config.reverse_scroll_vertical),
             pointer_smoothing: Some(config.pointer_smoothing),
+            pointer_speed: Some(config.pointer_speed),
             keyboard_enabled: Some(config.keyboard_enabled),
             reclaim_enabled: Some(config.reclaim_enabled),
             block_switch_while_dragging: Some(config.session.block_switch_while_dragging),
@@ -1819,6 +1826,7 @@ fn config_snapshot(path: Option<&Path>) -> ConfigSnapshot {
                     reverse_scroll_horizontal: None,
                     reverse_scroll_vertical: None,
                     pointer_smoothing: None,
+                    pointer_speed: None,
                     keyboard_enabled: None,
                     reclaim_enabled: None,
                     block_switch_while_dragging: None,
@@ -1854,6 +1862,7 @@ fn empty_config(path: Option<&Path>, error: &str) -> ConfigSnapshot {
         reverse_scroll_horizontal: None,
         reverse_scroll_vertical: None,
         pointer_smoothing: None,
+        pointer_speed: None,
         keyboard_enabled: None,
         reclaim_enabled: None,
         block_switch_while_dragging: None,
@@ -2201,7 +2210,7 @@ fn export_diagnostic_bundle(
     if include_config {
         let config = config_snapshot(config_path);
         let safe_config = format!(
-            "valid={}\nlocal_name={}\npeer_address={}\nlisten_address={}\npeer_on={}\nauto_reconnect={}\nkeyboard_enabled={}\npointer_smoothing={}\n",
+            "valid={}\nlocal_name={}\npeer_address={}\nlisten_address={}\npeer_on={}\nauto_reconnect={}\nkeyboard_enabled={}\npointer_smoothing={}\npointer_speed={}\n",
             config.valid,
             config.local_name.as_deref().unwrap_or("unknown"),
             config
@@ -2218,6 +2227,7 @@ fn export_diagnostic_bundle(
             config.auto_reconnect.unwrap_or(false),
             config.keyboard_enabled.unwrap_or(false),
             config.pointer_smoothing.unwrap_or(0),
+            config.pointer_speed.unwrap_or(100),
         );
         archive
             .start_file("config-summary.txt", options)

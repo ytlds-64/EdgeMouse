@@ -1,7 +1,7 @@
 const navItems = [...document.querySelectorAll(".nav-item")];
 const pages = [...document.querySelectorAll(".page")];
 const toast = document.querySelector(".toast");
-let appVersion = document.querySelector('meta[name="edgemouse-version"]')?.content ?? "0.6.8";
+let appVersion = document.querySelector('meta[name="edgemouse-version"]')?.content ?? "0.6.9";
 let toastTimer;
 
 const sidebarToggle = document.querySelector(".sidebar-toggle");
@@ -77,6 +77,7 @@ const inputProfiles = {
     horizontal: true,
     vertical: false,
     smoothing: 64,
+    speed: 100,
     keyboard: true,
     reclaim: true,
     dragLock: true,
@@ -89,6 +90,7 @@ const inputProfiles = {
     horizontal: false,
     vertical: false,
     smoothing: 52,
+    speed: 100,
     keyboard: true,
     reclaim: true,
     dragLock: true,
@@ -126,6 +128,8 @@ let inputSettingsDirty = false;
 const inputDirtyFields = { "mac-to-windows": new Set(), "windows-to-mac": new Set() };
 const smoothingRange = document.querySelector("#pointer-smoothing");
 const smoothingOutput = document.querySelector('output[for="pointer-smoothing"]');
+const speedRange = document.querySelector("#pointer-speed");
+const speedOutput = document.querySelector('output[for="pointer-speed"]');
 const inputSaveStatus = document.querySelector(".input-save-status");
 
 function smoothingLabel(value) {
@@ -173,6 +177,9 @@ function renderInputProfile() {
   smoothingRange.disabled = false;
   smoothingRange.title = "保存后自动同步到另一台电脑";
   smoothingOutput.textContent = smoothingLabel(profile.smoothing);
+  speedRange.value = String(profile.speed);
+  speedOutput.textContent = `${profile.speed}%`;
+  speedRange.setAttribute("aria-valuetext", `${profile.speed}%`);
   document.querySelectorAll("[data-map-source]").forEach((source) => {
     source.textContent = meta.sources[source.dataset.mapSource];
   });
@@ -223,6 +230,14 @@ smoothingRange.addEventListener("input", () => {
   markInputSettingsDirty("smoothing");
 });
 
+speedRange.addEventListener("input", () => {
+  const speed = Number(speedRange.value);
+  inputProfiles[activeInputProfile].speed = speed;
+  speedOutput.textContent = `${speed}%`;
+  speedRange.setAttribute("aria-valuetext", `${speed}%`);
+  markInputSettingsDirty("speed");
+});
+
 document.querySelectorAll("[data-input-map]").forEach((select) => {
   select.addEventListener("change", () => {
     inputProfiles[activeInputProfile][select.dataset.inputMap] = select.value;
@@ -268,8 +283,8 @@ window.EdgeMouseInputSettings = {
   applyLocalProfile(name, settings) {
     const profile = inputProfiles[name];
     if (!profile) return;
-    for (const key of ["horizontal", "vertical", "smoothing", "keyboard", "reclaim", "dragLock"]) {
-      if (!inputDirtyFields[name].has(key) && typeof settings[key] === (key === "smoothing" ? "number" : "boolean")) profile[key] = settings[key];
+    for (const key of ["horizontal", "vertical", "smoothing", "speed", "keyboard", "reclaim", "dragLock"]) {
+      if (!inputDirtyFields[name].has(key) && typeof settings[key] === (["smoothing", "speed"].includes(key) ? "number" : "boolean")) profile[key] = settings[key];
     }
     if (activeInputProfile === name) renderInputProfile();
     syncOverviewInputSettings();

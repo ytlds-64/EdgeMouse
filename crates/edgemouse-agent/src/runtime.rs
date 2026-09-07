@@ -237,6 +237,12 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         }
         settings_sync::reconcile(config_path, cfg!(target_os = "windows"))?;
         let config = LoadedConfig::load(config_path)?;
+        println!(
+            "EdgeMouse {} runtime: peer edge {:?}, outgoing pointer speed {}%",
+            env!("CARGO_PKG_VERSION"),
+            config.peer_on,
+            config.pointer_speed
+        );
         // Keep the local control/status server alive while TCC authorization is
         // missing. Do not connect, claim readiness, then exit in start_capture.
         if wait_for_input_permission(&stopping, &telemetry, || {
@@ -390,7 +396,30 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         }
         backoff.reset();
 
-        let topology = config.topology(local.screen.clone(), &network.peer_screen)?;
+        let mut topology = config.topology(local.screen.clone(), &network.peer_screen)?;
+        if config.local_screen.automatic
+            && let Some(desktop) = detected.as_ref()
+        {
+            topology.set_displays(
+                local.screen.id,
+                desktop
+                    .displays
+                    .iter()
+                    .map(|display| display.bounds)
+                    .collect(),
+            )?;
+        }
+        for display in &network.peer_screen.displays {
+            println!(
+                "Peer physical display: {:.0}x{:.0} at ({:.0}, {:.0}), scale {:.2}, primary {}",
+                display.bounds.width,
+                display.bounds.height,
+                display.bounds.left(),
+                display.bounds.top(),
+                display.scale_factor,
+                display.primary
+            );
+        }
         println!(
             "Peer desktop : {:.0}x{:.0} at ({:.0}, {:.0}), scale {:.2}",
             network.peer_screen.bounds.width,
@@ -718,7 +747,9 @@ fn run_loop(
         }
         if network.settings_sync && shared_poll.elapsed() >= Duration::from_millis(250) {
             shared_poll = Instant::now();
-            let shared = settings_sync::snapshot(config_path, windows)?;
+            let mut shared = settings_sync::snapshot(config_path, windows)?;
+            shared.entries =
+                settings_sync::compatible_entries(&shared.entries, network.pointer_speed);
             if shared_pending.is_some() && shared_retry.elapsed() > Duration::from_secs(5) {
                 shared_pending = None;
                 shared_sent = None;
@@ -790,7 +821,12 @@ fn run_loop(
                         let (_, sent) = shared_pending.take().unwrap();
                         settings_sync::acknowledge(config_path, windows, &sent)?;
                         let shared = settings_sync::snapshot(config_path, windows)?;
-                        if !shared.pending {
+                        if !shared.pending
+                            || settings_sync::compatible_entries(
+                                &shared.entries,
+                                network.pointer_speed,
+                            ) == sent
+                        {
                             if let Some(edge) = pending_layout_sync(config_path)? {
                                 complete_layout_sync(config_path, edge)?;
                             }
@@ -1126,6 +1162,8 @@ fn run_loop(
             }
             takeover.reset();
             let event = apply_scroll_settings(event, telemetry.scroll_settings());
+            let event =
+                apply_pointer_speed(event, session.state(), active_preferences.pointer_speed);
             let result = session.handle_input(event, now_ms)?;
             apply_effects(
                 result.effects,
@@ -1156,6 +1194,21 @@ fn run_loop(
         }
     }
     Ok(ConnectionEnd::Stopped)
+}
+
+fn apply_pointer_speed(
+    event: PhysicalMouseEvent,
+    state: ControlState,
+    percent: u16,
+) -> PhysicalMouseEvent {
+    match (event, state) {
+        (PhysicalMouseEvent::Move { movement }, ControlState::Remote { .. }) => {
+            PhysicalMouseEvent::Move {
+                movement: movement.scaled(f64::from(percent) / 100.0),
+            }
+        }
+        (event, _) => event,
+    }
 }
 
 fn apply_scroll_settings(
@@ -1671,6 +1724,37 @@ fn new_session_id(node: u128) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pointer_speed_only_scales_outgoing_remote_motion_once() {
+        for percent in [25, 100, 175, 300] {
+            let movement = Vector::new(1.5, -2.25);
+            let motion = PhysicalMouseEvent::Move { movement };
+            let remote = ControlState::Remote { peer: NodeId(2) };
+            assert_eq!(
+                apply_pointer_speed(motion, remote, percent),
+                PhysicalMouseEvent::Move {
+                    movement: movement.scaled(f64::from(percent) / 100.0)
+                }
+            );
+            assert_eq!(
+                apply_pointer_speed(motion, ControlState::Local, percent),
+                motion
+            );
+            for event in [
+                PhysicalMouseEvent::LocalMove {
+                    position: Point::new(2.0, 3.0),
+                    movement,
+                },
+                PhysicalMouseEvent::Wheel {
+                    horizontal: 1.0,
+                    vertical: -1.0,
+                },
+            ] {
+                assert_eq!(apply_pointer_speed(event, remote, percent), event);
+            }
+        }
+    }
     use edgemouse_core::{
         ButtonState, KeyCode, KeyState, KeyboardEvent, MouseButton, PermissionState, PlatformError,
         Point,

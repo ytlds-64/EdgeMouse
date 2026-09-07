@@ -16,6 +16,23 @@ pub const HYSTERESIS: u8 = 1;
 pub const AUTO_RECONNECT: u8 = 2;
 pub const MAC_PROFILE: u8 = 3;
 pub const WINDOWS_PROFILE: u8 = 9;
+// Append extensions: old field numbers remain stable on disk and on the wire.
+pub const MAC_SPEED: u8 = 15;
+pub const WINDOWS_SPEED: u8 = 16;
+
+pub fn speed_key(windows: bool) -> u8 {
+    if windows { WINDOWS_SPEED } else { MAC_SPEED }
+}
+
+pub fn compatible_entries(entries: &[SettingEntry], speed_supported: bool) -> Vec<SettingEntry> {
+    entries
+        .iter()
+        .filter(|entry| {
+            speed_supported || usize::from(entry.key) < edgemouse_protocol::LEGACY_SETTINGS_COUNT
+        })
+        .cloned()
+        .collect()
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StoredEntry {
@@ -143,6 +160,7 @@ fn load(path: &Path, config: &LoadedConfig, windows: bool) -> Result<Document, S
         (outgoing, f64::from(config.reverse_scroll_horizontal)),
         (outgoing + 1, f64::from(config.reverse_scroll_vertical)),
         (outgoing + 3, f64::from(config.keyboard_enabled)),
+        (speed_key(windows), f64::from(config.pointer_speed)),
         (
             outgoing + 5,
             f64::from(config.session.block_switch_while_dragging),
@@ -287,6 +305,7 @@ pub fn preferences(config: &LoadedConfig) -> SessionPreferences {
         reverse_scroll_horizontal: config.reverse_scroll_horizontal,
         reverse_scroll_vertical: config.reverse_scroll_vertical,
         pointer_smoothing: config.pointer_smoothing,
+        pointer_speed: config.pointer_speed,
         keyboard_enabled: config.keyboard_enabled,
         reclaim_enabled: config.reclaim_enabled,
         block_switch_while_dragging: config.session.block_switch_while_dragging,
@@ -324,6 +343,7 @@ fn desired(
             _ if key == outgoing + 1 => settings.reverse_scroll_vertical = value != 0.0,
             _ if key == outgoing + 3 => settings.keyboard_enabled = value != 0.0,
             _ if key == outgoing + 5 => settings.block_switch_while_dragging = value != 0.0,
+            _ if key == speed_key(windows) => settings.pointer_speed = value as u16,
             _ if key == incoming + 2 => settings.pointer_smoothing = value as u8,
             _ if key == incoming + 4 => settings.reclaim_enabled = value != 0.0,
             _ => {}
@@ -432,6 +452,7 @@ mod tests {
                 (WINDOWS_PROFILE + 3, 0.0),
                 (WINDOWS_PROFILE + 4, 0.0),
                 (WINDOWS_PROFILE + 5, 0.0),
+                (WINDOWS_SPEED, 175.0),
                 (LAYOUT, 3.0),
                 (HYSTERESIS, 0.0),
                 (AUTO_RECONNECT, 0.0),
@@ -442,7 +463,11 @@ mod tests {
         edit(
             &pair.windows,
             true,
-            &[(MAC_PROFILE + 1, 1.0), (MAC_PROFILE + 2, 23.0)],
+            &[
+                (MAC_PROFILE + 1, 1.0),
+                (MAC_PROFILE + 2, 23.0),
+                (MAC_SPEED, 65.0),
+            ],
         )
         .unwrap();
         reconcile(&pair.mac, false).unwrap(); // restart before the peer was reachable
@@ -461,6 +486,8 @@ mod tests {
         assert!(!win.session.block_switch_while_dragging);
         assert_eq!(mac.pointer_smoothing, 87);
         assert_eq!(win.pointer_smoothing, 23);
+        assert_eq!(mac.pointer_speed, 65);
+        assert_eq!(win.pointer_speed, 175);
         assert!(!mac.reclaim_enabled && win.reclaim_enabled);
         assert_eq!(mac.session.entry_hysteresis, 0.0);
         assert_eq!(win.session.entry_hysteresis, 0.0);
@@ -473,6 +500,30 @@ mod tests {
         assert!(!snapshot(&pair.windows, true).unwrap().pending);
         let saved = fs::read_to_string(pair.mac.with_extension("settings-sync")).unwrap();
         assert!(!saved.contains("private_key") && !saved.contains("certificate"));
+    }
+
+    #[test]
+    fn speed_extension_preserves_old_peers_and_rejects_invalid_settings() {
+        let pair = Pair::new();
+        assert_eq!(LoadedConfig::load(&pair.mac).unwrap().pointer_speed, 100);
+        for value in [0.0, 24.0, 301.0, 100.5, f64::NAN, f64::INFINITY] {
+            assert!(edit(&pair.mac, false, &[(MAC_SPEED, value)]).is_err());
+        }
+        edit(&pair.mac, false, &[(MAC_SPEED, 150.0)]).unwrap();
+        let entries = snapshot(&pair.mac, false).unwrap().entries;
+        let legacy = compatible_entries(&entries, false);
+        assert!(legacy.iter().all(|entry| entry.key < 15));
+        assert!(legacy.len() < entries.len());
+        assert_eq!(compatible_entries(&entries, true), entries);
+        acknowledge(&pair.mac, false, &legacy).unwrap();
+        assert!(snapshot(&pair.mac, false).unwrap().pending);
+        pair.exchange();
+        assert!(!snapshot(&pair.mac, false).unwrap().pending);
+        assert_eq!(LoadedConfig::load(&pair.mac).unwrap().pointer_speed, 150);
+        assert_eq!(
+            LoadedConfig::load(&pair.windows).unwrap().pointer_speed,
+            100
+        );
     }
 
     #[test]

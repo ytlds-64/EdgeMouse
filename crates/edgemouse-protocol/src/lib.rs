@@ -18,7 +18,9 @@ pub const HEADER_LEN: usize = 12;
 pub const MAX_FRAME_LEN: usize = 64 * 1024;
 pub const MAX_DISPLAY_COUNT: usize = 32;
 pub const CAPABILITY_SETTINGS_SYNC: u32 = 1 << 2;
-pub const SETTINGS_COUNT: usize = 15;
+pub const CAPABILITY_POINTER_SPEED: u32 = 1 << 3;
+pub const LEGACY_SETTINGS_COUNT: usize = 15;
+pub const SETTINGS_COUNT: usize = 17;
 pub const MOUSE_DATAGRAM_FRAME_LEN: usize = HEADER_LEN + 6 * std::mem::size_of::<u64>();
 const MAGIC: [u8; 4] = *b"EMOU";
 
@@ -41,6 +43,7 @@ pub fn valid_setting(key: u8, value: f64) -> bool {
         1 => (0.0..=10000.0).contains(&value),
         5 | 11 => (0.0..=100.0).contains(&value) && value.fract() == 0.0,
         2..=14 => value == 0.0 || value == 1.0,
+        15 | 16 => (25.0..=300.0).contains(&value) && value.fract() == 0.0,
         _ => false,
     }
 }
@@ -781,6 +784,19 @@ mod tests {
 
     #[test]
     fn shared_settings_extension_round_trips_and_rejects_bad_fields() {
+        for key in [15, 16] {
+            for value in [25.0, 100.0, 175.0, 300.0] {
+                round_trip(WireMessage::SettingsUpdate {
+                    request_id: 9,
+                    entries: vec![SettingEntry {
+                        key,
+                        value,
+                        revision: 1,
+                        author: NodeId(42),
+                    }],
+                });
+            }
+        }
         round_trip(WireMessage::SettingsReconnect);
         round_trip(WireMessage::SettingsReconnectAck);
         let entry = SettingEntry {

@@ -499,6 +499,7 @@
       vertical: snapshot.config.reverseScrollVertical,
       keyboard: snapshot.config.keyboardEnabled,
       dragLock: snapshot.config.blockSwitchWhileDragging,
+      speed: snapshot.config.pointerSpeed,
     });
     window.EdgeMouseInputSettings?.applyLocalProfile(incomingInputProfile, {
       smoothing: snapshot.config.pointerSmoothing,
@@ -513,10 +514,12 @@
           if (typeof value === "number") settings[key] = key === "smoothing" ? value : value !== 0;
         });
         window.EdgeMouseInputSettings?.applyLocalProfile(name, settings);
+        const speed = shared.values[base === 3 ? 15 : 16];
+        if (typeof speed === "number") window.EdgeMouseInputSettings?.applyLocalProfile(name, { speed });
       }
       if (!window.EdgeMouseInputSettings?.isDirty()) {
         setText(".input-save-status", shared.pending
-          ? "设置已保存在本机，等待另一端同步（两端需更新到 0.6.6 或更高版本）"
+          ? "设置已保存在本机，等待另一端同步（鼠标速度同步需两端 0.6.9 或更高版本）"
           : "输入设置已同步；在任意一端修改并保存即可");
       }
     }
@@ -1232,6 +1235,7 @@
         reverseHorizontal: Boolean(settings.horizontal),
         reverseVertical: Boolean(settings.vertical),
         pointerSmoothing: Number(settings.smoothing),
+        pointerSpeed: Number(settings.speed),
         keyboardEnabled: Boolean(settings.keyboard),
         reclaimEnabled: Boolean(settings.reclaim),
         dragLock: Boolean(settings.dragLock),
@@ -1268,6 +1272,7 @@
         reverseHorizontal: Boolean(settings.horizontal),
         reverseVertical: Boolean(settings.vertical),
         pointerSmoothing: Number(settings.smoothing),
+        pointerSpeed: Number(settings.speed),
         keyboardEnabled: Boolean(settings.keyboard),
         reclaimEnabled: Boolean(settings.reclaim),
         dragLock: Boolean(settings.dragLock),
