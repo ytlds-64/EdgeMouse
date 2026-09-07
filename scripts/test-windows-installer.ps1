@@ -21,19 +21,27 @@ public static class InstallerWindows {
   [DllImport("user32.dll")] private static extern bool EnumWindows(Callback cb, IntPtr arg);
   [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr hwnd, Callback cb, IntPtr arg);
   [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+  [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int count);
   [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd, uint msg, IntPtr w, IntPtr l);
+  [DllImport("user32.dll", EntryPoint="SendMessageW", CharSet=CharSet.Unicode)] private static extern IntPtr ReadText(IntPtr hwnd, uint msg, IntPtr w, StringBuilder text);
   public static IntPtr Find(int pid) {
     IntPtr result = IntPtr.Zero;
     EnumWindows((hwnd, unused) => { uint id; GetWindowThreadProcessId(hwnd, out id);
-      if (id == pid && Text(hwnd).Length > 0) { result = hwnd; return false; } return true;
+      if (id == pid && IsWindowVisible(hwnd) && Text(hwnd).Length > 0) { result = hwnd; return false; } return true;
     }, IntPtr.Zero);
     return result;
   }
   public static string Text(IntPtr hwnd) { var text = new StringBuilder(8192); GetWindowText(hwnd, text, text.Capacity); return text.ToString(); }
   public static string Contents(IntPtr hwnd) {
     var texts = new List<string>(); texts.Add(Text(hwnd));
-    EnumChildWindows(hwnd, (child, unused) => { texts.Add(Text(child)); return true; }, IntPtr.Zero);
+    // GetWindowText deliberately does not read another process's control text.
+    // WM_GETTEXT is marshalled by Windows and includes the selected combo value.
+    EnumChildWindows(hwnd, (child, unused) => {
+      var text = new StringBuilder(8192);
+      ReadText(child, 0x000D, new IntPtr(text.Capacity), text);
+      texts.Add(text.ToString()); return true;
+    }, IntPtr.Zero);
     return String.Join("\n", texts);
   }
 }

@@ -103,6 +103,15 @@ jobs:
           $version = (Select-String '^version = "(.+)"' Cargo.toml).Matches.Groups[1].Value
           ./scripts/test-windows-installer.ps1 -Installer $installer.FullName -Version $version
 
+      - name: Preserve Windows installer for failed smoke-test investigation
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer-smoke-test
+          if-no-files-found: warn
+          retention-days: 3
+          path: target/release/bundle/nsis/*-setup.exe
+
       - name: Upload runnable package
         uses: actions/upload-artifact@v4
         with:
