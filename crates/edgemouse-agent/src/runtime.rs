@@ -140,12 +140,14 @@ impl LocalTakeoverGesture {
         self.last_motion_ms = None;
     }
 
-    fn accept_ack(&mut self, owner_session_id: u64) -> bool {
+    fn accept_ack(&mut self, owner_session_id: u64, active_session: Option<u64>) -> bool {
         if !matches!(self.pending, Some((pending, _)) if pending == owner_session_id) {
             return false;
         }
         self.reset();
-        true
+        // A normal Leave can arrive before the acknowledgement of our reclaim.
+        // Clear the pending gesture without taking over an already ended session.
+        active_session == Some(owner_session_id)
     }
 
     fn timed_out(&self, now_ms: u64) -> Option<u64> {
@@ -178,6 +180,25 @@ fn distance_to_edge(bounds: Rect, pointer: Point, edge: Edge) -> f64 {
 
 fn accepts_remote_layout(local_node: NodeId, peer_node: NodeId, local_pending: bool) -> bool {
     !local_pending || local_node > peer_node
+}
+
+fn accept_control_reclaim(
+    session: &mut Session,
+    incoming_active: bool,
+    owner_session_id: u64,
+    local_session_id: u64,
+    peer: NodeId,
+) -> Option<Vec<Effect>> {
+    // The reliable streams are ordered independently in each direction. A
+    // reclaim can cross our normal Leave or arrive after control changed hands.
+    // Only yield the currently outgoing session; stale requests are harmless.
+    if owner_session_id != local_session_id
+        || incoming_active
+        || !matches!(session.state(), ControlState::Remote { peer: active } if active == peer)
+    {
+        return None;
+    }
+    Some(session.yield_remote_control(peer))
 }
 
 pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
@@ -503,7 +524,12 @@ fn run_connected(
     drop(keyboard_injector.release_all());
     let _ = remote.reset(&mut injector);
 
-    result
+    // run_loop has already released input and restored the local cursor above.
+    // A failed connection must re-enter the reconnect loop, not terminate the
+    // service. Startup/configuration errors still propagate from their checks.
+    Ok(result.unwrap_or_else(|error| {
+        ConnectionEnd::Disconnected(format!("input session failed: {error}"))
+    }))
 }
 
 fn normalize_initial_pointer(
@@ -636,23 +662,18 @@ fn run_loop(
                     )?;
                 }
                 NetworkEvent::Message(WireMessage::ControlReclaim { owner_session_id }) => {
-                    if owner_session_id != session_id {
-                        return Err("peer requested control from a stale local session".into());
-                    }
-                    if remote.is_active() {
-                        return Err(
-                            "peer requested control during simultaneous incoming control".into(),
+                    let Some(effects) = accept_control_reclaim(
+                        session,
+                        remote.is_active(),
+                        owner_session_id,
+                        session_id,
+                        network.peer_node,
+                    ) else {
+                        println!(
+                            "Ignoring a stale control reclaim; the outgoing session has already ended"
                         );
-                    }
-                    if !matches!(
-                        session.state(),
-                        ControlState::Remote { peer } if peer == network.peer_node
-                    ) {
-                        return Err(
-                            "peer requested control when no outgoing session was active".into()
-                        );
-                    }
-                    let effects = session.yield_remote_control(network.peer_node);
+                        continue;
+                    };
                     apply_effects(
                         effects,
                         network,
@@ -666,11 +687,8 @@ fn run_loop(
                     println!("Peer physical mouse reclaimed control");
                 }
                 NetworkEvent::Message(WireMessage::ControlReclaimAck { owner_session_id }) => {
-                    if !takeover.accept_ack(owner_session_id) {
+                    if !takeover.accept_ack(owner_session_id, remote.active_session()) {
                         continue;
-                    }
-                    if remote.active_session() != Some(owner_session_id) {
-                        return Err("peer acknowledged a control session that is not active".into());
                     }
                     keyboard_injector.release_all()?;
                     let position = remote
@@ -1585,10 +1603,10 @@ mod tests {
         let mut gesture = LocalTakeoverGesture::new(Edge::Left);
         gesture.mark_requested(77, 100);
 
-        assert!(!gesture.accept_ack(78));
+        assert!(!gesture.accept_ack(78, Some(77)));
         assert_eq!(gesture.timed_out(1_599), None);
         assert_eq!(gesture.timed_out(1_600), Some(77));
-        assert!(gesture.accept_ack(77));
+        assert!(gesture.accept_ack(77, Some(77)));
         assert_eq!(gesture.timed_out(u64::MAX), None);
     }
 
@@ -1602,6 +1620,164 @@ mod tests {
 
         assert!(position.x + left.dx < bounds.left());
         assert!(position.x + right.dx > bounds.right());
+    }
+
+    #[test]
+    fn reclaim_crossing_a_normal_handback_does_not_end_the_next_session() {
+        use edgemouse_core::{Screen, SessionConfig, Topology};
+        let peer = NodeId(2);
+        let mut topology = Topology::default();
+        for (id, node) in [(ScreenId(1), NodeId(1)), (ScreenId(2), peer)] {
+            topology
+                .add_screen(
+                    Screen::new(
+                        id,
+                        node,
+                        "display",
+                        Rect::new(Point::new(0.0, 0.0), 100.0, 100.0).unwrap(),
+                        1.0,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        topology
+            .connect_bidirectional(ScreenId(1), Edge::Right, ScreenId(2))
+            .unwrap();
+        let mut session = Session::new(
+            NodeId(1),
+            topology,
+            ScreenId(1),
+            Point::new(50.0, 50.0),
+            SessionConfig::default(),
+        )
+        .unwrap();
+
+        for _ in 0..20 {
+            session
+                .handle_input(
+                    PhysicalMouseEvent::Move {
+                        movement: Vector::new(200.0, 0.0),
+                    },
+                    10,
+                )
+                .unwrap();
+            assert_eq!(session.state(), ControlState::Remote { peer });
+            // Move inward to clear the entry guard, then return normally.
+            session
+                .handle_input(
+                    PhysicalMouseEvent::Move {
+                        movement: Vector::new(30.0, 0.0),
+                    },
+                    11,
+                )
+                .unwrap();
+            let handback = session
+                .handle_input(
+                    PhysicalMouseEvent::Move {
+                        movement: Vector::new(-200.0, 0.0),
+                    },
+                    12,
+                )
+                .unwrap();
+            assert_eq!(session.state(), ControlState::Local);
+            assert!(handback.effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Send {
+                    event: RoutedEvent {
+                        event: RemoteMouseEvent::Leave,
+                        ..
+                    },
+                    ..
+                }
+            )));
+            // The peer's physical-mouse request was sent before it saw Leave.
+            assert!(accept_control_reclaim(&mut session, false, 77, 77, peer).is_none());
+            assert_eq!(session.state(), ControlState::Local);
+            session
+                .handle_input(
+                    PhysicalMouseEvent::Move {
+                        movement: Vector::new(-30.0, 0.0),
+                    },
+                    13,
+                )
+                .unwrap();
+        }
+
+        session
+            .handle_input(
+                PhysicalMouseEvent::Move {
+                    movement: Vector::new(200.0, 0.0),
+                },
+                14,
+            )
+            .unwrap();
+        assert!(accept_control_reclaim(&mut session, false, 76, 77, peer).is_none());
+        assert!(accept_control_reclaim(&mut session, true, 77, 77, peer).is_none());
+        assert_eq!(session.state(), ControlState::Remote { peer });
+        let effects = accept_control_reclaim(&mut session, false, 77, 77, peer).unwrap();
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::ReleasePointer { .. }))
+        );
+        session.complete_recovery().unwrap();
+        assert!(accept_control_reclaim(&mut session, false, 77, 77, peer).is_none());
+        assert_eq!(session.state(), ControlState::Local);
+    }
+
+    #[test]
+    fn reclaim_ack_after_leave_is_ignored_and_does_not_poison_next_takeover() {
+        let mut receiver = remote_receiver(1_500);
+        let mut injector = FakeInjector::default();
+        let mut gesture = LocalTakeoverGesture::new(Edge::Left);
+        receiver
+            .handle(
+                77,
+                RoutedEvent {
+                    sequence: 1,
+                    event: RemoteMouseEvent::Enter {
+                        screen: ScreenId(7),
+                        position: Point::new(5.0, 5.0),
+                    },
+                },
+                &mut injector,
+                0,
+            )
+            .unwrap();
+        gesture.mark_requested(77, 100);
+        receiver
+            .handle(
+                77,
+                RoutedEvent {
+                    sequence: 2,
+                    event: RemoteMouseEvent::Leave,
+                },
+                &mut injector,
+                101,
+            )
+            .unwrap();
+        assert!(!gesture.accept_ack(77, receiver.active_session()));
+        assert_eq!(gesture.timed_out(u64::MAX), None);
+
+        receiver
+            .handle(
+                78,
+                RoutedEvent {
+                    sequence: 1,
+                    event: RemoteMouseEvent::Enter {
+                        screen: ScreenId(7),
+                        position: Point::new(5.0, 5.0),
+                    },
+                },
+                &mut injector,
+                102,
+            )
+            .unwrap();
+        gesture.mark_requested(78, 103);
+        assert!(!gesture.accept_ack(77, receiver.active_session()));
+        assert!(gesture.accept_ack(78, receiver.active_session()));
+        assert!(!gesture.accept_ack(78, receiver.active_session()));
     }
 
     #[test]

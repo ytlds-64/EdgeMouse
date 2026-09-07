@@ -2039,8 +2039,9 @@ fn redact_ipv4_addresses(source: &str) -> String {
                 output.push_str(candidate);
             }
         } else {
-            output.push(bytes[index] as char);
-            index += 1;
+            let character = source[index..].chars().next().expect("index is in bounds");
+            output.push(character);
+            index += character.len_utf8();
         }
     }
     output
@@ -2089,6 +2090,28 @@ fn export_diagnostic_bundle(
         archive
             .write_all(report.log_lines.join("\n").as_bytes())
             .map_err(|error| format!("无法写入日志摘要：{error}"))?;
+        // Keep stderr separately: the short UI summary can otherwise be filled
+        // by normal mouse messages and omit the actual service-exit reason.
+        if let Some(base) = config_path.and_then(Path::parent) {
+            for name in ["desktop-agent.err.log", "desktop-agent.out.log"] {
+                let Ok(source) = fs::read_to_string(base.join("logs").join(name)) else {
+                    continue;
+                };
+                let tail = source.lines().rev().take(200).collect::<Vec<_>>();
+                let redacted = tail
+                    .into_iter()
+                    .rev()
+                    .map(redact_ipv4_addresses)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                archive
+                    .start_file(format!("logs/{name}"), options)
+                    .map_err(|error| format!("无法创建运行日志：{error}"))?;
+                archive
+                    .write_all(redacted.as_bytes())
+                    .map_err(|error| format!("无法写入运行日志：{error}"))?;
+            }
+        }
     }
     if include_config {
         let config = config_snapshot(config_path);
@@ -2284,6 +2307,10 @@ fn default_config_path() -> Option<PathBuf> {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+fn app_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
 pub fn run() {
     let config_path = resolve_config_path();
     if let Some(path) = config_path.as_deref()
@@ -2324,7 +2351,8 @@ pub fn run() {
             let quit_item =
                 MenuItem::with_id(app, "tray_quit", "退出 EdgeMouse", true, None::<&str>)?;
             let tray_menu = Menu::with_items(app, &[&show_item, &quit_item])?;
-            let mut tray = TrayIconBuilder::new()
+            let tray = TrayIconBuilder::new()
+                .icon(tauri::include_image!("icons/tray.png"))
                 .tooltip("EdgeMouse")
                 .menu(&tray_menu)
                 .show_menu_on_left_click(false)
@@ -2355,9 +2383,6 @@ pub fn run() {
                         let _ = window.set_focus();
                     }
                 });
-            if let Some(icon) = app.default_window_icon() {
-                tray = tray.icon(icon.clone());
-            }
             tray.build(app)?;
 
             // A packaged EdgeMouse app owns the background agent. Once the two
@@ -2434,7 +2459,7 @@ pub fn run() {
             set_menu_language,
             window_action
         ])
-        .run(tauri::generate_context!())
+        .run(app_context())
         .expect("failed to run EdgeMouse desktop application");
 }
 
@@ -2449,6 +2474,37 @@ mod tests {
     use edgemouse_core::Edge;
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn application_and_tray_icons_have_transparent_corners_and_enough_pixels() {
+        let context = super::app_context();
+        let window_icon = context.default_window_icon().unwrap();
+        assert!(
+            window_icon.width() >= 256,
+            "The first ICO frame must not be a 16 px thumbnail"
+        );
+        let tray_icon = tauri::include_image!("icons/tray.png");
+        assert_eq!(tray_icon.width(), 64);
+        for icon in [window_icon, &tray_icon] {
+            assert_eq!(icon.width(), icon.height());
+            let side = icon.width() as usize;
+            for pixel in [0, side - 1, side * (side - 1), side * side - 1] {
+                assert_eq!(
+                    icon.rgba()[pixel * 4 + 3],
+                    0,
+                    "Icon corners must be transparent"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn log_redaction_preserves_chinese_and_unicode_punctuation() {
+        assert_eq!(
+            super::redact_ipv4_addresses("正在连接… 192.168.8.208:43891"),
+            "正在连接… 192.168.8.x:43891"
+        );
+    }
 
     #[test]
     fn parses_the_four_layout_edges() {
