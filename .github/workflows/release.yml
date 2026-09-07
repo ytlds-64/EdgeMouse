@@ -49,16 +49,19 @@ jobs:
           tagName: v__VERSION__
           releaseName: EdgeMouse __VERSION__
           releaseBody: |
-            EdgeMouse 0.6.6
+            EdgeMouse 0.6.7
 
-            - Windows 手动安装默认简体中文，仍可选择 English，不再沿用旧版保存的英文而跳过语言选择。
-            - 更新前安全停止后台；安装器检查文件占用和后台版本，避免只更新界面程序。
-            - 任一端保存屏幕布局后自动同步；离线保存的修改会在重启或连接后补同步。
-            - 首次连接时统一旧版遗留的布局差异，不再仅凭已连接就显示“两端一致”。
-            - 输入页支持在任意一端修改两个控制方向的设置；滚动、平滑度、键盘跟随、抢回、拖拽保护、防误触与自动重连逐项同步。
-            - 输入卡片增加标题间距并按行对齐；左侧导航可收起为图标并记住本机状态。
+            - 修复 macOS 连接成功后因输入权限或捕获初始化错误而退出后台服务的问题。
+            - 未获辅助功能权限时保持服务开启并显示“等待授权”；系统认可授权后自动继续连接。
+            - 连接、开关与诊断恢复操作加互斥保护；启动或重连过程中重复点击不会停止当前服务。
+            - 原生输入后端准备完成后才报告“已连接”，避免仅完成 TLS 握手就误报可用。
+            - 修复诊断列表标题被挤成竖排的问题。
 
-            Defaults Windows installation to Chinese with an English option, safely stops the background service before updates, verifies installed component versions, and synchronizes layouts, both input profiles, edge protection and automatic reconnect per field, including offline edits. Input cards are aligned with clearer spacing; the sidebar can collapse to icons. Protocol v7 remains compatible through capability negotiation; update both computers for the complete synchronization behavior.
+            Keeps the macOS service alive while waiting for Accessibility permission or retrying native input initialization. Connection resumes when the OS reports permission granted. Serializes service operations and ignores duplicate connect requests during startup/reconnection. Reports connected only after input backends are ready, and fixes diagnostic list alignment.
+
+            注意：当前 macOS 包仍使用临时签名，尚无 Developer ID 签名及 Apple 公证；跨版本更新后，系统仍可能要求重新授权。此修复不会绕过、删除或重置系统隐私权限。更新包的加密签名验证与 macOS 应用身份签名是两回事。
+
+            macOS packages remain ad-hoc signed, without Developer ID signing or Apple notarization. macOS may require Accessibility permission again after an update. This release does not bypass or reset privacy permissions; updater signature verification is separate from macOS application identity signing.
 
             Windows 请下载 `.exe` 安装程序；macOS 请下载通用版 `.dmg`，同时支持 Apple 芯片和 Intel Mac。已安装旧版本时，也可以直接在 EdgeMouse 的“设置”或“关于”页面检查并安装更新。
           releaseDraft: true

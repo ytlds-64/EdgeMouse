@@ -70,6 +70,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Test native UI service lifecycle
+        run: node scripts/test-native-service.cjs
+
       - name: Prepare desktop sidecar on macOS
         if: runner.os == 'macOS'
         run: ./scripts/prepare-sidecar-macos.sh

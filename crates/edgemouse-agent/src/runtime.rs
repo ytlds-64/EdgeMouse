@@ -237,6 +237,13 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         }
         settings_sync::reconcile(config_path, cfg!(target_os = "windows"))?;
         let config = LoadedConfig::load(config_path)?;
+        // Keep the local control/status server alive while TCC authorization is
+        // missing. Do not connect, claim readiness, then exit in start_capture.
+        if wait_for_input_permission(&stopping, &telemetry, || {
+            platform::current_status().permission_granted != Some(false)
+        }) {
+            return Ok(());
+        }
         if telemetry.layout_update().is_none()
             && let Some(edge) = pending_layout_sync(config_path)?
         {
@@ -381,7 +388,6 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         } else {
             println!("Connected to {} with mutual TLS", network.peer_name);
         }
-        telemetry.connected(&network.peer_name, &network.peer_screen);
         backoff.reset();
 
         let topology = config.topology(local.screen.clone(), &network.peer_screen)?;
@@ -399,7 +405,7 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         let initial_pointer =
             normalize_initial_pointer(local.screen.bounds, platform::current_pointer()?)?;
 
-        match run_connected(
+        let connection_result = run_connected(
             &config,
             &local,
             topology,
@@ -410,7 +416,25 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
             &telemetry,
             config_path,
             &mut initial_layout_synced,
-        )? {
+        );
+        let connection_end = match connection_result {
+            Ok(end) => end,
+            Err(error) => {
+                // Permissions can change during discovery/TLS, or native input
+                // initialization can temporarily fail. Neither should switch
+                // off the service the user explicitly enabled.
+                let missing = platform::current_status().permission_granted == Some(false);
+                telemetry.waiting_for_input(missing);
+                eprintln!(
+                    "Input initialization unavailable: {error}; service remains running; local control remains available"
+                );
+                if wait_until_retry_or_stop(&stopping, Duration::from_secs(2)) {
+                    return Ok(());
+                }
+                continue;
+            }
+        };
+        match connection_end {
             ConnectionEnd::Stopped => return Ok(()),
             ConnectionEnd::LayoutChanged => {
                 telemetry.disconnected();
@@ -420,6 +444,12 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
             }
             ConnectionEnd::Disconnected(reason) => {
                 telemetry.disconnected();
+                // Losing input permission is not an instruction to stop the
+                // service, even when network auto-reconnect is disabled.
+                if platform::current_status().permission_granted == Some(false) {
+                    telemetry.waiting_for_input(true);
+                    continue;
+                }
                 if !config.auto_reconnect {
                     eprintln!(
                         "Connection lost: {reason}; local mouse control restored; automatic reconnect is disabled"
@@ -502,6 +532,10 @@ fn run_connected(
     );
     let clock = Instant::now();
 
+    // Only advertise a usable connection once both native capture backends are
+    // ready. A completed TLS handshake alone cannot control the other computer.
+    telemetry.connected(&network.peer_name, &network.peer_screen);
+
     println!(
         "Edge switching active; press Ctrl+C while input is local, or run `edgemouse stop`, to stop"
     );
@@ -583,6 +617,35 @@ fn normalize_pointer_to_bounds(bounds: Rect, pointer: Point) -> Option<Point> {
         && pointer.y >= bounds.top() - POINTER_BOUNDARY_TOLERANCE
         && pointer.y <= bounds.bottom() + POINTER_BOUNDARY_TOLERANCE;
     is_near_closed_bounds.then(|| bounds.clamp_inside(pointer, POINTER_INTERIOR_INSET))
+}
+
+fn wait_for_input_permission(
+    stopping: &AtomicBool,
+    telemetry: &RuntimeTelemetry,
+    mut permitted: impl FnMut() -> bool,
+) -> bool {
+    let mut announced = false;
+    while !stopping.load(Ordering::Acquire) {
+        if permitted() {
+            if announced {
+                println!(
+                    "Input permission is available; continuing connection without restarting the service"
+                );
+            }
+            return false;
+        }
+        if !announced {
+            telemetry.waiting_for_input(true);
+            eprintln!(
+                "Waiting for macOS Accessibility permission; service remains running. Enable the installed EdgeMouse app in System Settings; no need to reconnect repeatedly."
+            );
+            announced = true;
+        }
+        if wait_until_retry_or_stop(stopping, Duration::from_millis(250)) {
+            return true;
+        }
+    }
+    true
 }
 
 fn wait_until_retry_or_stop(stopping: &AtomicBool, delay: Duration) -> bool {
@@ -1606,6 +1669,37 @@ mod tests {
         ButtonState, KeyCode, KeyState, KeyboardEvent, MouseButton, PermissionState, PlatformError,
         Point,
     };
+
+    #[test]
+    fn missing_permission_waits_then_resumes_without_stopping_service() {
+        let stopping = AtomicBool::new(false);
+        let telemetry = RuntimeTelemetry::default();
+        let mut checks = 0;
+        let stopped = wait_for_input_permission(&stopping, &telemetry, || {
+            checks += 1;
+            checks == 3
+        });
+        assert!(!stopped);
+        assert!(!stopping.load(Ordering::Acquire));
+        assert_eq!(checks, 3);
+    }
+
+    #[test]
+    fn permission_wait_honors_explicit_stop_without_authorization() {
+        let stopping = AtomicBool::new(false);
+        let telemetry = RuntimeTelemetry::default();
+        assert!(wait_for_input_permission(&stopping, &telemetry, || {
+            stopping.store(true, Ordering::Release);
+            false
+        }));
+    }
+
+    #[test]
+    fn granted_permission_does_not_delay_startup() {
+        let stopping = AtomicBool::new(false);
+        let telemetry = RuntimeTelemetry::default();
+        assert!(!wait_for_input_permission(&stopping, &telemetry, || true));
+    }
 
     #[test]
     fn simultaneous_layout_updates_use_the_lower_node_as_authority() {

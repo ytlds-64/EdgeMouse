@@ -17,6 +17,20 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 
+// All UI/tray/diagnostic entry points share one lifecycle gate. Concurrent
+// requests must not stop a process that another request has just started.
+static AGENT_LIFECYCLE: Mutex<()> = Mutex::new(());
+
+fn agent_lifecycle_guard() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    match AGENT_LIFECYCLE.try_lock() {
+        Ok(guard) => Ok(guard),
+        Err(std::sync::TryLockError::Poisoned(error)) => Ok(error.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            Err("服务操作正在进行，请稍候，无需重复点击".to_owned())
+        }
+    }
+}
+
 struct AppState {
     config_path: Option<PathBuf>,
     agent_status: Arc<Mutex<AgentStatusCache>>,
@@ -590,8 +604,23 @@ async fn reconnect_agent(state: tauri::State<'_, AppState>) -> Result<AgentServi
         .ok_or_else(|| "未找到 edgemouse.toml；无法重新连接".to_owned())?;
     let agent_status = Arc::clone(&state.agent_status);
     tauri::async_runtime::spawn_blocking(move || {
-        stop_agent()?;
-        let result = start_agent(&path)?;
+        let _guard = agent_lifecycle_guard()?;
+        let result = match control::query_status().map_err(|error| error.to_string())? {
+            Some(status) if connection_in_progress(status.connection.phase) => AgentServiceResult {
+                running: true,
+                message: if status.connection.phase == control::ConnectionPhase::WaitingPermission {
+                    "服务正在等待辅助功能授权，授权后会自动继续，无需重复连接".to_owned()
+                } else {
+                    "连接正在进行，已保留当前服务，无需重复点击".to_owned()
+                },
+            },
+            status => {
+                if status.is_some() {
+                    stop_agent_unlocked()?;
+                }
+                start_agent_unlocked(&path)?
+            }
+        };
         let mut cache = agent_status
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -783,8 +812,7 @@ async fn repair_diagnostic(
             let path = config_path.ok_or_else(|| "未找到 edgemouse.toml".to_owned())?;
             persist_peer_address_auto(&path)
                 .map_err(|error| format!("无法启用自动发现：{error}"))?;
-            stop_agent()?;
-            let result = start_agent(&path)?;
+            let result = restart_agent(&path)?;
             *agent_status
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = AgentStatusCache::default();
@@ -806,7 +834,6 @@ async fn repair_diagnostic(
                 )
                 .map_err(|error| format!("无法启用自动重连：{error}"))?;
             }
-            stop_agent()?;
             let result = start_agent(&path)?;
             *agent_status
                 .lock()
@@ -1288,6 +1315,21 @@ fn select_existing_config() -> Result<Option<PathBuf>, String> {
 }
 
 fn start_agent(config_path: &Path) -> Result<AgentServiceResult, String> {
+    let _guard = agent_lifecycle_guard()?;
+    start_agent_unlocked(config_path)
+}
+
+fn restart_agent(config_path: &Path) -> Result<AgentServiceResult, String> {
+    let _guard = agent_lifecycle_guard()?;
+    stop_agent_unlocked()?;
+    start_agent_unlocked(config_path)
+}
+
+fn connection_in_progress(phase: control::ConnectionPhase) -> bool {
+    phase != control::ConnectionPhase::Connected
+}
+
+fn start_agent_unlocked(config_path: &Path) -> Result<AgentServiceResult, String> {
     if let Some(status) = control::query_status().map_err(|error| error.to_string())? {
         return Ok(AgentServiceResult {
             running: true,
@@ -1366,6 +1408,11 @@ fn config_requires_pairing(path: &Path) -> bool {
 }
 
 fn stop_agent() -> Result<AgentServiceResult, String> {
+    let _guard = agent_lifecycle_guard()?;
+    stop_agent_unlocked()
+}
+
+fn stop_agent_unlocked() -> Result<AgentServiceResult, String> {
     let Some(status) = control::request_stop().map_err(|error| error.to_string())? else {
         return Ok(AgentServiceResult {
             running: false,
@@ -1952,7 +1999,10 @@ fn build_diagnostic_report(config_path: Option<&Path>) -> DiagnosticReport {
             repair_label: None,
         },
     };
-    let permission_ok = platform.permission_granted != Some(false);
+    let worker_waiting_permission = running.as_ref().is_some_and(|status| {
+        status.connection.phase == control::ConnectionPhase::WaitingPermission
+    });
+    let permission_ok = platform.permission_granted != Some(false) && !worker_waiting_permission;
     let permissions = DiagnosticCheck {
         key: "permissions".to_owned(),
         passed: permission_ok,
@@ -1961,7 +2011,7 @@ fn build_diagnostic_report(config_path: Option<&Path>) -> DiagnosticReport {
         } else if permission_ok {
             "macOS 输入权限可用".to_owned()
         } else {
-            "macOS 辅助功能权限尚未授予".to_owned()
+            "macOS 尚未认可当前版本的辅助功能权限；服务开启后会等待授权并自动继续".to_owned()
         },
         repair_action: (!permission_ok && platform.operating_system.eq_ignore_ascii_case("macos"))
             .then(|| "open_permissions".to_owned()),
@@ -2509,6 +2559,29 @@ mod tests {
     use edgemouse_core::Edge;
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn overlapping_lifecycle_requests_are_rejected_until_operation_finishes() {
+        let guard = super::agent_lifecycle_guard().unwrap();
+        assert!(super::agent_lifecycle_guard().is_err());
+        drop(guard);
+        assert!(super::agent_lifecycle_guard().is_ok());
+    }
+
+    #[test]
+    fn repeated_connect_does_not_restart_a_starting_or_waiting_worker() {
+        use edgemouse_agent::control::ConnectionPhase;
+        for phase in [
+            ConnectionPhase::Starting,
+            ConnectionPhase::Connecting,
+            ConnectionPhase::Reconnecting,
+            ConnectionPhase::WaitingPermission,
+            ConnectionPhase::InputUnavailable,
+        ] {
+            assert!(super::connection_in_progress(phase));
+        }
+        assert!(!super::connection_in_progress(ConnectionPhase::Connected));
+    }
 
     #[test]
     fn windows_updates_follow_the_app_language_and_default_to_chinese() {

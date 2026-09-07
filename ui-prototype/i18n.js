@@ -1,5 +1,17 @@
 (() => {
   const zhToEn = {
+    "等待辅助功能授权": "Waiting for Accessibility access",
+    "输入初始化重试中": "Retrying input initialization",
+    "输入初始化重试中…": "Retrying input initialization…",
+    "服务已开启 · 等待授权后自动连接": "Service is on · Will connect after permission is granted",
+    "服务已开启 · 正在重试输入初始化": "Service is on · Retrying input initialization",
+    "服务保持开启，授权后自动继续连接": "Service stays on and will connect after permission is granted",
+    "服务保持开启，正在重试输入初始化": "Service stays on while input initialization is retried",
+    "等待授权": "Waiting for permission",
+    "正在恢复输入": "Recovering input",
+    "服务操作正在进行，请稍候，无需重复点击": "A service operation is in progress. Please wait; there is no need to click again",
+    "服务正在等待辅助功能授权，授权后会自动继续，无需重复连接": "Waiting for Accessibility access; connection will continue automatically after permission is granted",
+    "连接正在进行，已保留当前服务，无需重复点击": "Connection is in progress; the existing service has been kept running",
     "设置已保存；连接后自动同步并生效，无需在另一端重复设置": "Saved; settings will sync and take effect when connected, with no need to repeat them on the other device",
     "收起侧栏": "Collapse sidebar",
     "展开侧栏": "Expand sidebar",

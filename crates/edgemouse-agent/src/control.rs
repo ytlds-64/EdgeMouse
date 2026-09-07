@@ -76,6 +76,8 @@ pub enum ConnectionPhase {
     Connecting = 1,
     Connected = 2,
     Reconnecting = 3,
+    WaitingPermission = 4,
+    InputUnavailable = 5,
 }
 
 impl ConnectionPhase {
@@ -85,6 +87,8 @@ impl ConnectionPhase {
             value if value == Self::Connecting as u8 => Some(Self::Connecting),
             value if value == Self::Connected as u8 => Some(Self::Connected),
             value if value == Self::Reconnecting as u8 => Some(Self::Reconnecting),
+            value if value == Self::WaitingPermission as u8 => Some(Self::WaitingPermission),
+            value if value == Self::InputUnavailable as u8 => Some(Self::InputUnavailable),
             _ => None,
         }
     }
@@ -95,6 +99,8 @@ impl ConnectionPhase {
             Self::Connecting => "connecting",
             Self::Connected => "connected",
             Self::Reconnecting => "reconnecting",
+            Self::WaitingPermission => "waiting_permission",
+            Self::InputUnavailable => "input_unavailable",
         }
     }
 }
@@ -216,6 +222,17 @@ impl RuntimeTelemetry {
         } else {
             ConnectionPhase::Connecting
         };
+    }
+
+    pub fn waiting_for_input(&self, permission_missing: bool) {
+        let mut status = self.lock();
+        status.phase = if permission_missing {
+            ConnectionPhase::WaitingPermission
+        } else {
+            ConnectionPhase::InputUnavailable
+        };
+        status.connected_since_unix_ms = None;
+        clear_link_metrics(&mut status);
     }
 
     pub fn connected(&self, peer_name: &str, peer_screen: &ScreenInfo) {
@@ -1143,5 +1160,30 @@ mod tests {
         assert_eq!(disconnected.reconnect_count, 1);
         assert_eq!(disconnected.rtt_ms, None);
         assert_eq!(disconnected.sent_moves, 0);
+    }
+
+    #[test]
+    fn permission_wait_and_input_retry_remain_queryable_and_stoppable() {
+        for (missing, phase) in [
+            (true, ConnectionPhase::WaitingPermission),
+            (false, ConnectionPhase::InputUnavailable),
+        ] {
+            let stopping = Arc::new(AtomicBool::new(false));
+            let telemetry = RuntimeTelemetry::default();
+            telemetry.connected("peer", &test_peer_screen());
+            telemetry.waiting_for_input(missing);
+            let server =
+                ControlServer::start_on(loopback_ephemeral(), Arc::clone(&stopping), telemetry)
+                    .unwrap();
+            let address = server.address.to_string();
+            let status = request(&address, Command::Status).unwrap().unwrap();
+            assert_eq!(status.connection.phase, phase);
+            assert_eq!(status.connection.connected_since_unix_ms, None);
+            assert_eq!(status.connection.rtt_ms, None);
+            assert!(!stopping.load(Ordering::Acquire));
+            request(&address, Command::Stop).unwrap().unwrap();
+            assert!(stopping.load(Ordering::Acquire));
+            drop(server);
+        }
     }
 }

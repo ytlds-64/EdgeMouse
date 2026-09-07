@@ -20,8 +20,15 @@ Download the latest signed packages from
 - Windows: use the `.exe` installer. It supports Simplified Chinese and English.
 - macOS: use the universal `.dmg`, which supports both Apple silicon and Intel Macs.
 
-The current stable release is 0.6.6. Future signed releases can also be checked
+The current stable release is 0.6.7. Future signed releases can also be checked
 and installed from the Settings page in the desktop application.
+
+macOS packages currently use ad-hoc signing, without Developer ID signing or
+Apple notarization. Updates may require granting Accessibility access again.
+Starting with 0.6.7, the service stays on while waiting for the OS to report
+permission granted, then continues automatically. Updater signature verification
+is separate from macOS application identity signing; no privacy permissions are
+bypassed or reset.
 
 After installation, complete secure pairing once from the Connection page. If
 you previously used a source or command-line build, choose **Import previous

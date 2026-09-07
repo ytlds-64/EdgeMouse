@@ -73,6 +73,14 @@
   let updateProgressHideTimer;
   let lastDiagnosticExportPath;
 
+  function setServiceActionPending(pending) {
+    serviceActionPending = pending;
+    document.querySelectorAll('.overview-connect-button, .reconnect-button, [data-service-toggle]').forEach((control) => {
+      control.disabled = pending;
+      control.setAttribute('aria-busy', String(pending));
+    });
+  }
+
   function formatBytes(bytes) {
     const value = Number(bytes);
     if (!Number.isFinite(value) || value < 0) return "";
@@ -131,6 +139,8 @@
     connecting: "正在连接",
     connected: "已连接",
     reconnecting: "正在重连",
+    waiting_permission: "等待辅助功能授权",
+    input_unavailable: "输入初始化重试中",
     stopped: "未运行",
   };
 
@@ -260,7 +270,7 @@
   };
 
   function connectionState(snapshot) {
-    if (!snapshot.agent.running) return "stopped";
+    if (!snapshot?.agent?.running) return "stopped";
     return snapshot.agent.connection?.state ?? "starting";
   }
 
@@ -398,7 +408,7 @@
     setText('[data-metric="jitter"] p', jitter === null ? "等待真实链路数据" : `RTT 变化 · ${Number(connection?.staleMoves ?? 0)} 个过期事件`);
     setMetricHealth("jitter", connected && jitter !== null);
 
-    const permission = snapshot.platform.permissionGranted;
+    const permission = state === "waiting_permission" ? false : snapshot.platform.permissionGranted;
     const windowsLocal = snapshot.platform.operatingSystem.toLowerCase().includes("windows");
     if (windowsLocal) {
       setMetricValue("permissions", "无需授权");
@@ -433,7 +443,8 @@
 
     setText(`${localSelector} h2`, snapshot.config.localName);
     setText(`${peerSelector} h2`, snapshot.config.peerScreenName);
-    const localStatus = snapshot.agent.running
+    const localStatus = ["waiting_permission", "input_unavailable"].includes(state)
+      ? connectionLabels[state] : snapshot.agent.running
       ? snapshot.agent.statusFresh === false ? "本机状态确认中" : "本机运行中"
       : "本机服务未启动";
     setOnlineLabel(`${localSelector} .online`, localStatus);
@@ -515,10 +526,16 @@
     window.setEdgeMouseAppVersion?.(snapshot.desktopVersion);
     setText("[data-native-mode]", "桌面应用 · 实时状态");
 
-    const overviewConnectButton = document.querySelector(".overview-connect-button");
-    if (overviewConnectButton && !overviewConnectButton.dataset.pending) {
-      overviewConnectButton.disabled = false;
-      overviewConnectButton.textContent = running ? "重新连接" : "开始连接";
+    if (!serviceActionPending) {
+      const connecting = ["starting", "connecting", "reconnecting", "input_unavailable"].includes(state);
+      for (const selector of [".overview-connect-button", ".reconnect-button"]) {
+        const button = document.querySelector(selector);
+        if (!button) continue;
+        button.disabled = connecting;
+        button.textContent = state === "waiting_permission" ? "打开权限设置"
+          : connecting ? `${connectionLabels[state]}…`
+          : running ? "重新连接" : "开始连接";
+      }
     }
 
     if (!serviceActionPending) {
@@ -530,7 +547,9 @@
       }
       setText(
         ".service-state-label",
-        running ? "本机服务运行中" : pairingRequired ? "尚未配对 · 点击设置" : "本机服务未启动",
+        state === "waiting_permission" ? "服务已开启 · 等待授权后自动连接"
+          : state === "input_unavailable" ? "服务已开启 · 正在重试输入初始化"
+          : running ? "本机服务运行中" : pairingRequired ? "尚未配对 · 点击设置" : "本机服务未启动",
       );
     }
 
@@ -541,7 +560,10 @@
     );
     setText(
       ".connection-device-status b",
-      connected ? `${peerName} · 双向 TLS` : pairingRequired ? "请配对新设备或导入旧配对配置" : running ? "自动发现与重连已启动" : "等待 EdgeMouse 后台服务",
+      connected ? `${peerName} · 双向 TLS` : pairingRequired ? "请配对新设备或导入旧配对配置"
+        : state === "waiting_permission" ? "服务保持开启，授权后自动继续连接"
+        : state === "input_unavailable" ? "服务保持开启，正在重试输入初始化"
+        : running ? "自动发现与重连已启动" : "等待 EdgeMouse 后台服务",
     );
     setText(
       ".peer-address",
@@ -570,15 +592,18 @@
     if (diagnostics) {
       diagnostics.classList.toggle("good", connected && configValid);
       diagnostics.classList.toggle("pending", !(connected && configValid));
-      diagnostics.textContent = connected && configValid ? "实时监控正常" : running ? "等待连接" : "需要处理";
+      diagnostics.textContent = connected && configValid ? "实时监控正常"
+        : state === "waiting_permission" ? "等待授权" : state === "input_unavailable" ? "正在恢复输入"
+        : running ? "等待连接" : "需要处理";
       diagnostics.title = snapshot.agent.error ?? snapshot.config.error ?? "";
     }
 
     const serviceChip = document.querySelector("#page-settings .setting-panel .status-chip");
     if (serviceChip) {
-      serviceChip.classList.toggle("good", running);
-      serviceChip.classList.toggle("pending", !running);
-      serviceChip.textContent = running
+      const waitingForInput = ["waiting_permission", "input_unavailable"].includes(state);
+      serviceChip.classList.toggle("good", running && !waitingForInput);
+      serviceChip.classList.toggle("pending", !running || waitingForInput);
+      serviceChip.textContent = waitingForInput ? connectionLabels[state] : running
         ? snapshot.agent.statusFresh === false
           ? `正在确认后台状态 · PID ${snapshot.agent.processId}`
           : `后台服务正常 · PID ${snapshot.agent.processId}`
@@ -720,6 +745,8 @@
     if (!button) return;
     event.stopImmediatePropagation();
     const action = button.dataset.repairAction;
+    const changesService = ["restore_service", "enable_discovery"].includes(action);
+    if (changesService && serviceActionPending) return;
     if (action === "pair") {
       document.querySelector('.nav-item[data-page="connection"]')?.click();
       openRealPairingModal();
@@ -727,6 +754,7 @@
       return;
     }
     const originalLabel = button.textContent;
+    if (changesService) setServiceActionPending(true);
     button.disabled = true;
     button.textContent = "正在修复…";
     try {
@@ -740,6 +768,11 @@
       window.showEdgeMouseToast?.(`修复失败：${error}`, "error");
       button.disabled = false;
       button.textContent = originalLabel;
+    } finally {
+      if (changesService) {
+        setServiceActionPending(false);
+        await refreshSnapshot();
+      }
     }
   }, true);
 
@@ -1141,6 +1174,7 @@
   }, true);
 
   document.querySelector("[data-service-toggle]")?.addEventListener("click", async (event) => {
+    if (serviceActionPending) return;
     const toggle = event.currentTarget;
     const shouldRun = toggle.classList.contains("is-on");
     if (shouldRun && latestSnapshot?.config?.pairingRequired) {
@@ -1151,7 +1185,7 @@
       window.showEdgeMouseToast?.("请先完成一次安全配对，或导入以前的配对配置");
       return;
     }
-    serviceActionPending = true;
+    setServiceActionPending(true);
     toggle.disabled = true;
     toggle.setAttribute("aria-busy", "true");
     setText(".service-state-label", shouldRun ? "正在启动…" : "正在停止…");
@@ -1166,7 +1200,7 @@
       console.error("Unable to change EdgeMouse service state", error);
       window.showEdgeMouseToast?.(`${shouldRun ? "无法启动" : "无法停止"} EdgeMouse：${error}`);
     } finally {
-      serviceActionPending = false;
+      setServiceActionPending(false);
       toggle.disabled = false;
       toggle.removeAttribute("aria-busy");
       await refreshSnapshot();
@@ -1285,24 +1319,29 @@
   }, true);
 
   async function reconnectFrom(button, overview = false) {
+    if (serviceActionPending) return;
     if (latestSnapshot?.config?.pairingRequired) {
       document.querySelector('[data-page="connection"]')?.click();
       openRealPairingModal();
       window.showEdgeMouseToast?.("请先完成一次安全配对，或导入以前的配对配置");
       return;
     }
-    button.dataset.pending = "true";
+    setServiceActionPending(true);
     button.disabled = true;
     button.textContent = overview ? "连接中…" : "正在重新连接…";
     try {
+      if (connectionState(latestSnapshot) === "waiting_permission") {
+        const result = await invoke("repair_diagnostic", { action: "open_permissions" });
+        pendingPermissionRepair = Boolean(result.requiresUserAction);
+        window.showEdgeMouseToast?.(result.message);
+        return;
+      }
       const result = await invoke("reconnect_agent");
       window.showEdgeMouseToast?.(result.message);
     } catch (error) {
       window.showEdgeMouseToast?.(`重新连接失败：${error}`);
     } finally {
-      delete button.dataset.pending;
-      button.disabled = false;
-      if (!overview) button.textContent = "立即重新连接";
+      setServiceActionPending(false);
       await refreshSnapshot();
     }
   }

@@ -387,8 +387,8 @@ kbd { display: inline-grid; place-items: center; min-width: 40px; height: 27px; 
 .checklist .check.is-running { color: var(--teal-dark); background: var(--teal-soft); animation: check-pulse .65s ease-in-out infinite alternate; }
 @keyframes check-pulse { to { transform: scale(.82); opacity: .6; } }
 .diagnostic-check.is-running b { color: var(--teal-dark); }
-.checklist b { font-size: 11px; }
-.checklist small { margin-top: 3px; color: var(--muted); font-size: 9px; }
+.checklist > p > b { grid-column: 2; grid-row: 1; min-width: 0; font-size: 11px; }
+.checklist > p > small { grid-column: 2; grid-row: 2; min-width: 0; margin-top: 3px; color: var(--muted); font-size: 9px; overflow-wrap: anywhere; }
 .diagnostic-repair-button { grid-column: 3; grid-row: 1 / span 2; min-width: 78px; min-height: 30px; padding: 6px 10px; border: 1px solid #a9deda; border-radius: 8px; color: var(--teal-dark); background: white; font: inherit; font-size: 9px; font-weight: 800; cursor: pointer; }
 .diagnostic-repair-button:hover { border-color: var(--teal); background: var(--teal-soft); }
 .diagnostic-repair-button:disabled { opacity: .6; cursor: wait; }
