@@ -1,7 +1,7 @@
 const navItems = [...document.querySelectorAll(".nav-item")];
 const pages = [...document.querySelectorAll(".page")];
 const toast = document.querySelector(".toast");
-let appVersion = document.querySelector('meta[name="edgemouse-version"]')?.content ?? "0.6.10";
+let appVersion = document.querySelector('meta[name="edgemouse-version"]')?.content ?? "0.6.11";
 let toastTimer;
 
 const sidebarToggle = document.querySelector(".sidebar-toggle");

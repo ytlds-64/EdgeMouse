@@ -20,7 +20,7 @@ Download the latest signed packages from
 - Windows: use the `.exe` installer. It supports Simplified Chinese and English.
 - macOS: use the universal `.dmg`, which supports both Apple silicon and Intel Macs.
 
-The current stable release is 0.6.10. Future signed releases can also be checked
+The current stable release is 0.6.11. Future signed releases can also be checked
 and installed from the Settings page in the desktop application.
 
 macOS packages currently use ad-hoc signing, without Developer ID signing or
@@ -29,6 +29,17 @@ Starting with 0.6.7, the service stays on while waiting for the OS to report
 permission granted, then continues automatically. Updater signature verification
 is separate from macOS application identity signing; no privacy permissions are
 bypassed or reset.
+
+Version 0.6.11 restores local control immediately when the receiving computer's
+physical mouse moves, before waiting for the authenticated peer acknowledgement.
+Late remote input is fenced until confirmation, while local dragging stays safe.
+Mac handback reconciles released keys, preserves genuine held-key suppression,
+and cancels buffered remote motion. An existing editable responder can be
+reasserted only in the unchanged foreground app/window; another input or app is
+never activated, no click is synthesized, and no text content is read. Apps that
+do not expose the required accessibility focus attributes are safely skipped.
+The affected applications and input methods still need a real-device retest.
+Update both computers for all fixes.
 
 Version 0.6.10 filters EdgeMouse's own injected packets in Windows Raw Input,
 preventing remote motion from entering the physical-mouse reclaim path. Real
@@ -394,14 +405,13 @@ real position, so stopping cannot produce prediction overshoot followed by a
 visible correction. Buttons, wheels, leave events, and drag transitions flush
 the newest real position immediately, so buffering never changes control-event
 ordering or click accuracy.
-If the peer's physical mouse becomes unresponsive while it controls this
-computer, deliberately pushing this computer's physical mouse toward the
-configured peer edge requests an authenticated control handoff. The detector
-models the distance from the current remote pointer to that edge and requires a
-firm overshoot, so ordinary trackpad movement does not steal control. Synthetic
-cursor movement is excluded. The original sender releases held buttons and keys
-before acknowledging; if it cannot acknowledge within 1.5 seconds, the receiver
-restores local input and reconnects instead of leaving the pointer trapped.
+With Local mouse priority enabled, moving this computer's real physical mouse
+immediately restores its local control. Synthetic cursor movement is excluded.
+Local input does not wait for the peer acknowledgement. Late remote events are
+discarded until Ack or an ordered Leave, and no reverse crossing is forced.
+If confirmation does not arrive within 1.5 seconds, the link reconnects while
+local input remains available. Disable this option if incidental movement of
+the receiving computer's mouse should not interrupt remote control.
 While movement is active, the agent prints a five-second link summary containing
 QUIC RTT, the current movement interval, sent updates, skipped congested updates,
 merged updates, receive-side arrival jitter, and the largest active-movement

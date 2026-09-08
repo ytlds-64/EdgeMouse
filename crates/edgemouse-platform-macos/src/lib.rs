@@ -2,6 +2,8 @@
 
 #![cfg(target_os = "macos")]
 
+mod focus;
+
 use edgemouse_core::{
     ButtonState, CaptureMode, DisplayGeometry, KeyCode, KeyState, KeyboardCaptureBackend,
     KeyboardEvent, KeyboardInjectionBackend, MouseButton, MouseCaptureBackend,
@@ -123,6 +125,7 @@ unsafe extern "C" {
     fn CGEventGetDoubleValueField(event: *mut c_void, field: u32) -> f64;
     fn CGEventGetFlags(event: *mut c_void) -> u64;
     fn CGEventSourceFlagsState(state_id: i32) -> u64;
+    fn CGEventSourceKeyState(state_id: i32, key: u16) -> bool;
     fn CGEventCreate(source: *mut c_void) -> *mut c_void;
     fn CGEventGetLocation(event: *mut c_void) -> CGPoint;
     fn CGEventCreateMouseEvent(
@@ -305,6 +308,7 @@ pub struct MacMouseCapture {
     run_loop: usize,
     thread: Option<JoinHandle<()>>,
     cursor_hidden: bool,
+    input_focus: Option<focus::InputFocusBookmark>,
 }
 
 impl MacMouseCapture {
@@ -343,6 +347,7 @@ impl MacMouseCapture {
             run_loop,
             thread: Some(thread),
             cursor_hidden: false,
+            input_focus: None,
         })
     }
 
@@ -478,9 +483,14 @@ impl MouseCaptureBackend for MacMouseCapture {
                 if let Some(position) = restore {
                     Self::warp(position)?;
                 }
-                self.show_cursor()
+                self.show_cursor()?;
+                if let Some(input_focus) = self.input_focus.take() {
+                    input_focus.restore();
+                }
+                Ok(())
             }
             CaptureMode::Remote { anchor } => {
+                self.input_focus = focus::InputFocusBookmark::capture();
                 Self::warp(anchor)?;
                 self.hide_cursor()?;
                 Self::associate_cursor(false)?;
@@ -488,6 +498,7 @@ impl MouseCaptureBackend for MacMouseCapture {
                 Ok(())
             }
             CaptureMode::ReceivingRemote { position } => {
+                self.input_focus = focus::InputFocusBookmark::capture();
                 Self::warp(position)?;
                 self.show_cursor()?;
                 Self::associate_cursor(false)?;
@@ -547,6 +558,25 @@ impl KeyboardRoutingState {
         self.local_pressed.contains(&key)
             || self.captured_pressed.contains(&key)
             || self.passthrough_pressed.contains(&key)
+    }
+
+    fn set_remote_with_physical_state(
+        &mut self,
+        remote: bool,
+        mut held: impl FnMut(KeyCode) -> bool,
+    ) {
+        if remote && !self.remote {
+            let local_pressed = std::mem::take(&mut self.local_pressed);
+            self.passthrough_pressed.extend(local_pressed);
+        } else if !remote {
+            // Keep suppressing a genuinely held remote key until its release,
+            // but never leave an already released key quarantined indefinitely
+            // after a lost key-up/event-tap interruption.
+            self.captured_pressed.retain(|key| held(*key));
+            self.passthrough_pressed.retain(|key| held(*key));
+            self.local_pressed.retain(|key| held(*key));
+        }
+        self.remote = remote;
     }
 }
 
@@ -646,11 +676,13 @@ impl KeyboardCaptureBackend for MacKeyboardCapture {
             .routing
             .lock()
             .map_err(|_| PlatformError::new("macOS keyboard routing lock was poisoned"))?;
-        if remote && !routing.remote {
-            let local_pressed = std::mem::take(&mut routing.local_pressed);
-            routing.passthrough_pressed.extend(local_pressed);
-        }
-        routing.remote = remote;
+        routing.set_remote_with_physical_state(remote, |key| {
+            mac_virtual_key(key).is_some_and(|virtual_key| {
+                // SAFETY: Read only the HID hardware state, not the combined
+                // session table that also includes our injected remote keys.
+                unsafe { CGEventSourceKeyState(1, virtual_key) }
+            })
+        });
         Ok(())
     }
 
@@ -1141,6 +1173,9 @@ impl MouseInjectionBackend for MacMouseInjector {
 
     fn release_all(&mut self) -> Result<(), PlatformError> {
         let pressed: Vec<_> = self.pressed.iter().copied().collect();
+        // Cancel buffered remote motion before handing the physical mouse back.
+        // Otherwise poll() can move the cursor again after local restoration.
+        self.motion.jump(self.position, Instant::now());
         let mut first_error = None;
         for button in pressed {
             if let Err(error) = self.post_button(button, ButtonState::Released) {
@@ -1548,7 +1583,13 @@ unsafe extern "C" fn keyboard_event_tap_callback(
     let Some(key_state) = mac_key_state(event_type, key, flags, &routing) else {
         return event;
     };
-    let (send, suppress, repeat) = route_mac_keyboard_event(&mut routing, key, key_state);
+    // A fresh down is distinct from hardware autorepeat. This distinction is
+    // essential after a missed release: a fresh local press must not be eaten
+    // merely because the same key was captured during the previous handoff.
+    let native_repeat = event_type == EVENT_KEY_DOWN
+        && unsafe { CGEventGetIntegerValueField(event, FIELD_KEYBOARD_AUTOREPEAT) } != 0;
+    let (send, suppress, repeat) =
+        route_mac_keyboard_event_with_repeat(&mut routing, key, key_state, native_repeat);
     let emergency = suppress
         && key == KeyCode::ESCAPE
         && key_state == KeyState::Pressed
@@ -1705,10 +1746,21 @@ fn reconcile_mac_modifier_flags(
     events
 }
 
+#[cfg(test)]
 fn route_mac_keyboard_event(
     routing: &mut KeyboardRoutingState,
     key: KeyCode,
     state: KeyState,
+) -> (bool, bool, bool) {
+    let repeat = state == KeyState::Pressed && routing.captured_pressed.contains(&key);
+    route_mac_keyboard_event_with_repeat(routing, key, state, repeat)
+}
+
+fn route_mac_keyboard_event_with_repeat(
+    routing: &mut KeyboardRoutingState,
+    key: KeyCode,
+    state: KeyState,
+    native_repeat: bool,
 ) -> (bool, bool, bool) {
     if routing.passthrough_pressed.contains(&key) {
         if state == KeyState::Released {
@@ -1719,18 +1771,24 @@ fn route_mac_keyboard_event(
     if routing.remote {
         return match state {
             KeyState::Pressed => {
-                let repeat = !routing.captured_pressed.insert(key);
-                (true, true, repeat)
+                routing.captured_pressed.insert(key);
+                (true, true, native_repeat)
             }
             KeyState::Released if routing.captured_pressed.remove(&key) => (true, true, false),
             KeyState::Released => (false, false, false),
         };
     }
     if routing.captured_pressed.contains(&key) {
-        if state == KeyState::Released {
+        if state == KeyState::Pressed && !native_repeat {
+            // The physical key has been released and pressed again even if the
+            // old up never reached this tap. Let the very first new press pass.
             routing.captured_pressed.remove(&key);
+        } else {
+            if state == KeyState::Released {
+                routing.captured_pressed.remove(&key);
+            }
+            return (false, true, false);
         }
-        return (false, true, false);
     }
     match state {
         KeyState::Pressed => {
@@ -2196,6 +2254,99 @@ mod tests {
             (false, true, false)
         );
         assert!(routing.captured_pressed.is_empty());
+    }
+
+    #[test]
+    fn first_fresh_local_key_down_survives_a_missed_remote_key_up() {
+        let mut routing = KeyboardRoutingState {
+            remote: true,
+            ..KeyboardRoutingState::default()
+        };
+        assert_eq!(
+            route_mac_keyboard_event_with_repeat(
+                &mut routing,
+                KeyCode::A,
+                KeyState::Pressed,
+                false
+            ),
+            (true, true, false)
+        );
+        // Simulate a missed up and stale hardware snapshot at handback.
+        routing.set_remote_with_physical_state(false, |_| true);
+        assert_eq!(
+            route_mac_keyboard_event_with_repeat(
+                &mut routing,
+                KeyCode::A,
+                KeyState::Pressed,
+                false
+            ),
+            (false, false, false)
+        );
+        assert_eq!(
+            route_mac_keyboard_event_with_repeat(
+                &mut routing,
+                KeyCode::A,
+                KeyState::Released,
+                false
+            ),
+            (false, false, false)
+        );
+        assert!(routing.captured_pressed.is_empty());
+    }
+
+    #[test]
+    fn handback_cancels_buffered_remote_motion_without_posting_local_events() {
+        let position = Point::new(10.0, 20.0);
+        let mut injector = MacMouseInjector::new_with_smoothing(position, 100);
+        injector
+            .motion
+            .set_target(Point::new(700.0, 500.0), Instant::now());
+        assert!(injector.motion.pending);
+        // No pressed buttons, so this test never posts events to the desktop.
+        injector.release_all().unwrap();
+        assert!(!injector.motion.pending);
+        assert_eq!(
+            injector
+                .motion
+                .sample(Instant::now() + Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(injector.position, position);
+    }
+
+    #[test]
+    fn handback_reconciles_released_keys_without_leaking_held_autorepeat() {
+        let mut routing = KeyboardRoutingState {
+            remote: true,
+            ..KeyboardRoutingState::default()
+        };
+        for key in [KeyCode::A, KeyCode::LEFT_META] {
+            route_mac_keyboard_event_with_repeat(&mut routing, key, KeyState::Pressed, false);
+        }
+        routing.set_remote_with_physical_state(false, |key| key == KeyCode::A);
+        assert!(!routing.captured_pressed.contains(&KeyCode::LEFT_META));
+        assert_eq!(
+            route_mac_keyboard_event_with_repeat(&mut routing, KeyCode::A, KeyState::Pressed, true),
+            (false, true, false)
+        );
+        assert_eq!(
+            route_mac_keyboard_event_with_repeat(
+                &mut routing,
+                KeyCode::A,
+                KeyState::Released,
+                false
+            ),
+            (false, true, false)
+        );
+        assert_eq!(
+            route_mac_keyboard_event_with_repeat(
+                &mut routing,
+                KeyCode::A,
+                KeyState::Pressed,
+                false
+            ),
+            (false, false, false)
+        );
     }
 
     #[test]
