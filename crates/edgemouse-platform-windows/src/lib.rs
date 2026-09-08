@@ -330,6 +330,7 @@ struct MouseCaptureStartup {
 #[derive(Default)]
 struct RawMovementState {
     absolute_positions: BTreeMap<usize, Point>,
+    ignored_self_input: u64,
 }
 
 static CALLBACK_STATE: AtomicPtr<CallbackState> = AtomicPtr::new(ptr::null_mut());
@@ -1320,6 +1321,19 @@ fn raw_mouse_events(
     capture: bool,
 ) -> Vec<PhysicalMouseEvent> {
     let mut events = Vec::new();
+    // SendInput can also reach WM_INPUT. Filtering only WH_MOUSE_LL leaves
+    // this second capture path feeding our injected remote motion back into
+    // the physical takeover gesture. Reject the complete packet *before*
+    // updating absolute-device baselines, including while capture is local.
+    // Do not use a null device handle as an injection test: Windows precision
+    // touchpads can legitimately report hDevice == 0.
+    if raw.mouse.extra_information == EVENT_MARKER as u32 {
+        movement_state.ignored_self_input = movement_state.ignored_self_input.saturating_add(1);
+        if movement_state.ignored_self_input == 1 {
+            println!("Windows Raw Input: ignored self-injected mouse feedback");
+        }
+        return events;
+    }
     let movement = raw_mouse_movement(raw, movement_state);
     if capture {
         match movement {
@@ -2143,6 +2157,141 @@ mod tests {
     fn raw_mouse_is_drained_but_not_emitted_while_local() {
         let raw = raw_mouse_input(0, RI_MOUSE_RIGHT_BUTTON_DOWN, 0, 4, 5);
         assert!(raw_mouse_events(&raw, &mut RawMovementState::default(), false).is_empty());
+    }
+
+    #[test]
+    fn raw_self_injected_packets_never_become_physical_input() {
+        let mut movement = RawMovementState::default();
+        for capture in [false, true] {
+            for flags in [0, MOUSE_MOVE_ABSOLUTE | MOUSE_VIRTUAL_DESKTOP] {
+                let mut raw = raw_mouse_input(
+                    flags,
+                    RI_MOUSE_LEFT_BUTTON_DOWN | RI_MOUSE_WHEEL | RI_MOUSE_HORIZONTAL_WHEEL,
+                    120,
+                    20_000,
+                    30_000,
+                );
+                raw.mouse.extra_information = EVENT_MARKER as u32;
+                assert!(raw_mouse_events(&raw, &mut movement, capture).is_empty());
+            }
+        }
+        assert_eq!(movement.ignored_self_input, 4);
+        assert!(movement.absolute_positions.is_empty());
+    }
+
+    #[test]
+    fn injected_absolute_input_does_not_poison_a_physical_device_baseline() {
+        let mut raw = raw_mouse_input(MOUSE_MOVE_ABSOLUTE, 0, 0, 32_000, 60_000);
+        raw.mouse.extra_information = EVENT_MARKER as u32;
+        let mut movement = RawMovementState::default();
+        let previous = Point::new(300.0, 400.0);
+        movement
+            .absolute_positions
+            .insert(raw.header.device as usize, previous);
+        assert!(raw_mouse_events(&raw, &mut movement, true).is_empty());
+        assert_eq!(
+            movement.absolute_positions[&(raw.header.device as usize)],
+            previous
+        );
+    }
+
+    #[test]
+    fn remote_portrait_sweep_cannot_generate_a_physical_reclaim_gesture() {
+        let mut movement = RawMovementState::default();
+        // Replay a full down/up remote sweep. Even a large injected delta must
+        // not reach LocalTakeoverGesture as physical Windows mouse movement.
+        for dy in (0..3_840).step_by(12).chain((0..3_840).step_by(12).rev()) {
+            let mut raw = raw_mouse_input(0, 0, 0, 0, dy);
+            raw.mouse.extra_information = EVENT_MARKER as u32;
+            assert!(raw_mouse_events(&raw, &mut movement, true).is_empty());
+        }
+        let physical = raw_mouse_input(0, 0, 0, 0, 12);
+        assert_eq!(
+            raw_mouse_events(&physical, &mut movement, true),
+            vec![PhysicalMouseEvent::Move {
+                movement: Vector::new(0.0, 12.0)
+            }]
+        );
+    }
+
+    #[test]
+    fn precision_touchpad_input_with_no_device_handle_is_still_physical() {
+        let mut raw = raw_mouse_input(0, 0, 0, 3, 7);
+        raw.header.device = ptr::null_mut();
+        assert_eq!(
+            raw_mouse_events(&raw, &mut RawMovementState::default(), true),
+            vec![PhysicalMouseEvent::Move {
+                movement: Vector::new(3.0, 7.0)
+            }]
+        );
+    }
+
+    /// Opt in only on an isolated Windows desktop (CI), never on a user's
+    /// active KVM session. Exercises actual SendInput + WM_INPUT + low-level
+    /// hook delivery, not just fabricated RAWMOUSE packets.
+    #[test]
+    #[ignore = "moves the cursor; requires an isolated interactive Windows desktop"]
+    fn native_injected_moves_do_not_become_physical_input() {
+        use std::time::Duration;
+        let (_, _, displays) = desktop_geometry().unwrap();
+        let bounds = displays.iter().find(|d| d.primary).unwrap().bounds;
+        let original = current_pointer().unwrap();
+        let center = Point::new(
+            bounds.left() + bounds.width / 2.0,
+            bounds.top() + bounds.height / 2.0,
+        );
+        for raw_enabled in [true, false] {
+            let mut capture =
+                WindowsMouseCapture::start(1.0, center, original, raw_enabled).unwrap();
+            let mut injector = WindowsMouseInjector::new(center);
+            let result = (|| -> Result<(), String> {
+                for mode in [
+                    CaptureMode::ReceivingRemote { position: center },
+                    CaptureMode::Remote { anchor: center },
+                ] {
+                    capture.set_mode(mode).map_err(|e| e.to_string())?;
+                    std::thread::sleep(Duration::from_millis(100));
+                    while capture
+                        .try_next_event()
+                        .map_err(|e| e.to_string())?
+                        .is_some()
+                    {}
+                    for step in (1..10).chain((1..10).rev()) {
+                        let position = Point::new(
+                            center.x,
+                            bounds.top() + bounds.height * f64::from(step) / 10.0,
+                        );
+                        injector
+                            .inject(RemoteMouseEvent::MoveAbsolute {
+                                position,
+                                screen: edgemouse_core::ScreenId(1),
+                            })
+                            .map_err(|e| e.to_string())?;
+                        std::thread::sleep(Duration::from_millis(25));
+                        let visible = current_pointer().map_err(|e| e.to_string())?;
+                        if (visible.x - position.x).abs() > 2.0
+                            || (visible.y - position.y).abs() > 2.0
+                        {
+                            return Err(format!(
+                                "injected/visible cursor mismatch: {position:?} vs {visible:?}"
+                            ));
+                        }
+                        if let Some(event) = capture.try_next_event().map_err(|e| e.to_string())? {
+                            return Err(format!(
+                                "self-injected motion became physical input (raw={raw_enabled}, mode={mode:?}): {event:?}"
+                            ));
+                        }
+                    }
+                }
+                Ok(())
+            })();
+            let restored = capture.set_mode(CaptureMode::Local {
+                restore: Some(original),
+            });
+            drop(capture);
+            restored.unwrap();
+            result.unwrap();
+        }
     }
 
     #[test]

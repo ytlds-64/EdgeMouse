@@ -1155,7 +1155,9 @@ fn run_loop(
                     network.send(WireMessage::ControlReclaim { owner_session_id })?;
                     takeover.mark_requested(owner_session_id, now_ms);
                     println!(
-                        "Local physical mouse pushed toward {takeover_edge:?}; requesting control"
+                        "Local physical mouse pushed toward {takeover_edge:?}; requesting control; receiver pointer {:?}, desktop {:?}, triggering input {event:?}",
+                        remote.current_position(),
+                        remote.local_bounds,
                     );
                 }
                 continue;

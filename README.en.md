@@ -20,7 +20,7 @@ Download the latest signed packages from
 - Windows: use the `.exe` installer. It supports Simplified Chinese and English.
 - macOS: use the universal `.dmg`, which supports both Apple silicon and Intel Macs.
 
-The current stable release is 0.6.9. Future signed releases can also be checked
+The current stable release is 0.6.10. Future signed releases can also be checked
 and installed from the Settings page in the desktop application.
 
 macOS packages currently use ad-hoc signing, without Developer ID signing or
@@ -29,6 +29,13 @@ Starting with 0.6.7, the service stays on while waiting for the OS to report
 permission granted, then continues automatically. Updater signature verification
 is separate from macOS application identity signing; no privacy permissions are
 bypassed or reset.
+
+Version 0.6.10 filters EdgeMouse's own injected packets in Windows Raw Input,
+preventing remote motion from entering the physical-mouse reclaim path. Real
+mouse input and precision touchpads with null device handles remain supported.
+A native Windows regression test exercises SendInput, Raw Input and the fallback
+hook together and checks the visible cursor position. Reclaim logs include the
+triggering movement and receiver coordinates.
 
 Version 0.6.9 routes the pointer inside real monitor regions and maps handoffs only
 to populated outer-edge segments. This prevents virtual movement through empty

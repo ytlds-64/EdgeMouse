@@ -49,15 +49,15 @@ jobs:
           tagName: v__VERSION__
           releaseName: EdgeMouse __VERSION__
           releaseBody: |
-            EdgeMouse 0.6.9
+            EdgeMouse 0.6.10
 
-            - 多屏跨屏路由改用真实显示器区域，进入 Windows 时不再落在横屏和竖屏之间的空白桌面区，避免系统可见指针和内部坐标错位。
-            - 进入另一台电脑时只映射到实际存在的桌面外边缘，增加竖屏下半部、空白区域、四方向边缘及镜像屏回归测试。
-            - 输入页新增“鼠标移动速度”：25%–300%，默认 100%；两个控制方向可分别调整，在任意一端保存后同步。
-            - 速度仅影响远程移动，不修改本机系统鼠标设置或滚轮；两端更新至 0.6.9 才能同步速度，仍可与旧版连接并同步已有设置。
-            - 诊断日志增加每块对端显示器的坐标和大小，帮助继续核对具体多屏环境。
+            - 修复 Windows Raw Input 漏掉自注入事件过滤的问题，避免 Mac 远程移动被误当成 Windows 本机鼠标抢回控制，导致竖屏中途跳回 Mac。
+            - 在更新绝对坐标参考点前过滤整个自注入事件包，覆盖移动、按键和滚轮；保留正常鼠标及无设备句柄的精密触控板输入。
+            - 增加真实 Windows SendInput / Raw Input / 鼠标钩子联动回归测试，核对上下移动期间的系统实际落点和捕获结果。
+            - 抢回控制日志增加触发事件及接收端坐标，便于继续定位具体硬件或驱动差异。
+            - 保留 0.6.9 的鼠标速度调节和同步；本次关键修复在 Windows 端。
 
-            Routes pointers through real monitor regions and maps handoffs only to populated desktop edges, preventing empty areas beside mixed landscape/portrait monitors from desynchronizing the virtual and visible cursor. Adds portrait lower-half, monitor-gap, four-edge and mirror-display regression tests. Input now offers per-direction pointer speed (25%–300%, default 100%) synchronized between 0.6.9+ peers. Local OS settings, wheel and keyboard events are unchanged. Older peers remain compatible without receiving unsupported speed fields. Logs include individual peer monitor geometry.
+            Fixes missing self-injection filtering in Windows Raw Input, which could treat Mac-driven remote motion as a local physical reclaim and jump back mid-screen. Rejects complete marked packets before updating absolute-device baselines, without rejecting real mice or precision touchpads with null device handles. Adds a native Windows SendInput/capture regression test, visible-cursor checks and detailed reclaim diagnostics. Pointer speed controls and synchronization remain available. The critical fix is on the Windows receiver.
 
             注意：当前 macOS 包仍使用临时签名，尚无 Developer ID 签名及 Apple 公证；跨版本更新后，系统仍可能要求重新授权。此修复不会绕过、删除或重置系统隐私权限。更新包的加密签名验证与 macOS 应用身份签名是两回事。
 
