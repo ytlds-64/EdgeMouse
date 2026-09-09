@@ -1074,6 +1074,7 @@ fn run_loop(
             handled_input = true;
             if remote.is_active() {
                 if reclaim_enabled && takeover.observe(event) {
+                    let reclaim_position = remote.last_position;
                     let request = reclaim_local_input(
                         &mut takeover,
                         remote,
@@ -1085,7 +1086,7 @@ fn run_loop(
                     )?;
                     network.send(request)?;
                     println!(
-                        "Local physical mouse immediately restored local control; awaiting peer acknowledgement"
+                        "Local physical mouse immediately restored local control; awaiting peer acknowledgement; trigger {event:?}; remote pointer {reclaim_position:?}"
                     );
                 }
                 continue;

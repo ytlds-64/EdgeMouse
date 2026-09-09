@@ -960,6 +960,83 @@ mod tests {
     }
 
     #[test]
+    fn mac_controls_both_halves_of_scaled_windows_portrait_before_right_handback() {
+        // Exact display arrangement from the 0.6.11 diagnostic report: the
+        // Windows landscape is left of a 200%-scaled portrait, vertically offset.
+        let windows = Rect::new(Point::new(-3840.0, 0.0), 6000.0, 3840.0).unwrap();
+        let mac = Rect::new(Point::new(-253.0, -1080.0), 1920.0, 2036.0).unwrap();
+        let mut topology = Topology::default();
+        for (id, node, bounds, scale) in [
+            (LOCAL_SCREEN, LOCAL, mac, 1.0),
+            (REMOTE_SCREEN, REMOTE, windows, 2.0),
+        ] {
+            topology
+                .add_screen(Screen::new(id, node, "desktop", bounds, scale).unwrap())
+                .unwrap();
+        }
+        topology
+            .set_displays(
+                REMOTE_SCREEN,
+                vec![
+                    Rect::new(Point::new(-3840.0, 952.0), 3840.0, 2160.0).unwrap(),
+                    Rect::new(Point::new(0.0, 0.0), 2160.0, 3840.0).unwrap(),
+                ],
+            )
+            .unwrap();
+        topology
+            .set_displays(
+                LOCAL_SCREEN,
+                vec![
+                    Rect::new(Point::new(-253.0, -1080.0), 1920.0, 1080.0).unwrap(),
+                    Rect::new(Point::new(0.0, 0.0), 1470.0, 956.0).unwrap(),
+                ],
+            )
+            .unwrap();
+        topology
+            .connect_bidirectional(LOCAL_SCREEN, Edge::Left, REMOTE_SCREEN)
+            .unwrap();
+
+        for y in [400.0, 1496.0, 2292.5, 3400.0] {
+            let mut session = Session::new(
+                LOCAL,
+                topology.clone(),
+                LOCAL_SCREEN,
+                Point::new(-252.0, -540.0),
+                SessionConfig::default(),
+            )
+            .unwrap();
+            let move_by = |session: &mut Session, movement| {
+                session
+                    .handle_input(PhysicalMouseEvent::Move { movement }, 1)
+                    .unwrap()
+            };
+            move_by(&mut session, Vector::new(-100.0, 0.0));
+            let pointer = session.pointer();
+            move_by(&mut session, Vector::new(100.0 - pointer.x, y - pointer.y));
+            // Traverse the full portrait, including x=1080 (the midpoint), and
+            // prove every sent coordinate reaches the right half unchanged.
+            for x in [500.0, 1079.0, 1080.0, 1081.0, 1600.0, 2100.0, 2159.0] {
+                let dx = x - session.pointer().x;
+                let result = move_by(&mut session, Vector::new(dx, 0.0));
+                assert_eq!(session.state(), ControlState::Remote { peer: REMOTE });
+                assert_eq!(session.pointer(), Point::new(x, y));
+                assert!(matches!(
+                    result.effects.as_slice(),
+                    [Effect::Send {
+                        event: RoutedEvent {
+                            event: RemoteMouseEvent::MoveAbsolute { position, .. },
+                            ..
+                        },
+                        ..
+                    }] if *position == Point::new(x, y)
+                ));
+            }
+            move_by(&mut session, Vector::new(3.0, 0.0));
+            assert_eq!(session.state(), ControlState::Local);
+        }
+    }
+
+    #[test]
     fn real_local_edges_work_in_all_directions_with_negative_origins() {
         for (edge, position, movement) in [
             (

@@ -1,0 +1,57 @@
+name: Validate Windows input fix
+on:
+  push:
+    branches: [codex/windows-input-validation]
+permissions:
+  contents: read
+jobs:
+  input:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prepare Rust
+        run: rustup default stable
+      - name: Check whether the native regression reproduces on v0.6.11
+        shell: python {0}
+        run: |
+          import subprocess
+          from pathlib import Path
+          path = Path('crates/edgemouse-platform-windows/src/lib.rs')
+          fixed = path.read_text()
+          legacy = subprocess.check_output(['git', 'show', 'v0.6.11:' + path.as_posix()], text=True)
+          start = '    /// Opt in only on an isolated Windows desktop (CI), never on a user'
+          end = '    #[test]\n    fn transition_timestamp_rejects_old_raw_input_across_wraparound()'
+          test = fixed[fixed.index(start):fixed.index(end)]
+          legacy = legacy[:legacy.index(start)] + test + legacy[legacy.index(end):]
+          try:
+              path.write_text(legacy)
+              result = subprocess.run(['cargo', 'test', '-p', 'edgemouse-platform-windows', 'native_injected_moves_do_not_become_physical_input', '--', '--ignored', '--nocapture', '--test-threads=1'], text=True, capture_output=True)
+              output = result.stdout + result.stderr
+              Path('legacy-native-result.txt').write_text(output)
+              print(output)
+              if result.returncode and ('synthetic motion became physical input' in output or 'transition warp became physical input' in output):
+                  print('LEGACY_REPRODUCED=true')
+              elif result.returncode == 0:
+                  print('LEGACY_REPRODUCED=false')
+              else:
+                  raise RuntimeError('Baseline failed for an unrelated reason')
+          finally:
+              path.write_text(fixed)
+      - name: Run core and Windows unit tests
+        run: cargo test -p edgemouse-core -p edgemouse-platform-windows
+      - name: Verify actual Windows input delivery after the fix
+        shell: pwsh
+        run: |
+          cargo test -p edgemouse-platform-windows native_injected_moves_do_not_become_physical_input -- --ignored --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath fixed-native-result.txt
+          exit $LASTEXITCODE
+      - name: Run Windows static analysis
+        run: cargo clippy -p edgemouse-core -p edgemouse-platform-windows --all-targets -- -D warnings
+      - name: Preserve regression output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-input-validation
+          path: '*native-result.txt'

@@ -274,7 +274,6 @@ unsafe extern "system" {
         size: *mut u32,
         header_size: u32,
     ) -> u32;
-    fn SetCursorPos(x: i32, y: i32) -> i32;
     fn GetCursorPos(point: *mut PointI32) -> i32;
     fn ShowCursor(show: i32) -> i32;
     fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
@@ -312,6 +311,7 @@ unsafe extern "system" {
 struct CallbackState {
     sender: mpsc::SyncSender<PhysicalMouseEvent>,
     suppress: Arc<AtomicBool>,
+    receiving_remote: Arc<AtomicBool>,
     transitioning: Arc<AtomicBool>,
     overflowed: Arc<AtomicBool>,
     last_point: Arc<Mutex<Option<Point>>>,
@@ -470,6 +470,7 @@ pub struct WindowsMouseCapture {
     receiver: mpsc::Receiver<PhysicalMouseEvent>,
     deferred_events: VecDeque<PhysicalMouseEvent>,
     suppress: Arc<AtomicBool>,
+    receiving_remote: Arc<AtomicBool>,
     transitioning: Arc<AtomicBool>,
     overflowed: Arc<AtomicBool>,
     last_point: Arc<Mutex<Option<Point>>>,
@@ -507,6 +508,8 @@ impl WindowsMouseCapture {
         let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
         let suppress = Arc::new(AtomicBool::new(false));
         let callback_suppress = Arc::clone(&suppress);
+        let receiving_remote = Arc::new(AtomicBool::new(false));
+        let callback_receiving_remote = Arc::clone(&receiving_remote);
         let transitioning = Arc::new(AtomicBool::new(false));
         let callback_transitioning = Arc::clone(&transitioning);
         let overflowed = Arc::new(AtomicBool::new(false));
@@ -527,6 +530,7 @@ impl WindowsMouseCapture {
                     CallbackState {
                         sender: event_sender,
                         suppress: callback_suppress,
+                        receiving_remote: callback_receiving_remote,
                         transitioning: callback_transitioning,
                         overflowed: callback_overflowed,
                         last_point: callback_last_point,
@@ -557,6 +561,7 @@ impl WindowsMouseCapture {
             receiver: event_receiver,
             deferred_events: VecDeque::new(),
             suppress,
+            receiving_remote,
             transitioning,
             overflowed,
             last_point,
@@ -572,12 +577,10 @@ impl WindowsMouseCapture {
         if !position.is_finite() {
             return Err(PlatformError::new("cursor position must be finite"));
         }
-        // SAFETY: SetCursorPos copies two integer coordinates and owns no memory.
-        if unsafe { SetCursorPos(rounded_i32(position.x), rounded_i32(position.y)) } == 0 {
-            Err(PlatformError::new("SetCursorPos failed"))
-        } else {
-            Ok(())
-        }
+        // SetCursorPos may feed an unmarked move back after the transition
+        // flag is cleared. Use the same marked path as remote movement so a
+        // delayed restore/entry warp can never masquerade as physical reclaim.
+        WindowsMouseInjector::new(position).send_absolute_move()
     }
 
     fn hide_cursor(&mut self) {
@@ -618,14 +621,16 @@ impl WindowsMouseCapture {
         }
     }
 
-    fn transition_pointer(
-        &mut self,
-        position: Option<Point>,
-        suppress: bool,
-        hide_cursor: bool,
-    ) -> Result<(), PlatformError> {
+    fn transition_pointer(&mut self, mode: CaptureMode) -> Result<(), PlatformError> {
+        let (position, suppress, hide_cursor, receiving_remote) = match mode {
+            CaptureMode::Local { restore } => (restore, false, false, false),
+            CaptureMode::Remote { .. } => (Some(self.capture_anchor), true, true, false),
+            CaptureMode::ReceivingRemote { position } => (Some(position), true, false, true),
+        };
         self.transitioning.store(true, Ordering::Release);
         self.suppress.store(false, Ordering::Release);
+        self.receiving_remote
+            .store(receiving_remote, Ordering::Release);
 
         let result = (|| {
             self.discard_queued_movements()?;
@@ -662,15 +667,7 @@ impl MouseCaptureBackend for WindowsMouseCapture {
     }
 
     fn set_mode(&mut self, mode: CaptureMode) -> Result<(), PlatformError> {
-        match mode {
-            CaptureMode::Local { restore } => self.transition_pointer(restore, false, false),
-            CaptureMode::Remote { anchor: _ } => {
-                self.transition_pointer(Some(self.capture_anchor), true, true)
-            }
-            CaptureMode::ReceivingRemote { position } => {
-                self.transition_pointer(Some(position), true, false)
-            }
-        }
+        self.transition_pointer(mode)
     }
 
     fn try_next_event(&mut self) -> Result<Option<PhysicalMouseEvent>, PlatformError> {
@@ -1303,6 +1300,14 @@ fn process_raw_input_message(
         return Ok(());
     }
 
+    // RAWMOUSE has no generic injected-event flag. Its extra information is
+    // device-specific, so an unmarked synthetic packet must not be enough to
+    // reclaim a received session. WH_MOUSE_LL supplies LLMHF_INJECTED and owns
+    // physical reclaim; Raw Input continues to own high-rate outgoing input.
+    if state.receiving_remote.load(Ordering::Acquire) {
+        movement_state.absolute_positions.clear();
+        return Ok(());
+    }
     let capture = state.suppress.load(Ordering::Acquire)
         && !state.transitioning.load(Ordering::Acquire)
         && win32_time_is_after(message_time, state.raw_cutoff_time.load(Ordering::Acquire));
@@ -1513,18 +1518,20 @@ unsafe extern "system" fn mouse_hook_callback(code: i32, w_param: usize, l_param
     }
 
     if w_param as u32 == WM_MOUSEMOVE && state.transitioning.load(Ordering::Acquire) {
-        // SetCursorPos can surface as a low-level move. Do not treat a mode-transition
-        // warp (or a concurrent physical move) as relative input for the new owner.
+        // A concurrent physical move during the transition still belongs to
+        // the previous owner. Marked warps were already filtered above.
         return unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) };
     }
 
     let suppress = state.suppress.load(Ordering::Acquire);
     if suppress
+        && !state.receiving_remote.load(Ordering::Acquire)
         && state.raw_input_active.load(Ordering::Acquire)
         && is_captured_mouse_message(w_param as u32)
     {
-        // Raw Input owns physical event ordering while remote. The low-level
-        // hook remains responsible for preventing the local OS from acting on it.
+        // Raw Input owns physical event ordering while sending to the peer.
+        // While receiving, this hook owns reclaim detection so injected events
+        // are rejected using Windows' provenance flag, not just our marker.
         return 1;
     }
     let event = hook_event(
@@ -2034,12 +2041,6 @@ fn low_word(value: u32) -> u16 {
         .unwrap()
 }
 
-fn rounded_i32(value: f64) -> i32 {
-    value
-        .round()
-        .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2120,6 +2121,31 @@ mod tests {
                 movement: Vector::new(1.0, 0.0),
             })
         );
+    }
+
+    #[test]
+    fn receiving_hook_detects_real_motion_in_both_halves_of_the_portrait() {
+        for x in [100, 1079, 1080, 1081, 1600, 2158] {
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let reference = Mutex::new(Some(Point::new(f64::from(x), 2292.0)));
+                let data = MouseHookData {
+                    point: PointI32 {
+                        x: x + dx,
+                        y: 2292 + dy,
+                    },
+                    mouse_data: 0,
+                    flags: 0,
+                    time: 0,
+                    extra_info: 0,
+                };
+                assert_eq!(
+                    hook_event(WM_MOUSEMOVE, &data, &reference, true, 1.0),
+                    Some(PhysicalMouseEvent::Move {
+                        movement: Vector::new(f64::from(dx), f64::from(dy))
+                    })
+                );
+            }
+        }
     }
 
     #[test]
@@ -2228,22 +2254,21 @@ mod tests {
 
     /// Opt in only on an isolated Windows desktop (CI), never on a user's
     /// active KVM session. Exercises actual SendInput + WM_INPUT + low-level
-    /// hook delivery, not just fabricated RAWMOUSE packets.
+    /// hook delivery, including synthetic input without our extra-info marker.
     #[test]
     #[ignore = "moves the cursor; requires an isolated interactive Windows desktop"]
     fn native_injected_moves_do_not_become_physical_input() {
         use std::time::Duration;
-        let (_, _, displays) = desktop_geometry().unwrap();
-        let bounds = displays.iter().find(|d| d.primary).unwrap().bounds;
+        let (desktop, _, displays) = desktop_geometry().unwrap();
+        let primary = displays.iter().find(|d| d.primary).unwrap().bounds;
         let original = current_pointer().unwrap();
         let center = Point::new(
-            bounds.left() + bounds.width / 2.0,
-            bounds.top() + bounds.height / 2.0,
+            primary.left() + primary.width / 2.0,
+            primary.top() + primary.height / 2.0,
         );
         for raw_enabled in [true, false] {
             let mut capture =
                 WindowsMouseCapture::start(1.0, center, original, raw_enabled).unwrap();
-            let mut injector = WindowsMouseInjector::new(center);
             let result = (|| -> Result<(), String> {
                 for mode in [
                     CaptureMode::ReceivingRemote { position: center },
@@ -2251,35 +2276,78 @@ mod tests {
                 ] {
                     capture.set_mode(mode).map_err(|e| e.to_string())?;
                     std::thread::sleep(Duration::from_millis(100));
-                    while capture
-                        .try_next_event()
-                        .map_err(|e| e.to_string())?
-                        .is_some()
-                    {}
-                    for step in (1..10).chain((1..10).rev()) {
-                        let position = Point::new(
-                            center.x,
-                            bounds.top() + bounds.height * f64::from(step) / 10.0,
-                        );
-                        injector
-                            .inject(RemoteMouseEvent::MoveAbsolute {
-                                position,
-                                screen: edgemouse_core::ScreenId(1),
-                            })
-                            .map_err(|e| e.to_string())?;
-                        std::thread::sleep(Duration::from_millis(25));
-                        let visible = current_pointer().map_err(|e| e.to_string())?;
-                        if (visible.x - position.x).abs() > 2.0
-                            || (visible.y - position.y).abs() > 2.0
-                        {
-                            return Err(format!(
-                                "injected/visible cursor mismatch: {position:?} vs {visible:?}"
-                            ));
-                        }
-                        if let Some(event) = capture.try_next_event().map_err(|e| e.to_string())? {
-                            return Err(format!(
-                                "self-injected motion became physical input (raw={raw_enabled}, mode={mode:?}): {event:?}"
-                            ));
+                    if let Some(event) = capture.try_next_event().map_err(|e| e.to_string())? {
+                        return Err(format!("transition warp became physical input: {event:?}"));
+                    }
+                    // Outgoing raw motion retains its high-rate path. On the
+                    // receiving side even an unmarked or foreign synthetic move
+                    // must not be interpreted as the user touching this mouse.
+                    let markers: &[usize] = if matches!(mode, CaptureMode::ReceivingRemote { .. }) {
+                        &[EVENT_MARKER, 0, 0x1234]
+                    } else {
+                        &[EVENT_MARKER]
+                    };
+                    for display in &displays {
+                        let bounds = display.bounds;
+                        for marker in markers {
+                            for horizontal in [true, false] {
+                                for fraction in [0.01, 0.25, 0.49, 0.50, 0.51, 0.75, 0.99] {
+                                    let position = Point::new(
+                                        bounds.left()
+                                            + bounds.width
+                                                * if horizontal { fraction } else { 0.5 },
+                                        bounds.top()
+                                            + bounds.height
+                                                * if horizontal { 0.5 } else { fraction },
+                                    );
+                                    let input = Input {
+                                        input_type: INPUT_MOUSE,
+                                        value: InputValue {
+                                            mouse: MouseInput {
+                                                dx: normalized_absolute(
+                                                    position.x,
+                                                    desktop.left() as i32,
+                                                    desktop.width as i32,
+                                                ),
+                                                dy: normalized_absolute(
+                                                    position.y,
+                                                    desktop.top() as i32,
+                                                    desktop.height as i32,
+                                                ),
+                                                mouse_data: 0,
+                                                flags: MOUSEEVENTF_MOVE
+                                                    | MOUSEEVENTF_ABSOLUTE
+                                                    | MOUSEEVENTF_VIRTUALDESK,
+                                                time: 0,
+                                                extra_info: *marker,
+                                            },
+                                        },
+                                    };
+                                    // SAFETY: input is one complete initialized INPUT record.
+                                    if unsafe {
+                                        SendInput(1, &raw const input, size_of::<Input>() as i32)
+                                    } != 1
+                                    {
+                                        return Err("native test SendInput failed".to_owned());
+                                    }
+                                    std::thread::sleep(Duration::from_millis(25));
+                                    let visible = current_pointer().map_err(|e| e.to_string())?;
+                                    if (visible.x - position.x).abs() > 2.0
+                                        || (visible.y - position.y).abs() > 2.0
+                                    {
+                                        return Err(format!(
+                                            "injected/visible cursor mismatch: {position:?} vs {visible:?}"
+                                        ));
+                                    }
+                                    if let Some(event) =
+                                        capture.try_next_event().map_err(|e| e.to_string())?
+                                    {
+                                        return Err(format!(
+                                            "synthetic motion became physical input (raw={raw_enabled}, mode={mode:?}, marker={marker:#x}): {event:?}"
+                                        ));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
