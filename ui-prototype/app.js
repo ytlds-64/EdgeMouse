@@ -1,7 +1,7 @@
 const navItems = [...document.querySelectorAll(".nav-item")];
 const pages = [...document.querySelectorAll(".page")];
 const toast = document.querySelector(".toast");
-let appVersion = document.querySelector('meta[name="edgemouse-version"]')?.content ?? "0.6.11";
+let appVersion = document.querySelector('meta[name="edgemouse-version"]')?.content ?? "0.6.12";
 let toastTimer;
 
 const sidebarToggle = document.querySelector(".sidebar-toggle");
@@ -126,11 +126,18 @@ let activeInputProfile = "mac-to-windows";
 let overviewInputProfile = "mac-to-windows";
 let inputSettingsDirty = false;
 const inputDirtyFields = { "mac-to-windows": new Set(), "windows-to-mac": new Set() };
+const inputEditingFields = { "mac-to-windows": new Set(), "windows-to-mac": new Set() };
 const smoothingRange = document.querySelector("#pointer-smoothing");
 const smoothingOutput = document.querySelector('output[for="pointer-smoothing"]');
 const speedRange = document.querySelector("#pointer-speed");
 const speedOutput = document.querySelector('output[for="pointer-speed"]');
 const inputSaveStatus = document.querySelector(".input-save-status");
+
+function settingsChanged(section, detail = {}) {
+  document.dispatchEvent(new CustomEvent("edgemouse:settings-change", {
+    detail: { section, commit: true, ...detail },
+  }));
+}
 
 function smoothingLabel(value) {
   if (value < 34) return "跟手";
@@ -143,11 +150,18 @@ function setToggleState(toggle, enabled) {
   toggle.setAttribute("aria-checked", String(enabled));
 }
 
-function markInputSettingsDirty(field, profile = activeInputProfile) {
+function markInputSettingsDirty(field, profile = activeInputProfile, commit = true) {
+  // Fixed mappings and the already-selected trigger have no editable field.
+  if (!field) return;
   if (field) inputDirtyFields[profile].add(field);
+  if (field) {
+    if (commit) inputEditingFields[profile].delete(field);
+    else inputEditingFields[profile].add(field);
+  }
   inputSettingsDirty = true;
-  inputSaveStatus.textContent = "有尚未保存的输入设置";
+  inputSaveStatus.textContent = commit ? "正在自动保存…" : "调整完成后自动应用";
   inputSaveStatus.classList.add("is-dirty");
+  settingsChanged("input", { profile, commit });
 }
 
 function syncOverviewInputSettings() {
@@ -168,14 +182,12 @@ function renderInputProfile() {
   document.querySelectorAll("[data-input-setting]").forEach((toggle) => {
     const key = toggle.dataset.inputSetting;
     setToggleState(toggle, profile[key]);
-    toggle.disabled = false;
     toggle.setAttribute("aria-label", toggle.closest(".setting-row").querySelector("strong").textContent);
-    toggle.title = "保存后自动同步到另一台电脑";
+    toggle.title = "修改后自动保存并同步到另一台电脑";
   });
   document.querySelector('[data-input-description="horizontal"]').textContent = meta.horizontalDescription;
   smoothingRange.value = String(profile.smoothing);
-  smoothingRange.disabled = false;
-  smoothingRange.title = "保存后自动同步到另一台电脑";
+  smoothingRange.title = "调整完成后自动保存并同步到另一台电脑";
   smoothingOutput.textContent = smoothingLabel(profile.smoothing);
   speedRange.value = String(profile.speed);
   speedOutput.textContent = `${profile.speed}%`;
@@ -194,7 +206,7 @@ function renderInputProfile() {
     button.classList.toggle("is-selected", button.dataset.value === profile.trigger);
   });
   if (!inputSettingsDirty) {
-    inputSaveStatus.textContent = "任意一端修改并保存即可同步；两个控制方向独立保存";
+    inputSaveStatus.textContent = "修改后自动保存并同步；两个控制方向独立设置";
     inputSaveStatus.classList.remove("is-dirty");
   }
 }
@@ -219,7 +231,7 @@ document.querySelectorAll("[data-overview-setting]").forEach((toggle) => {
   toggle.addEventListener("click", () => {
     inputProfiles[overviewInputProfile][toggle.dataset.overviewSetting] = toggle.classList.contains("is-on");
     markInputSettingsDirty(toggle.dataset.overviewSetting, overviewInputProfile);
-    document.querySelector(".overview-save-status").textContent = "滚轮方向已修改，点击保存后生效";
+    document.querySelector(".overview-save-status").textContent = "正在自动保存…";
     if (activeInputProfile === overviewInputProfile) renderInputProfile();
   });
 });
@@ -227,7 +239,7 @@ document.querySelectorAll("[data-overview-setting]").forEach((toggle) => {
 smoothingRange.addEventListener("input", () => {
   inputProfiles[activeInputProfile].smoothing = Number(smoothingRange.value);
   smoothingOutput.textContent = smoothingLabel(Number(smoothingRange.value));
-  markInputSettingsDirty("smoothing");
+  markInputSettingsDirty("smoothing", activeInputProfile, false);
 });
 
 speedRange.addEventListener("input", () => {
@@ -235,8 +247,11 @@ speedRange.addEventListener("input", () => {
   inputProfiles[activeInputProfile].speed = speed;
   speedOutput.textContent = `${speed}%`;
   speedRange.setAttribute("aria-valuetext", `${speed}%`);
-  markInputSettingsDirty("speed");
+  markInputSettingsDirty("speed", activeInputProfile, false);
 });
+
+smoothingRange.addEventListener("change", () => markInputSettingsDirty("smoothing"));
+speedRange.addEventListener("change", () => markInputSettingsDirty("speed"));
 
 document.querySelectorAll("[data-input-map]").forEach((select) => {
   select.addEventListener("change", () => {
@@ -250,14 +265,6 @@ document.querySelectorAll('[data-input-choice="trigger"] button').forEach((butto
     inputProfiles[activeInputProfile].trigger = button.dataset.value;
     markInputSettingsDirty();
   });
-});
-
-document.querySelector(".input-save-button")?.addEventListener("click", () => {
-  if (window.__TAURI__?.core?.invoke) return;
-  inputSettingsDirty = false;
-  inputSaveStatus.textContent = "两个控制方向的设置已分别保存";
-  inputSaveStatus.classList.remove("is-dirty");
-  showToast("双向输入设置已保存（原型演示）");
 });
 
 window.EdgeMouseInputSettings = {
@@ -278,7 +285,7 @@ window.EdgeMouseInputSettings = {
   getOverviewProfile() {
     return overviewInputProfile;
   },
-  getDirtyFields(name) { return [...inputDirtyFields[name]]; },
+  getDirtyFields(name) { return [...inputDirtyFields[name]].filter((field) => !inputEditingFields[name].has(field)); },
   isDirty() { return inputSettingsDirty; },
   applyLocalProfile(name, settings) {
     const profile = inputProfiles[name];
@@ -289,11 +296,18 @@ window.EdgeMouseInputSettings = {
     if (activeInputProfile === name) renderInputProfile();
     syncOverviewInputSettings();
   },
-  markSaved(message, name = activeInputProfile, fields = [...inputDirtyFields[name]]) {
-    fields.forEach((field) => inputDirtyFields[name].delete(field));
+  markSaved(message, name = activeInputProfile, fields = [...inputDirtyFields[name]], submitted = inputProfiles[name]) {
+    fields.forEach((field) => {
+      if (inputProfiles[name][field] === submitted[field]) inputDirtyFields[name].delete(field);
+    });
     inputSettingsDirty = Object.values(inputDirtyFields).some((fields) => fields.size > 0);
     inputSaveStatus.textContent = message;
     inputSaveStatus.classList.toggle("is-dirty", inputSettingsDirty);
+  },
+  clearDirty() {
+    Object.values(inputDirtyFields).forEach((fields) => fields.clear());
+    Object.values(inputEditingFields).forEach((fields) => fields.clear());
+    inputSettingsDirty = false;
   },
 };
 
@@ -601,10 +615,13 @@ const infoModal = document.querySelector(".info-modal");
 const defaultInputProfiles = JSON.parse(JSON.stringify(inputProfiles));
 const systemColorPreference = window.matchMedia("(prefers-color-scheme: dark)");
 let activeTheme = "system";
+const desktopDirtyFields = new Set();
 
-function markSettingsDirty(message = "有尚未保存的设置") {
-  settingsSaveStatus.textContent = message;
+function markSettingsDirty(field) {
+  desktopDirtyFields.add(field);
+  settingsSaveStatus.textContent = "正在自动保存…";
   settingsSaveStatus.classList.add("is-dirty");
+  settingsChanged("desktop");
 }
 
 function selectTheme(theme, shouldMarkDirty = true) {
@@ -624,7 +641,7 @@ function selectTheme(theme, shouldMarkDirty = true) {
   document.querySelector('meta[name="color-scheme"]').content = resolvedTheme;
   document.querySelector(".theme-current").textContent = labels[activeTheme];
   window.localStorage.setItem("edgemouse-theme", activeTheme);
-  if (shouldMarkDirty) markSettingsDirty();
+  if (shouldMarkDirty) markSettingsDirty("theme");
 }
 
 function applyLanguage(language, shouldMarkDirty = true) {
@@ -632,11 +649,11 @@ function applyLanguage(language, shouldMarkDirty = true) {
   languageSelect.value = nextLanguage;
   window.EdgeMouseI18n.apply(nextLanguage);
   window.localStorage.setItem("edgemouse-language", nextLanguage);
-  if (shouldMarkDirty) markSettingsDirty("界面语言已切换，保存后会在下次启动继续使用");
+  if (shouldMarkDirty) markSettingsDirty("language");
 }
 
 document.querySelectorAll("[data-general-setting]").forEach((toggle) => {
-  toggle.addEventListener("click", () => markSettingsDirty());
+  toggle.addEventListener("click", () => markSettingsDirty(toggle.dataset.generalSetting));
 });
 
 themeOptions.forEach((button) => {
@@ -647,13 +664,7 @@ languageSelect?.addEventListener("change", () => {
   applyLanguage(languageSelect.value);
 });
 
-updateChannelSelect?.addEventListener("change", () => markSettingsDirty());
-
-document.querySelector(".settings-save-button")?.addEventListener("click", () => {
-  settingsSaveStatus.textContent = "所有设置均已保存";
-  settingsSaveStatus.classList.remove("is-dirty");
-  showToast("设置已保存（原型演示）");
-});
+updateChannelSelect?.addEventListener("change", () => markSettingsDirty("updateChannel"));
 
 async function checkForUpdates() {
   const buttons = [...document.querySelectorAll(".check-updates-button")];
@@ -694,6 +705,9 @@ function closeResetSettingsModal() {
 }
 
 function restoreDefaultSettings() {
+  window.localStorage.removeItem("edgemouse-preview-settings");
+  window.EdgeMouseInputSettings.clearDirty();
+  window.EdgeMouseDesktopSettings.clearDirty();
   document.querySelectorAll("[data-general-setting]").forEach((toggle) => setToggleState(toggle, true));
   Object.entries(defaultInputProfiles).forEach(([name, profile]) => Object.assign(inputProfiles[name], profile));
   activeInputProfile = "mac-to-windows";
@@ -731,13 +745,15 @@ window.EdgeMouseDesktopSettings = {
     if (!preferences) return;
     document.querySelectorAll("[data-general-setting]").forEach((toggle) => {
       const key = toggle.dataset.generalSetting;
-      if (Object.hasOwn(preferences, key)) setToggleState(toggle, Boolean(preferences[key]));
+      if (!desktopDirtyFields.has(key) && Object.hasOwn(preferences, key)) setToggleState(toggle, Boolean(preferences[key]));
     });
-    selectTheme(preferences.theme ?? "system", false);
-    applyLanguage(preferences.language ?? "zh-CN", false);
-    updateChannelSelect.value = preferences.updateChannel ?? "stable";
-    settingsSaveStatus.textContent = "所有桌面设置均已加载";
-    settingsSaveStatus.classList.remove("is-dirty");
+    if (!desktopDirtyFields.has("theme")) selectTheme(preferences.theme ?? "system", false);
+    if (!desktopDirtyFields.has("language")) applyLanguage(preferences.language ?? "zh-CN", false);
+    if (!desktopDirtyFields.has("updateChannel")) updateChannelSelect.value = preferences.updateChannel ?? "stable";
+    if (!desktopDirtyFields.size) {
+      settingsSaveStatus.textContent = "修改后自动保存，下次启动继续使用";
+      settingsSaveStatus.classList.remove("is-dirty");
+    }
   },
   get() {
     const toggleValue = (key) => document.querySelector(`[data-general-setting="${key}"]`)?.classList.contains("is-on") ?? false;
@@ -750,9 +766,15 @@ window.EdgeMouseDesktopSettings = {
       updateChannel: updateChannelSelect.value,
     };
   },
-  markSaved(message = "所有设置均已保存") {
+  getDirtyFields: () => [...desktopDirtyFields],
+  clearDirty: () => desktopDirtyFields.clear(),
+  markSaved(message = "设置已自动保存", submitted = this.get(), fields = [...desktopDirtyFields]) {
+    const current = this.get();
+    fields.forEach((field) => {
+      if (current[field] === submitted[field]) desktopDirtyFields.delete(field);
+    });
     settingsSaveStatus.textContent = message;
-    settingsSaveStatus.classList.remove("is-dirty");
+    settingsSaveStatus.classList.toggle("is-dirty", desktopDirtyFields.size > 0);
   },
 };
 
@@ -833,6 +855,7 @@ function syncOverviewLayout(edge) {
 }
 
 function setLayoutEdge(edge, { dirty = false } = {}) {
+  const changed = edge !== (layoutCanvas.dataset.edge ?? "right");
   const win = layoutCanvas.querySelector(".screen-win");
   const mac = layoutCanvas.querySelector(".screen-mac");
   const beam = layoutCanvas.querySelector(".edge-glow");
@@ -850,22 +873,29 @@ function setLayoutEdge(edge, { dirty = false } = {}) {
   const order = macComesFirst ? [mac, beam, win] : [win, beam, mac];
   order.forEach((element) => layoutCanvas.insertBefore(element, hint));
   layoutDirectionButtons.forEach((button) => button.classList.toggle("is-selected", button.dataset.edge === edge));
-  if (dirty) {
-    layoutDirty = true;
-    const status = document.querySelector(".layout-save-status");
-    if (status) status.textContent = "布局已修改，点击保存后会同步到两台设备";
-    const configStatus = document.querySelector(".layout-config-status");
-    if (configStatus) configStatus.textContent = "尚未保存";
-  }
+  if (dirty && changed) markLayoutDirty();
+}
+
+function markLayoutDirty() {
+  layoutDirty = true;
+  document.querySelector(".layout-save-status").textContent = "正在自动保存…";
+  document.querySelector(".layout-config-status").textContent = "正在应用";
+  settingsChanged("layout");
 }
 
 window.EdgeMouseLayout = {
   getEdge: () => layoutCanvas.dataset.edge ?? "right",
+  get() {
+    return { peerOn: this.getEdge(), edgeProtection: document.querySelector('[data-layout-setting="edgeProtection"]').classList.contains("is-on") };
+  },
   isDirty: () => layoutDirty,
   applySnapshot(edge) {
-    if (!layoutDirty) setLayoutEdge(edge);
+    if (!layoutDirty && !layoutCanvas.classList.contains("is-dragging")) setLayoutEdge(edge);
   },
-  markSaved(message = "布局已保存，两端将自动重新连接") {
+  clearDirty: () => { layoutDirty = false; },
+  markSaved(message = "布局已自动保存", submitted = this.get()) {
+    const current = this.get();
+    if (current.peerOn !== submitted.peerOn || current.edgeProtection !== submitted.edgeProtection) return;
     layoutDirty = false;
     const status = document.querySelector(".layout-save-status");
     if (status) status.textContent = message;
@@ -876,7 +906,7 @@ window.EdgeMouseLayout = {
 
 layoutDirectionButtons.forEach((button) => button.addEventListener("click", () => setLayoutEdge(button.dataset.edge, { dirty: true })));
 document.querySelector('[data-layout-setting="edgeProtection"]')?.addEventListener("click", () => {
-  setLayoutEdge(layoutCanvas.dataset.edge ?? "right", { dirty: true });
+  markLayoutDirty();
 });
 
 function edgeFromRects(macRect, winRect) {
@@ -939,7 +969,7 @@ document.querySelectorAll(".mini-screen").forEach((screen) => {
   let drag;
 
   screen.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || screen.getAttribute("aria-disabled") === "true") return;
     event.preventDefault();
     if (drag) {
       finishDrag({ pointerId: drag.pointerId });
@@ -978,24 +1008,21 @@ document.querySelectorAll(".mini-screen").forEach((screen) => {
     hideDragBeam();
     setDropPreview();
     drag = undefined;
-    if (moved) {
+    if (moved && event.type !== "pointercancel") {
       setLayoutEdge(edge, { dirty: true });
-      const labels = { left: "左侧", right: "右侧", top: "上方", bottom: "下方" };
-      showToast(`屏幕布局已调整为 ${labels[edge]}`);
     }
   };
 
   window.addEventListener("pointerup", finishDrag, true);
   window.addEventListener("pointercancel", finishDrag, true);
+  window.addEventListener("blur", () => {
+    if (drag) finishDrag({ pointerId: drag.pointerId, type: "pointercancel" });
+  });
   window.addEventListener("mouseup", () => {
     if (drag) finishDrag({ pointerId: drag.pointerId });
   }, true);
 });
 
-document.querySelectorAll(".save-button:not(.input-save-button):not(.settings-save-button):not(.layout-save-button)").forEach((button) => button.addEventListener("click", () => {
-  if (window.__TAURI__?.core?.invoke) return;
-  showToast("设置已保存（网页预览）");
-}));
 document.querySelector(".detect-button")?.addEventListener("click", (event) => {
   if (window.__TAURI__?.core?.invoke) return;
   event.currentTarget.textContent = "检测中…";
@@ -1011,3 +1038,57 @@ document.querySelectorAll(".certificate-line button").forEach((button) => {
     showToast("内容已复制（网页预览）");
   });
 });
+
+// The standalone preview has no native service. Keep its settings in this
+// browser so removing the demo's save buttons still leaves a working preview.
+if (!window.__TAURI__?.core?.invoke) {
+  const previewKey = "edgemouse-preview-settings";
+  const previewStatus = "网页预览：设置仅保存在此浏览器";
+  function savePreview(section) {
+    const selectors = { input: [".input-save-status", ".overview-save-status"], desktop: [".settings-save-status"], layout: [".layout-save-status"], connection: [".connection-save-status"] };
+    try {
+      const saved = JSON.parse(localStorage.getItem(previewKey) ?? "{}");
+      if (section === "input") {
+        saved.input ??= {};
+        for (const name of Object.keys(inputProfiles)) {
+          const fields = window.EdgeMouseInputSettings.getDirtyFields(name);
+          saved.input[name] = { ...saved.input[name], ...Object.fromEntries(fields.map((field) => [field, inputProfiles[name][field]])) };
+        }
+      }
+      if (section === "desktop") saved.desktop = window.EdgeMouseDesktopSettings.get();
+      if (section === "layout") saved.layout = window.EdgeMouseLayout.get();
+      if (section === "connection") saved.autoReconnect = document.querySelector(".auto-reconnect-toggle").classList.contains("is-on");
+      localStorage.setItem(previewKey, JSON.stringify(saved));
+      if (section === "input") for (const name of Object.keys(inputProfiles)) window.EdgeMouseInputSettings.markSaved(previewStatus, name, window.EdgeMouseInputSettings.getDirtyFields(name));
+      if (section === "desktop") window.EdgeMouseDesktopSettings.markSaved(previewStatus);
+      if (section === "layout") window.EdgeMouseLayout.markSaved(previewStatus);
+      for (const selector of selectors[section]) {
+        const status = document.querySelector(selector);
+        status.textContent = previewStatus;
+        status.classList.remove("is-error", "is-dirty");
+      }
+      document.querySelectorAll(`[data-retry-settings="${section}"]`).forEach((button) => { button.hidden = true; });
+    } catch {
+      for (const selector of selectors[section]) {
+        document.querySelector(selector).textContent = "自动保存失败，请重试";
+        document.querySelector(selector).classList.add("is-error");
+      }
+      document.querySelectorAll(`[data-retry-settings="${section}"]`).forEach((button) => { button.hidden = false; });
+    }
+  }
+  try {
+    const saved = JSON.parse(localStorage.getItem(previewKey) ?? "{}");
+    for (const [name, settings] of Object.entries(saved.input ?? {})) window.EdgeMouseInputSettings.applyLocalProfile(name, settings);
+    if (saved.desktop) window.EdgeMouseDesktopSettings.apply(saved.desktop);
+    if (saved.layout && ["left", "right", "top", "bottom"].includes(saved.layout.peerOn)) {
+      setLayoutEdge(saved.layout.peerOn);
+      setToggleState(document.querySelector('[data-layout-setting="edgeProtection"]'), saved.layout.edgeProtection);
+    }
+    if (typeof saved.autoReconnect === "boolean") setToggleState(document.querySelector(".auto-reconnect-toggle"), saved.autoReconnect);
+  } catch { /* A broken optional preview cache must not prevent opening the UI. */ }
+  document.addEventListener("edgemouse:settings-change", ({ detail }) => {
+    if (detail.commit) queueMicrotask(() => savePreview(detail.section));
+  });
+  document.querySelector(".auto-reconnect-toggle").addEventListener("click", () => savePreview("connection"));
+  document.querySelectorAll("[data-retry-settings]").forEach((button) => button.addEventListener("click", () => savePreview(button.dataset.retrySettings)));
+}

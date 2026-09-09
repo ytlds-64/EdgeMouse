@@ -26,12 +26,10 @@ function element() {
 
 async function main() {
   const overview = element(), stop = element(), reconnect = element(), toggle = element(), label = element();
-  const inputSave = element();
   const elements = new Map([
     ['.overview-connect-button', overview], ['.reconnect-button', reconnect],
     ['.overview-stop-button', stop],
     ['[data-service-toggle]', toggle], ['.service-state-label', label],
-    ['.input-save-button', inputSave],
   ]);
   const snapshot = {
     desktopVersion: 'test', agent: { running: false },
@@ -51,12 +49,13 @@ async function main() {
     if (command === 'set_agent_running') return new Promise((resolve, reject) => { finishStop = resolve; failStop = reject; });
     return {};
   };
+  const documentHandlers = {};
   const document = {
     documentElement: { dataset: {} }, body: element(),
     querySelector: (selector) => elements.get(selector) ?? null,
     querySelectorAll: (selector) => selector.includes('.overview-connect-button,')
       ? [overview, stop, reconnect, toggle] : [],
-    addEventListener() {},
+    addEventListener(name, callback) { documentHandlers[name] = callback; },
   };
   const window = {
     EdgeMouseInputSettings: {
@@ -137,7 +136,8 @@ async function main() {
   inputDirty = ['speed'];
   await intervals[0](); // Polling must not overwrite an unsaved speed edit.
   assert.equal(profiles['mac-to-windows'].speed, 175);
-  await inputSave.click();
+  documentHandlers['edgemouse:settings-change']({ detail: { section: 'input', profile: 'mac-to-windows', commit: true } });
+  await new Promise(setImmediate);
   const savedInput = calls.find((call) => call.command === 'save_input_settings');
   assert.equal(savedInput.args.pointerSpeed, 175);
   assert.equal(savedInput.args.profile, 'mac-to-windows');
@@ -145,6 +145,6 @@ async function main() {
   assert.equal(profiles['windows-to-mac'].speed, 80);
   assert.deepEqual(errors, []);
   console.log('Native service UI: connect/stop, duplicate clicks, polling, failures, permission wait, and recovery states passed');
-  console.log('Native input UI: independent speed profiles, shared snapshots, dirty edits, and save IPC passed');
+  console.log('Native input UI: independent speed profiles, shared snapshots, dirty edits, and automatic save IPC passed');
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

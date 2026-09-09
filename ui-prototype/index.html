@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
-    <meta name="edgemouse-version" content="0.6.11" />
+    <meta name="edgemouse-version" content="0.6.12" />
     <title>EdgeMouse</title>
     <link rel="icon" href="./assets/branding/edgemouse-app-icon.svg" />
     <link rel="stylesheet" href="./styles.css" />
@@ -107,7 +107,7 @@
                 <label><span>反转纵向滚动</span><button class="toggle" data-overview-setting="vertical" type="button" role="switch" aria-checked="false"><span></span></button></label>
               </article>
             </div>
-            <div class="page-footer"><span class="overview-save-status">这里调整的是本机控制另一台电脑时的滚轮方向</span><button class="primary-button save-button overview-save-button" type="button">保存设置</button></div>
+            <div class="page-footer"><span class="overview-save-status" role="status" aria-live="polite">修改后自动保存并应用，连接后同步到另一台电脑</span><button class="text-button" type="button" data-retry-settings="input" hidden>重试</button></div>
           </section>
 
           <section class="page" id="page-layout" data-title="屏幕布局">
@@ -128,7 +128,7 @@
                 <div class="screen-facts"><p><span>Windows 桌面</span><b data-screen-fact="windows">1 个屏幕 · 横向</b></p><p><span>macOS 桌面</span><b data-screen-fact="macos">等待设备数据</b></p><p><span>配置状态</span><b class="teal-text layout-config-status">两端一致</b></p></div>
               </aside>
             </div>
-            <div class="page-footer"><span class="layout-save-status">拖动或选择方向后保存，两端会自动同步</span><button class="primary-button save-button layout-save-button" type="button">保存布局</button></div>
+            <div class="page-footer"><span class="layout-save-status" role="status" aria-live="polite">选择方向立即应用；拖动卡片松手后自动保存并同步</span><button class="text-button" type="button" data-retry-settings="layout" hidden>重试</button></div>
           </section>
 
           <section class="page" id="page-input" data-title="输入">
@@ -171,7 +171,7 @@
                 </article>
               </div>
             </div>
-            <div class="page-footer"><span class="input-save-status">修改输入设置不会改变系统自身的鼠标设置</span><button class="primary-button save-button input-save-button" type="button">保存输入设置</button></div>
+            <div class="page-footer"><span class="input-save-status" role="status" aria-live="polite">修改后自动保存；滑块调整完成后应用</span><button class="text-button" type="button" data-retry-settings="input" hidden>重试</button></div>
           </section>
 
           <section class="page" id="page-connection" data-title="连接">
@@ -192,6 +192,7 @@
               </aside>
             </div>
             <article class="panel security-note"><div class="shield-icon">✓</div><div><h2>私钥始终保留在本机</h2><p>设备之间仅交换公开证书；局域网发现结果仍需通过已保存证书完成双向验证。</p></div><button class="text-button" data-go="about" type="button">了解安全设计 ›</button></article>
+            <div class="page-footer"><span class="connection-save-status" role="status" aria-live="polite">修改后自动保存，连接后同步到另一台电脑</span><button class="text-button" type="button" data-retry-settings="connection" hidden>重试</button></div>
           </section>
 
           <section class="page" id="page-diagnostics" data-title="诊断">
@@ -226,20 +227,20 @@
                 <article class="panel setting-panel appearance-panel"><div class="panel-heading"><h2>外观</h2><span class="theme-current">跟随系统 · 浅色</span></div><div class="form-group"><label>界面主题</label><div class="theme-options" role="radiogroup" aria-label="界面主题"><button class="theme-option is-selected" type="button" role="radio" aria-checked="true" data-theme="system"><span class="theme-preview system-preview"><i></i><i></i></span><b>跟随系统</b><small>当前为浅色</small></button><button class="theme-option" type="button" role="radio" aria-checked="false" data-theme="light"><span class="theme-preview light-preview"><i></i><i></i></span><b>浅色</b><small>始终使用浅色</small></button><button class="theme-option" type="button" role="radio" aria-checked="false" data-theme="dark"><span class="theme-preview dark-preview"><i></i><i></i></span><b>深色</b><small>适合暗光环境</small></button></div></div><div class="form-group select-row"><label for="language">界面语言</label><select id="language"><option value="zh-CN">简体中文</option><option value="en">English</option></select></div></article>
               </div>
               <div class="column-stack">
-              <article class="panel setting-panel update-panel"><div class="panel-heading"><h2>更新</h2><span class="status-chip pending update-status">尚未检查</span></div><div class="update-version"><img src="./assets/branding/edgemouse-app-icon.svg" alt=""/><div><strong>EdgeMouse <span data-app-version>0.6.11</span></strong><small class="update-last-check">将从 GitHub 安全检查正式版本</small></div></div><div class="form-group select-row update-channel-row"><label for="update-channel">更新通道</label><select id="update-channel"><option value="stable">稳定版</option><option value="preview" disabled>预览版（筹备中）</option></select></div><button class="secondary-button full-button check-updates-button" type="button">检查更新</button></article>
+              <article class="panel setting-panel update-panel"><div class="panel-heading"><h2>更新</h2><span class="status-chip pending update-status">尚未检查</span></div><div class="update-version"><img src="./assets/branding/edgemouse-app-icon.svg" alt=""/><div><strong>EdgeMouse <span data-app-version>0.6.12</span></strong><small class="update-last-check">将从 GitHub 安全检查正式版本</small></div></div><div class="form-group select-row update-channel-row"><label for="update-channel">更新通道</label><select id="update-channel"><option value="stable">稳定版</option><option value="preview" disabled>预览版（筹备中）</option></select></div><button class="secondary-button full-button check-updates-button" type="button">检查更新</button></article>
                 <article class="panel setting-panel danger-panel"><div class="panel-heading"><h2>重置</h2><span class="status-chip">保留证书</span></div><p>恢复界面、输入和连接偏好，不会删除设备身份、私钥或可信证书。</p><button class="danger-button reset-settings-button" type="button">恢复默认设置…</button></article>
               </div>
             </div>
-            <div class="page-footer"><span class="settings-save-status">主题和语言会立即预览，并在下次启动继续使用</span><button class="primary-button save-button settings-save-button" type="button">保存设置</button></div>
+            <div class="page-footer"><span class="settings-save-status" role="status" aria-live="polite">修改后自动保存，下次启动继续使用</span><button class="text-button" type="button" data-retry-settings="desktop" hidden>重试</button></div>
           </section>
 
           <section class="page" id="page-about" data-title="关于">
             <div class="page-heading"><div><h1>关于</h1><p>EdgeMouse 版本、开源许可和产品信息</p></div></div>
             <div class="about-layout">
-              <article class="panel about-hero"><img src="./assets/branding/edgemouse-mark.svg" alt="EdgeMouse"/><h2>EdgeMouse</h2><p class="version-text">版本 <span data-app-version>0.6.11</span> · 稳定版</p><p>让 Windows 与 macOS 像一张连续的桌面一样自然协作。</p><div class="about-actions"><button class="primary-button check-updates-button" type="button">检查更新</button><button class="secondary-button project-home-button" type="button">查看项目主页</button></div></article>
+              <article class="panel about-hero"><img src="./assets/branding/edgemouse-mark.svg" alt="EdgeMouse"/><h2>EdgeMouse</h2><p class="version-text">版本 <span data-app-version>0.6.12</span> · 稳定版</p><p>让 Windows 与 macOS 像一张连续的桌面一样自然协作。</p><div class="about-actions"><button class="primary-button check-updates-button" type="button">检查更新</button><button class="secondary-button project-home-button" type="button">查看项目主页</button></div></article>
               <div class="about-details">
                 <article class="panel"><div class="panel-heading"><h2>当前能力</h2><span class="status-chip good">MVP 已就绪</span></div><div class="feature-tags"><span>双向鼠标</span><span>键盘跟随</span><span>自动屏幕识别</span><span>局域网发现</span><span>安全配对</span><span>自动重连</span><span>诊断导出</span></div></article>
-                <article class="panel build-info"><div class="panel-heading"><h2>构建信息</h2></div><p><span>版本</span><b data-app-version>0.6.11</b></p><p><span>平台</span><b>Windows 11 · macOS 15+</b></p><p><span>传输</span><b>QUIC · 双向 TLS</b></p><p><span>项目</span><b>开源 · MIT License</b></p></article>
+                <article class="panel build-info"><div class="panel-heading"><h2>构建信息</h2></div><p><span>版本</span><b data-app-version>0.6.12</b></p><p><span>平台</span><b>Windows 11 · macOS 15+</b></p><p><span>传输</span><b>QUIC · 双向 TLS</b></p><p><span>项目</span><b>开源 · MIT License</b></p></article>
                 <article class="panel about-links"><button type="button" data-about-action="license"><span>开源许可</span><b>MIT License ›</b></button><button type="button" data-about-action="dependencies"><span>第三方组件</span><b>查看清单 ›</b></button><button type="button" data-about-action="issues"><span>问题反馈</span><b>GitHub Issues ›</b></button><button type="button" data-about-action="version"><span>诊断信息</span><b>复制版本信息 ›</b></button></article>
                 <p class="copyright">© 2026 EdgeMouse contributors · 为跨平台桌面协作而设计</p>
               </div>

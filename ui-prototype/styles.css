@@ -138,6 +138,9 @@ button.summary-card:hover { border-color: #b8dcd6; box-shadow: 0 5px 15px rgba(2
 .toggle.is-on span { transform: translateX(16px); }
 .toggle:disabled { cursor: not-allowed; opacity: .48; }
 .page-footer { display: flex; align-items: center; justify-content: flex-end; gap: 20px; min-height: 72px; color: var(--muted); font-size: 12px; }
+.page-footer [role="status"].is-error { color: #bd4037; }
+.page-footer [data-retry-settings][hidden] { display: none; }
+.mini-screen[aria-disabled="true"] { cursor: default; }
 .primary-button, .secondary-button, .ghost-button, .danger-button { min-height: 40px; padding: 0 20px; border-radius: 10px; cursor: pointer; font-weight: 650; transition: .2s ease; }
 .primary-button { min-width: 150px; border: 0; color: white; background: linear-gradient(135deg, #11b7ac, #07978f); box-shadow: 0 5px 15px rgba(8, 157, 148, .18); }
 .primary-button:hover { transform: translateY(-1px); box-shadow: 0 7px 18px rgba(8, 157, 148, .27); }

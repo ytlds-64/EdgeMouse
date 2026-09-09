@@ -1,5 +1,28 @@
 (() => {
   const zhToEn = {
+    "网页预览：设置仅保存在此浏览器": "Web preview: settings are saved only in this browser",
+    "设置已恢复默认值": "Settings restored to defaults",
+    "修改后自动保存并同步到另一台电脑": "Changes are saved and synced to the other computer automatically",
+    "调整完成后自动保存并同步到另一台电脑": "Automatically save and sync when the adjustment is complete",
+    "正在自动保存…": "Saving automatically…",
+    "调整完成后自动应用": "Applied automatically when the adjustment is complete",
+    "修改后自动保存并同步；两个控制方向独立设置": "Changes save and sync automatically; each control direction is independent",
+    "修改后自动保存，下次启动继续使用": "Changes save automatically and are restored at next launch",
+    "设置已自动保存": "Settings saved automatically",
+    "布局已自动保存": "Layout saved automatically",
+    "正在应用": "Applying",
+    "输入设置已自动保存并应用": "Input settings saved and applied automatically",
+    "布局已自动保存，正在同步到另一台电脑": "Layout saved automatically; syncing to the other computer",
+    "自动保存失败，请重试": "Automatic save failed. Please retry",
+    "重试": "Retry",
+    "无法读取设置，正在重试…": "Unable to load settings. Retrying…",
+    "输入设置已同步；修改后自动保存": "Input settings synced; changes save automatically",
+    "布局已保存；修改后自动同步到另一台电脑": "Layout saved; changes sync to the other computer automatically",
+    "连接设置已自动保存": "Connection settings saved automatically",
+    "修改后自动保存并应用，连接后同步到另一台电脑": "Changes save and apply automatically, and sync to the other computer when connected",
+    "修改后自动保存；滑块调整完成后应用": "Changes save automatically; sliders apply when the adjustment is complete",
+    "选择方向立即应用；拖动卡片松手后自动保存并同步": "Direction changes apply immediately; dragging saves and syncs when released",
+    "修改后自动保存，连接后同步到另一台电脑": "Changes save automatically and sync to the other computer when connected",
     "等待辅助功能授权": "Waiting for Accessibility access",
     "输入初始化重试中": "Retrying input initialization",
     "输入初始化重试中…": "Retrying input initialization…",
@@ -469,6 +492,8 @@
   let observer;
 
   function translateDynamic(value) {
+    const autoSaveError = value.match(/^无法自动保存设置：(.+)$/);
+    if (autoSaveError) return `Unable to save settings automatically: ${autoSaveError[1]}`;
     const checks = value.match(/^检查中 (\d+) \/ (\d+)$/);
     if (checks) return `Checking ${checks[1]} / ${checks[2]}`;
     const checksPassed = value.match(/^(\d+)\/(\d+) 项通过$/);

@@ -20,7 +20,19 @@ Download the latest signed packages from
 - Windows: use the `.exe` installer. It supports Simplified Chinese and English.
 - macOS: use the universal `.dmg`, which supports both Apple silicon and Intel Macs.
 
-The current stable release is 0.6.11. Future signed releases can also be checked
+Since 0.6.12, Overview, Input, Layout, and desktop preferences save
+automatically. Toggles and selections apply immediately; speed and smoothing
+sliders apply when adjustment ends. Layout dragging commits only on release,
+and cancellation keeps the previous layout. Settings persist between launches
+and synchronize when connected. Failed saves show an explicit retry action.
+
+The Windows receiver now uses the low-level hook's injected-event flag to decide
+whether movement may reclaim local control. Unmarked synthetic Raw Input packets
+cannot trigger a receiver reclaim; outgoing Raw Input remains enabled. Pointer
+warps during handoffs also use marked injection. Reclaim logs include the
+triggering movement and receiver coordinates.
+
+The current stable release is 0.6.12. Future signed releases can also be checked
 and installed from the Settings page in the desktop application.
 
 macOS packages currently use ad-hoc signing, without Developer ID signing or
@@ -45,8 +57,7 @@ Version 0.6.10 filters EdgeMouse's own injected packets in Windows Raw Input,
 preventing remote motion from entering the physical-mouse reclaim path. Real
 mouse input and precision touchpads with null device handles remain supported.
 A native Windows regression test exercises SendInput, Raw Input and the fallback
-hook together and checks the visible cursor position. Reclaim logs include the
-triggering movement and receiver coordinates.
+hook together and checks the visible cursor position.
 
 Version 0.6.9 routes the pointer inside real monitor regions and maps handoffs only
 to populated outer-edge segments. This prevents virtual movement through empty
@@ -143,7 +154,7 @@ from the window. This means opening or closing the window does not interrupt an
 active mouse/keyboard session. Connection state and the diagnostics quality chart
 are live. The horizontal and wheel-direction switches on the Input page are
 connected to the local background agent. Dragging or choosing a direction on
-the Screen layout page is also live once saved; configuration controls that
+the Screen layout page applies automatically when direction selection or dragging ends; configuration controls that
 still say “prototype” remain demonstrations until their Rust commands are
 connected in the next stages.
 
@@ -537,6 +548,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p edgemouse-agent -- doctor
 cargo run -p edgemouse-agent -- demo
 ```
+
+Run `node scripts/test-native-service.cjs` for native UI event regressions.
+`node scripts/test-settings-autosave.cjs` additionally requires Playwright and
+a browser (`EDGEMOUSE_TEST_BROWSER` can specify the executable). It exercises
+rapid edits, retries, stale snapshots, drag cancellation, reopening, and reset
+ordering against simulated IPC without controlling real devices.
 
 The transport test binds two loopback UDP sockets and performs a real mutual-TLS
 handshake. Some sandboxes require permission for that test.

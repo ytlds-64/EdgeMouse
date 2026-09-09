@@ -72,6 +72,148 @@
   let pendingPermissionRepair = false;
   let updateProgressHideTimer;
   let lastDiagnosticExportPath;
+  let settingsGeneration = 0;
+  let desktopReady = false;
+  let refreshingDesktop = false;
+  let configReady = false;
+  let resettingSettings = false;
+  let connectionDirty = false;
+  let saveDrain;
+  const pendingSaves = new Map();
+  const failedSaves = new Map();
+  const saveStates = new Map();
+  const statusSelectors = {
+    input: [".input-save-status", ".overview-save-status"],
+    desktop: [".settings-save-status"],
+    layout: [".layout-save-status"],
+    connection: [".connection-save-status"],
+  };
+  const desktopControls = '[data-general-setting], [data-theme], #language, #update-channel';
+  const configControls = '[data-input-setting], [data-overview-setting], #pointer-smoothing, #pointer-speed, .layout-direction button, [data-layout-setting="edgeProtection"], .auto-reconnect-toggle';
+
+  function updateSettingsReadiness() {
+    for (const [selector, ready] of [[desktopControls, desktopReady], [configControls, configReady]]) {
+      document.querySelectorAll(selector).forEach((control) => { control.disabled = !ready || resettingSettings; });
+    }
+    document.querySelectorAll(".mini-screen").forEach((screen) => {
+      screen.setAttribute("aria-disabled", String(!configReady || resettingSettings));
+    });
+    const resetButton = document.querySelector(".reset-settings-button");
+    if (resetButton) resetButton.disabled = !desktopReady || !configReady || resettingSettings;
+    document.querySelectorAll("[data-retry-settings]").forEach((button) => { button.disabled = resettingSettings; });
+  }
+  updateSettingsReadiness();
+
+  function setSaveState(key, state, message) {
+    saveStates.set(key, { state, message });
+    const section = key.split(":")[0];
+    const states = [...saveStates].filter(([name]) => name.split(":")[0] === section).map(([, value]) => value);
+    const shown = states.find((value) => value.state === "error")
+      ?? states.find((value) => value.state === "saving") ?? { state, message };
+    for (const selector of statusSelectors[section] ?? []) {
+      const element = document.querySelector(selector);
+      if (!element) continue;
+      element.textContent = shown.message;
+      element.classList.toggle("is-error", shown.state === "error");
+      element.classList.toggle("is-dirty", shown.state === "saving");
+      element.setAttribute("aria-busy", String(shown.state === "saving"));
+    }
+    document.querySelectorAll(`[data-retry-settings="${section}"]`).forEach((button) => {
+      button.hidden = !states.some((value) => value.state === "error");
+      button.disabled = resettingSettings;
+    });
+  }
+
+  // All settings writes share one queue, including reset. New edits to a queued
+  // group replace its pending write; edits made during IPC are sent afterwards.
+  function queueSave(key, operation) {
+    pendingSaves.set(key, operation);
+    failedSaves.delete(key);
+    setSaveState(key, "saving", "正在自动保存…");
+    if (!saveDrain) {
+      saveDrain = Promise.resolve().then(async () => {
+        while (pendingSaves.size) {
+          const [nextKey, save] = pendingSaves.entries().next().value;
+          pendingSaves.delete(nextKey);
+          try {
+            const message = await save();
+            settingsGeneration += 1;
+            if (!pendingSaves.has(nextKey)) setSaveState(nextKey, "saved", message ?? "设置已自动保存");
+          } catch (error) {
+            if (!pendingSaves.has(nextKey)) {
+              failedSaves.set(nextKey, save);
+              setSaveState(nextKey, "error", "自动保存失败，请重试");
+              window.showEdgeMouseToast?.(`无法自动保存设置：${error}`, "error");
+            }
+          }
+        }
+      }).finally(() => { saveDrain = undefined; });
+    }
+    return saveDrain;
+  }
+
+  async function saveInputProfile(profile) {
+    const api = window.EdgeMouseInputSettings;
+    const settings = api.getProfile(profile);
+    const fields = api.getDirtyFields(profile);
+    if (!fields.length) return;
+    const result = await invoke("save_input_settings", {
+      profile,
+      reverseHorizontal: Boolean(settings.horizontal),
+      reverseVertical: Boolean(settings.vertical),
+      pointerSmoothing: Number(settings.smoothing),
+      pointerSpeed: Number(settings.speed),
+      keyboardEnabled: Boolean(settings.keyboard),
+      reclaimEnabled: Boolean(settings.reclaim),
+      dragLock: Boolean(settings.dragLock),
+      fields,
+    });
+    settingsGeneration += 1;
+    const message = result.warning ?? "输入设置已自动保存并应用";
+    api.markSaved(message, profile, fields, settings);
+    return message;
+  }
+
+  async function saveDesktopSettings() {
+    const api = window.EdgeMouseDesktopSettings;
+    const settings = api.get();
+    const fields = api.getDirtyFields();
+    if (!fields.length) return;
+    const result = await invoke("save_desktop_preferences", settings);
+    settingsGeneration += 1;
+    desktopPreferences = result.preferences;
+    api.markSaved(result.message, settings, fields);
+    api.apply(result.preferences); // Preserve any newer edits made during IPC.
+    return result.message ?? "设置已自动保存";
+  }
+
+  async function saveScreenLayout() {
+    const api = window.EdgeMouseLayout;
+    if (!api.isDirty()) return;
+    const settings = api.get();
+    const result = await invoke("save_layout", settings);
+    settingsGeneration += 1;
+    const message = result.warning ?? "布局已自动保存，正在同步到另一台电脑";
+    api.markSaved(message, settings);
+    return message;
+  }
+
+  document.addEventListener("edgemouse:settings-change", (event) => {
+    const { section, profile, commit } = event.detail;
+    settingsGeneration += 1;
+    if (!commit || resettingSettings) return;
+    if (section === "input" && configReady) queueSave(`input:${profile}`, () => saveInputProfile(profile));
+    if (section === "desktop" && desktopReady) queueSave("desktop", saveDesktopSettings);
+    if (section === "layout" && configReady) queueSave("layout", saveScreenLayout);
+  });
+
+  document.querySelectorAll("[data-retry-settings]").forEach((button) => {
+    button.addEventListener("click", () => {
+      for (const [key, save] of [...failedSaves]) {
+        if (key.split(":")[0] === button.dataset.retrySettings) queueSave(key, save);
+      }
+    });
+  });
 
   function setServiceActionPending(pending) {
     serviceActionPending = pending;
@@ -520,7 +662,7 @@
       if (!window.EdgeMouseInputSettings?.isDirty()) {
         setText(".input-save-status", shared.pending
           ? "设置已保存在本机，等待另一端同步（鼠标速度同步需两端 0.6.9 或更高版本）"
-          : "输入设置已同步；在任意一端修改并保存即可");
+          : "输入设置已同步；修改后自动保存");
       }
     }
     // The About and Update pages describe the desktop application itself. The
@@ -584,7 +726,7 @@
     setText(".trust-detail", configValid ? "可信证书已载入" : pairingRequired ? "尚未选择可信设备" : "配置需要检查");
     setText(".certificate-line code", groupedNode(snapshot.config.peerNode));
     const autoReconnectToggle = document.querySelector(".auto-reconnect-toggle");
-    if (autoReconnectToggle) {
+    if (autoReconnectToggle && !connectionDirty) {
       const enabled = snapshot.config.autoReconnect !== false;
       autoReconnectToggle.classList.toggle("is-on", enabled);
       autoReconnectToggle.setAttribute("aria-checked", String(enabled));
@@ -620,10 +762,8 @@
     }
 
     const configStatus = document.querySelector(".layout-config-status");
-    if (configStatus) {
-      configStatus.textContent = window.EdgeMouseLayout?.isDirty()
-        ? "尚未保存"
-        : snapshot.config.layoutSyncPending
+    if (configStatus && !window.EdgeMouseLayout?.isDirty()) {
+      configStatus.textContent = snapshot.config.layoutSyncPending
           ? connected ? "正在同步布局" : "等待连接后自动同步"
         : configValid && connected
           ? "已连接 · 布局已保存"
@@ -637,7 +777,7 @@
     if (layoutSaveStatus && !window.EdgeMouseLayout?.isDirty() && connected) {
       layoutSaveStatus.textContent = snapshot.config.layoutSyncPending
         ? "布局已保存，正在等待另一端确认"
-        : "布局已保存；在任意一端修改并保存即可自动同步";
+        : "布局已保存；修改后自动同步到另一台电脑";
     }
 
     updateDeviceCards(snapshot);
@@ -655,14 +795,19 @@
       invoke("show_system_notification", { title: notification[0], body: notification[1] }).catch(console.error);
     }
     lastNotificationState = state;
+    configReady = configValid;
+    updateSettingsReadiness();
   }
 
   let refreshing = false;
   async function refreshSnapshot() {
     if (refreshing) return;
     refreshing = true;
+    const generation = settingsGeneration;
     try {
-      applySnapshot(await invoke("get_app_snapshot"));
+      const snapshot = await invoke("get_app_snapshot");
+      // A response requested before a change/save cannot overwrite newer UI state.
+      if (generation === settingsGeneration && !resettingSettings) applySnapshot(snapshot);
     } catch (error) {
       console.error("Unable to load EdgeMouse desktop status", error);
       setChip(".connection-status-chip", false, "无法读取后台状态");
@@ -672,11 +817,21 @@
   }
 
   async function refreshDesktopPreferences() {
+    if (refreshingDesktop) return;
+    refreshingDesktop = true;
+    const generation = settingsGeneration;
     try {
-      desktopPreferences = await invoke("get_desktop_preferences");
+      const preferences = await invoke("get_desktop_preferences");
+      if (generation !== settingsGeneration || resettingSettings) return;
+      desktopPreferences = preferences;
       window.EdgeMouseDesktopSettings?.apply(desktopPreferences);
+      desktopReady = true;
+      updateSettingsReadiness();
     } catch (error) {
       console.error("Unable to load desktop settings", error);
+      setText(".settings-save-status", "无法读取设置，正在重试…");
+    } finally {
+      refreshingDesktop = false;
     }
   }
 
@@ -1144,39 +1299,35 @@
     }, true);
   });
 
-  document.querySelector(".settings-save-button")?.addEventListener("click", async (event) => {
-    event.stopImmediatePropagation();
-    const button = event.currentTarget;
-    const settings = window.EdgeMouseDesktopSettings?.get();
-    if (!settings) return;
-    button.disabled = true;
-    try {
-      const result = await invoke("save_desktop_preferences", settings);
-      desktopPreferences = result.preferences;
-      window.EdgeMouseDesktopSettings?.apply(result.preferences);
-      window.EdgeMouseDesktopSettings?.markSaved(result.message);
-      window.showEdgeMouseToast?.(result.message);
-    } catch (error) {
-      window.showEdgeMouseToast?.(`无法保存桌面设置：${error}`);
-    } finally {
-      button.disabled = false;
-    }
-  }, true);
-
   document.querySelector(".confirm-reset-button")?.addEventListener("click", async (event) => {
     event.stopImmediatePropagation();
     const button = event.currentTarget;
     button.disabled = true;
+    resettingSettings = true;
+    updateSettingsReadiness();
     try {
+      await saveDrain;
       const result = await invoke("reset_preferences");
+      settingsGeneration += 1;
+      failedSaves.clear();
+      saveStates.clear();
+      for (const section of Object.keys(statusSelectors)) setSaveState(section, "saved", "设置已恢复默认值");
+      connectionDirty = false;
+      window.EdgeMouseInputSettings?.clearDirty();
+      window.EdgeMouseLayout?.clearDirty();
+      window.EdgeMouseDesktopSettings?.clearDirty();
+      document.querySelectorAll("[data-retry-settings]").forEach((retry) => { retry.hidden = true; });
       desktopPreferences = result.preferences;
       window.EdgeMouseDesktopSettings?.apply(result.preferences);
       document.querySelector(".reset-settings-modal").hidden = true;
       window.showEdgeMouseToast?.(result.message);
+      resettingSettings = false;
       await refreshSnapshot();
     } catch (error) {
       window.showEdgeMouseToast?.(`无法恢复默认设置：${error}`);
     } finally {
+      resettingSettings = false;
+      updateSettingsReadiness();
       button.disabled = false;
     }
   }, true);
@@ -1215,81 +1366,6 @@
     }
   });
 
-  document.querySelector(".input-save-button")?.addEventListener("click", async (event) => {
-    event.stopImmediatePropagation();
-    const button = event.currentTarget;
-    if (!latestSnapshot) {
-      window.showEdgeMouseToast?.("正在读取本机配置，请稍后重试");
-      return;
-    }
-    const settingsApi = window.EdgeMouseInputSettings;
-    const profile = settingsApi?.getActiveProfile();
-    const settings = settingsApi?.getProfile(profile);
-    if (!settings) return;
-    const fields = settingsApi.getDirtyFields(profile);
-    if (!fields.length) return;
-    button.disabled = true;
-    try {
-      const result = await invoke("save_input_settings", {
-        profile,
-        reverseHorizontal: Boolean(settings.horizontal),
-        reverseVertical: Boolean(settings.vertical),
-        pointerSmoothing: Number(settings.smoothing),
-        pointerSpeed: Number(settings.speed),
-        keyboardEnabled: Boolean(settings.keyboard),
-        reclaimEnabled: Boolean(settings.reclaim),
-        dragLock: Boolean(settings.dragLock),
-        fields,
-      });
-      const message = result.warning ?? (result.restarted ? "输入设置已保存，后台服务已重新连接" : "输入设置已保存");
-      settingsApi.markSaved(message, profile, fields);
-      window.showEdgeMouseToast?.(message);
-      await refreshSnapshot();
-    } catch (error) {
-      console.error("Unable to save input settings", error);
-      window.showEdgeMouseToast?.(`无法保存输入设置：${error}`);
-    } finally {
-      button.disabled = false;
-    }
-  }, true);
-
-  document.querySelector(".overview-save-button")?.addEventListener("click", async (event) => {
-    event.stopImmediatePropagation();
-    const button = event.currentTarget;
-    const settingsApi = window.EdgeMouseInputSettings;
-    const profile = settingsApi?.getOverviewProfile();
-    const settings = settingsApi?.getProfile(profile);
-    if (!latestSnapshot || !settings) {
-      window.showEdgeMouseToast?.("正在读取本机配置，请稍后重试");
-      return;
-    }
-    const fields = settingsApi.getDirtyFields(profile).filter((field) => ["horizontal", "vertical"].includes(field));
-    if (!fields.length) return;
-    button.disabled = true;
-    try {
-      const result = await invoke("save_input_settings", {
-        profile,
-        reverseHorizontal: Boolean(settings.horizontal),
-        reverseVertical: Boolean(settings.vertical),
-        pointerSmoothing: Number(settings.smoothing),
-        pointerSpeed: Number(settings.speed),
-        keyboardEnabled: Boolean(settings.keyboard),
-        reclaimEnabled: Boolean(settings.reclaim),
-        dragLock: Boolean(settings.dragLock),
-        fields,
-      });
-      const message = result.warning ?? (result.restarted ? "滚轮方向已保存，后台服务已重新连接" : "滚轮方向已保存");
-      settingsApi.markSaved(message, profile, fields);
-      setText(".overview-save-status", message);
-      window.showEdgeMouseToast?.(message);
-      await refreshSnapshot();
-    } catch (error) {
-      window.showEdgeMouseToast?.(`无法保存滚轮方向：${error}`);
-    } finally {
-      button.disabled = false;
-    }
-  }, true);
-
   document.querySelector(".detect-button")?.addEventListener("click", async (event) => {
     event.stopImmediatePropagation();
     const button = event.currentTarget;
@@ -1308,24 +1384,22 @@
     }
   }, true);
 
-  document.querySelector(".auto-reconnect-toggle")?.addEventListener("click", async (event) => {
+  document.querySelector(".auto-reconnect-toggle")?.addEventListener("click", (event) => {
     event.stopImmediatePropagation();
+    if (!configReady || resettingSettings) return;
     const toggle = event.currentTarget;
     const enabled = !toggle.classList.contains("is-on");
     toggle.classList.toggle("is-on", enabled);
     toggle.setAttribute("aria-checked", String(enabled));
-    toggle.disabled = true;
-    try {
-      const result = await invoke("save_connection_settings", { autoReconnect: enabled });
-      window.showEdgeMouseToast?.(result.warning ?? (enabled ? "自动重连已启用" : "自动重连已关闭"));
-      await refreshSnapshot();
-    } catch (error) {
-      toggle.classList.toggle("is-on", !enabled);
-      toggle.setAttribute("aria-checked", String(!enabled));
-      window.showEdgeMouseToast?.(`无法保存连接设置：${error}`);
-    } finally {
-      toggle.disabled = false;
-    }
+    connectionDirty = true;
+    settingsGeneration += 1;
+    queueSave("connection", async () => {
+      const desired = toggle.classList.contains("is-on");
+      const result = await invoke("save_connection_settings", { autoReconnect: desired });
+      settingsGeneration += 1;
+      if (desired === toggle.classList.contains("is-on")) connectionDirty = false;
+      return result.warning ?? "连接设置已自动保存";
+    });
   }, true);
 
   async function reconnectFrom(button, overview = false) {
@@ -1383,32 +1457,12 @@
     }
   }, true);
 
-  document.querySelector(".layout-save-button")?.addEventListener("click", async (event) => {
-    const button = event.currentTarget;
-    const peerOn = window.EdgeMouseLayout?.getEdge();
-    if (!latestSnapshot || !peerOn) {
-      window.showEdgeMouseToast?.("正在读取本机配置，请稍后重试");
-      return;
-    }
-    button.disabled = true;
-    try {
-      const edgeProtection = document.querySelector('[data-layout-setting="edgeProtection"]')?.classList.contains("is-on") ?? true;
-      const result = await invoke("save_layout", { peerOn, edgeProtection });
-      const message = result.warning ?? "布局已保存，正在同步并重新连接";
-      window.EdgeMouseLayout?.markSaved(message);
-      window.showEdgeMouseToast?.(message);
-      await refreshSnapshot();
-    } catch (error) {
-      console.error("Unable to save screen layout", error);
-      window.showEdgeMouseToast?.(`无法保存屏幕布局：${error}`);
-    } finally {
-      button.disabled = false;
-    }
-  });
-
   refreshDesktopPreferences();
   refreshSnapshot();
-  window.setInterval(refreshSnapshot, 1000);
+  window.setInterval(() => {
+    if (!desktopReady) refreshDesktopPreferences();
+    return refreshSnapshot();
+  }, 1000);
   window.addEventListener("focus", () => {
     if (!pendingPermissionRepair) return;
     window.setTimeout(async () => {
