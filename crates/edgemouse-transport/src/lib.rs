@@ -228,6 +228,14 @@ impl PeerLink {
         self.peer_capabilities & edgemouse_protocol::CAPABILITY_SETTINGS_SYNC != 0
     }
 
+    pub fn clipboard(&self) -> Option<ClipboardLink> {
+        (self.peer_capabilities & edgemouse_protocol::clipboard::CAPABILITY_CLIPBOARD != 0).then(
+            || ClipboardLink {
+                guard: Arc::clone(&self.guard),
+            },
+        )
+    }
+
     pub fn supports_pointer_speed(&self) -> bool {
         self.peer_capabilities & edgemouse_protocol::CAPABILITY_POINTER_SPEED != 0
     }
@@ -284,7 +292,8 @@ impl PeerLink {
             name: local_name.to_owned(),
             capabilities: REQUIRED_CAPABILITIES
                 | edgemouse_protocol::CAPABILITY_SETTINGS_SYNC
-                | edgemouse_protocol::CAPABILITY_POINTER_SPEED,
+                | edgemouse_protocol::CAPABILITY_POINTER_SPEED
+                | edgemouse_protocol::clipboard::CAPABILITY_CLIPBOARD,
             screen: local_screen,
         })
         .await?;
@@ -327,6 +336,69 @@ struct LinkGuard {
 impl Drop for LinkGuard {
     fn drop(&mut self) {
         self.connection.close(0_u8.into(), b"edgemouse shutdown");
+    }
+}
+
+/// Low-priority, independently flow-controlled transfers on the same mutually
+/// authenticated connection. Old peers never receive these optional streams.
+#[derive(Clone)]
+pub struct ClipboardLink {
+    guard: Arc<LinkGuard>,
+}
+
+impl ClipboardLink {
+    pub fn is_closed(&self) -> bool {
+        self.guard.connection.close_reason().is_some()
+    }
+    pub async fn send(
+        &self,
+        packet: &edgemouse_protocol::clipboard::ClipboardPacket,
+    ) -> Result<(), TransportError> {
+        let frame = packet.encode().map_err(TransportError::new)?;
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let mut stream = self
+                .guard
+                .connection
+                .open_uni()
+                .await
+                .map_err(|e| TransportError::with_source("open clipboard stream", e))?;
+            stream
+                .set_priority(-10)
+                .map_err(|e| TransportError::with_source("clipboard stream priority", e))?;
+            stream
+                .write_all(&frame)
+                .await
+                .map_err(|e| TransportError::with_source("write clipboard stream", e))?;
+            stream
+                .finish()
+                .map_err(|e| TransportError::with_source("finish clipboard stream", e))?;
+            stream
+                .stopped()
+                .await
+                .map_err(|e| TransportError::with_source("acknowledge clipboard stream", e))?;
+            Ok(())
+        })
+        .await
+        .map_err(|_| TransportError::new("clipboard transfer timed out"))?
+    }
+
+    pub async fn receive(
+        &self,
+    ) -> Result<edgemouse_protocol::clipboard::ClipboardPacket, TransportError> {
+        let mut stream = self
+            .guard
+            .connection
+            .accept_uni()
+            .await
+            .map_err(|e| TransportError::with_source("accept clipboard stream", e))?;
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(15),
+            stream.read_to_end(edgemouse_protocol::clipboard::MAX_CLIPBOARD_FRAME),
+        )
+        .await
+        .map_err(|_| TransportError::new("clipboard receive timed out"))?
+        .map_err(|e| TransportError::with_source("read clipboard stream", e))?;
+        edgemouse_protocol::clipboard::ClipboardPacket::decode(&bytes).map_err(TransportError::new)
     }
 }
 
@@ -476,7 +548,7 @@ fn make_server_config(
 
 fn mouse_transport_config() -> Arc<TransportConfig> {
     let mut transport = TransportConfig::default();
-    transport.max_concurrent_uni_streams(0_u8.into());
+    transport.max_concurrent_uni_streams(2_u8.into());
     transport.max_concurrent_bidi_streams(1_u8.into());
     transport.datagram_receive_buffer_size(Some(DATAGRAM_RECEIVE_BUFFER_BYTES));
     transport.datagram_send_buffer_size(DATAGRAM_SEND_BUFFER_BYTES);
@@ -665,6 +737,48 @@ mod tests {
         assert_eq!(first_link.peer_screen(), &test_screen(2));
         assert_eq!(second_link.peer_screen(), &test_screen(1));
         assert!(first_link.supports_settings_sync() && second_link.supports_settings_sync());
+        // A blocked bulk stream must not prevent control traffic. With no
+        // clipboard reader yet, this exceeds the stream flow-control window.
+        use edgemouse_protocol::clipboard::{ClipboardContent, ClipboardPacket};
+        let clipboard_sender = first_link.clipboard().unwrap();
+        let clipboard_receiver = second_link.clipboard().unwrap();
+        let mut png = vec![0u8; 8 * 1024 * 1024];
+        png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        let packet = ClipboardPacket {
+            revision: 1,
+            content: ClipboardContent::Png(png),
+        };
+        let expected = packet.clone();
+        let sending = tokio::spawn(async move { clipboard_sender.send(&packet).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let heartbeat = WireMessage::Heartbeat {
+            session_id: 1,
+            monotonic_ms: 123,
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            first_link.send(&heartbeat).await.unwrap();
+            assert_eq!(second_link.receive().await.unwrap(), heartbeat);
+        })
+        .await
+        .expect("clipboard transfer blocked input control");
+        assert_eq!(clipboard_receiver.receive().await.unwrap(), expected);
+        sending.await.unwrap().unwrap();
+        let reverse = ClipboardPacket {
+            revision: 2,
+            content: ClipboardContent::Text("反向同步 🖱".into()),
+        };
+        let sender = second_link.clipboard().unwrap();
+        let receiver = first_link.clipboard().unwrap();
+        let (sent, received) = tokio::join!(sender.send(&reverse), receiver.receive());
+        sent.unwrap();
+        assert_eq!(received.unwrap(), reverse);
+        let capabilities = first_link.peer_capabilities;
+        first_link.peer_capabilities &= !edgemouse_protocol::clipboard::CAPABILITY_CLIPBOARD;
+        assert!(
+            first_link.clipboard().is_none(),
+            "old peers must not receive clipboard streams"
+        );
+        first_link.peer_capabilities = capabilities;
         let update = WireMessage::SettingsUpdate {
             request_id: 8,
             entries: vec![edgemouse_protocol::SettingEntry {

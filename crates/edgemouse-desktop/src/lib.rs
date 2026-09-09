@@ -20,6 +20,7 @@ use tauri::{Emitter, Manager};
 // All UI/tray/diagnostic entry points share one lifecycle gate. Concurrent
 // requests must not stop a process that another request has just started.
 static AGENT_LIFECYCLE: Mutex<()> = Mutex::new(());
+static QUITTING: AtomicBool = AtomicBool::new(false);
 
 fn agent_lifecycle_guard() -> Result<std::sync::MutexGuard<'static, ()>, String> {
     match AGENT_LIFECYCLE.try_lock() {
@@ -302,6 +303,7 @@ struct FileActionResult {
 struct DesktopPreferences {
     autostart: bool,
     background: bool,
+    clipboard_sync: bool,
     notifications: bool,
     theme: String,
     language: String,
@@ -313,6 +315,7 @@ impl Default for DesktopPreferences {
         Self {
             autostart: false,
             background: true,
+            clipboard_sync: true,
             notifications: true,
             theme: "system".to_owned(),
             language: "zh-CN".to_owned(),
@@ -662,6 +665,7 @@ fn save_desktop_preferences(
     state: tauri::State<'_, AppState>,
     autostart: bool,
     background: bool,
+    clipboard_sync: bool,
     notifications: bool,
     theme: String,
     language: String,
@@ -701,6 +705,7 @@ fn save_desktop_preferences(
     let preferences = DesktopPreferences {
         autostart,
         background,
+        clipboard_sync,
         notifications: notifications && notification_ready,
         theme,
         language,
@@ -1645,6 +1650,19 @@ fn install_macos_menu(app: &tauri::AppHandle, language: &str) -> tauri::Result<(
         }))
         .build();
 
+    // Native predefined Quit invokes NSApplication.terminate directly. Route
+    // Cmd-Q through our cleanup first so it cannot orphan the embedded service.
+    let quit_item = tauri::menu::MenuItem::with_id(
+        app,
+        "app_quit",
+        if chinese {
+            "退出 EdgeMouse"
+        } else {
+            "Quit EdgeMouse"
+        },
+        true,
+        Some("CmdOrCtrl+Q"),
+    )?;
     let app_menu = SubmenuBuilder::new(app, "EdgeMouse")
         .about_with_text(
             if chinese {
@@ -1669,11 +1687,7 @@ fn install_macos_menu(app: &tauri::AppHandle, language: &str) -> tauri::Result<(
         })
         .show_all_with_text(if chinese { "全部显示" } else { "Show All" })
         .separator()
-        .quit_with_text(if chinese {
-            "退出 EdgeMouse"
-        } else {
-            "Quit EdgeMouse"
-        })
+        .item(&quit_item)
         .build()?;
     let file_menu = SubmenuBuilder::new(app, if chinese { "文件" } else { "File" })
         .close_window_with_text(if chinese {
@@ -2364,7 +2378,16 @@ fn persist_desktop_preferences(
     }
     let source = toml::to_string_pretty(preferences)
         .map_err(|error| format!("无法生成桌面设置：{error}"))?;
-    fs::write(path, source).map_err(|error| format!("无法保存桌面设置 {}：{error}", path.display()))
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let staged = path.with_extension(format!("toml.{}.{stamp}.tmp", std::process::id()));
+    let result = fs::write(&staged, source).and_then(|()| fs::rename(&staged, path));
+    if result.is_err() {
+        let _ = fs::remove_file(&staged);
+    }
+    result.map_err(|error| format!("无法保存桌面设置 {}：{error}", path.display()))
 }
 
 fn resolve_config_path() -> Option<PathBuf> {
@@ -2406,6 +2429,32 @@ fn app_context() -> tauri::Context<tauri::Wry> {
     tauri::generate_context!()
 }
 
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn quit_with_agent(app: &tauri::AppHandle) {
+    if QUITTING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let app = app.clone();
+    thread::spawn(move || {
+        // Wait for an in-flight start/reconnect instead of silently leaving its
+        // service alive when the nonblocking UI lifecycle gate is busy.
+        let _guard = AGENT_LIFECYCLE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Err(error) = stop_agent_unlocked() {
+            eprintln!("EdgeMouse service shutdown: {error}");
+        }
+        app.exit(0);
+    });
+}
+
 pub fn run() {
     let config_path = resolve_config_path();
     if let Some(path) = config_path.as_deref()
@@ -2416,6 +2465,9 @@ pub fn run() {
     let preferences_path = desktop_preferences_path(config_path.as_deref());
     let preferences = load_desktop_preferences(&preferences_path);
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            show_main_window(app)
+        }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -2453,15 +2505,10 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "tray_show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.unminimize();
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                        show_main_window(app);
                     }
                     "tray_quit" => {
-                        let _ = stop_agent();
-                        app.exit(0);
+                        quit_with_agent(app);
                     }
                     _ => {}
                 })
@@ -2471,11 +2518,8 @@ pub fn run() {
                         button_state: MouseButtonState::Up,
                         ..
                     } = event
-                        && let Some(window) = tray.app_handle().get_webview_window("main")
                     {
-                        let _ = window.unminimize();
-                        let _ = window.show();
-                        let _ = window.set_focus();
+                        show_main_window(tray.app_handle());
                     }
                 });
             tray.build(app)?;
@@ -2508,15 +2552,15 @@ pub fn run() {
                 if background {
                     let _ = window.hide();
                 } else {
-                    let app = window.app_handle().clone();
-                    thread::spawn(move || {
-                        let _ = stop_agent();
-                        app.exit(0);
-                    });
+                    quit_with_agent(window.app_handle());
                 }
             }
         })
         .on_menu_event(|app, event| {
+            if event.id() == "app_quit" {
+                quit_with_agent(app);
+                return;
+            }
             if event.id() == "show_help"
                 && let Some(window) = app.get_webview_window("main")
             {
@@ -2554,8 +2598,26 @@ pub fn run() {
             set_menu_language,
             window_action
         ])
-        .run(app_context())
-        .expect("failed to run EdgeMouse desktop application");
+        .build(app_context())
+        .expect("failed to build EdgeMouse desktop application")
+        .run(|app, event| match event {
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => show_main_window(app),
+            tauri::RunEvent::ExitRequested { api, code, .. } if code.is_none() => {
+                api.prevent_exit();
+                quit_with_agent(app);
+            }
+            tauri::RunEvent::Exit => {
+                // macOS Dock Quit/system termination may bypass ExitRequested.
+                // This final synchronous hook runs before the process disappears.
+                QUITTING.store(true, Ordering::Release);
+                let _guard = AGENT_LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner());
+                if let Err(error) = stop_agent_unlocked() {
+                    eprintln!("EdgeMouse final service cleanup: {error}");
+                }
+            }
+            _ => {}
+        });
 }
 
 #[cfg(test)]

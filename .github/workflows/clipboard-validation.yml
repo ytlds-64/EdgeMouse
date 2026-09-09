@@ -1,0 +1,43 @@
+name: Clipboard and window regression
+on:
+  push:
+    branches: [codex/clipboard-window-validation]
+permissions:
+  contents: read
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Prepare debug sidecar
+        run: cargo build -p edgemouse-agent
+      - name: Stage debug sidecar
+        shell: python
+        run: |
+          import pathlib, subprocess, shutil, os
+          host = next(line[6:] for line in subprocess.check_output(['rustc','-vV'],text=True).splitlines() if line.startswith('host: '))
+          suffix = '.exe' if os.name == 'nt' else ''
+          directory = pathlib.Path('crates/edgemouse-desktop/binaries')
+          directory.mkdir(exist_ok=True)
+          shutil.copy2('target/debug/edgemouse'+suffix, directory/('edgemouse-'+host+suffix))
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Static analysis
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Workspace regression
+        run: cargo test --workspace
+      - name: Native clipboard text and RGBA roundtrip on disposable CI desktop
+        env:
+          EDGEMOUSE_CLIPBOARD_NATIVE_TEST: '1'
+        run: cargo test -p edgemouse-agent native_clipboard_text_and_image_roundtrip -- --ignored --nocapture --test-threads=1
+      - name: Native Windows mouse injection regression
+        if: runner.os == 'Windows'
+        run: cargo test -p edgemouse-platform-windows native_injected_moves_do_not_become_physical_input -- --ignored --nocapture --test-threads=1

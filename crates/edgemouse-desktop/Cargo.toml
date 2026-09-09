@@ -26,5 +26,10 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-updater = "2"
+tauri-plugin-single-instance = "2.4.3"
 toml = "0.9"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSRunningApplication", "NSResponder"] }

@@ -6,6 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod clipboard;
+
 use edgemouse_core::{
     ButtonState, DisplayGeometry, Edge, KeyCode, KeyState, KeyboardEvent, MouseButton, NodeId,
     Point, Rect, RemoteMouseEvent, RoutedEvent, RoutedKeyboardEvent, ScreenId,

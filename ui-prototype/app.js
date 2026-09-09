@@ -760,6 +760,7 @@ window.EdgeMouseDesktopSettings = {
     return {
       autostart: toggleValue("autostart"),
       background: toggleValue("background"),
+      clipboardSync: toggleValue("clipboardSync"),
       notifications: toggleValue("notifications"),
       theme: activeTheme,
       language: languageSelect.value,

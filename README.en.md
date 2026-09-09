@@ -10,7 +10,16 @@ crossing back restores local control.
 This repository contains a functional mouse MVP, bidirectional keyboard
 forwarding, automatic desktop geometry exchange, an integrated cross-platform
 desktop application, signed installers, and in-app updates. It intentionally
-excludes clipboard sync, relay servers, and elevated Windows desktops.
+excludes relay servers and elevated Windows desktops. The unreleased source
+also includes optional text/image clipboard synchronization.
+
+## Unreleased source changes
+
+The embedded Mac service now uses a background activation policy, without its own Dock icon. Dock reopening and secondary launches focus the existing window; application quit cleans up the service, including macOS termination paths.
+
+Settings → General adds an automatically saved, default-on clipboard toggle. Both paired devices must support and enable it. Newly copied text/images sync while connected; pre-connection, disconnected and disabled-period contents are not replayed. Limits are 1 MiB UTF-8 text, 16 million image pixels (maximum side 8192), and 16 MiB encoded PNG. File lists and Mac concealed/transient content are skipped. Clipboard payloads are never logged or persisted and use a separate low-priority reliable stream over the existing authenticated QUIC connection. Old peers retain input interoperability without the clipboard extension.
+
+Local regressions pass; native Mac click lifecycle and Windows clipboard checks are still pending. The published stable release remains 0.6.12.
 
 ## Download
 

@@ -13,7 +13,7 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function installBackend(platform) {
   const initial = {
-    preferences: { autostart: false, background: true, notifications: false, theme: 'system', language: 'zh-CN', updateChannel: 'stable' },
+    preferences: { autostart: false, background: true, clipboardSync: true, notifications: false, theme: 'system', language: 'zh-CN', updateChannel: 'stable' },
     snapshot: {
       desktopVersion: '0.6.12', agent: { running: false },
       config: { valid: true, localName: platform === 'macos' ? 'Mac' : 'Windows', peerScreenName: 'Other computer', peerOn: platform === 'macos' ? 'left' : 'right',
@@ -170,11 +170,13 @@ async function main() {
       await page.locator('[data-theme="light"]').click();
       await page.locator('[data-general-setting="autostart"]').click();
       await page.locator('[data-general-setting="notifications"]').click();
+      await page.locator('[data-general-setting="clipboardSync"]').click();
       await page.locator('#language').selectOption('en');
       await page.evaluate(() => testBackend.release('save_desktop_preferences'));
       await page.waitForFunction(() => EdgeMouseDesktopSettings.getDirtyFields().length === 0);
       assert.equal(await page.evaluate(() => testBackend.state.preferences.theme), 'light');
       assert.equal(await page.evaluate(() => testBackend.state.preferences.autostart), true);
+      assert.equal(await page.evaluate(() => testBackend.state.preferences.clipboardSync), false);
       assert.equal(await page.locator('#language').inputValue(), 'en');
       assert.equal(await page.locator('[data-general-setting="notifications"]').getAttribute('aria-checked'), 'false');
 
@@ -216,6 +218,7 @@ async function main() {
       await page.waitForFunction(() => !document.querySelector('[data-input-setting]').disabled);
       await navigate('settings');
       assert.equal(await page.locator('[data-general-setting="autostart"]').getAttribute('aria-checked'), 'true');
+      assert.equal(await page.locator('[data-general-setting="clipboardSync"]').getAttribute('aria-checked'), 'false');
       assert.equal(await page.locator('#language').inputValue(), 'en');
       assert.equal(await page.evaluate(() => EdgeMouseInputSettings.getProfile('windows-to-mac').speed), 90);
       assert.equal(await page.evaluate(() => EdgeMouseInputSettings.getProfile('mac-to-windows').speed), 175);

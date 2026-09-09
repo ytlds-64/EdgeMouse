@@ -308,6 +308,7 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
             local_screen_info,
             session_id,
             Arc::clone(&stopping),
+            config_path,
         );
         finish_discovery_responder(discovery_responder)?;
         let network = match network_result {

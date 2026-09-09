@@ -22,6 +22,14 @@ fn run_embedded_macos_agent() -> Option<i32> {
         eprintln!("edgemouse: --agent-run accepts exactly one configuration path");
         return Some(2);
     }
+    // The service shares the signed app executable for Accessibility identity,
+    // but must never register a second foreground application in the Dock.
+    let main_thread = objc2::MainThreadMarker::new().expect("agent entry must be on main thread");
+    let application = objc2_app_kit::NSApplication::sharedApplication(main_thread);
+    if !application.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Prohibited) {
+        eprintln!("edgemouse: could not establish background activation policy");
+        return Some(1);
+    }
     match edgemouse_agent::runtime::run(std::path::Path::new(&config_path)) {
         Ok(()) => Some(0),
         Err(error) => {
