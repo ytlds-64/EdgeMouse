@@ -1,7 +1,7 @@
 const navItems = [...document.querySelectorAll(".nav-item")];
 const pages = [...document.querySelectorAll(".page")];
 const toast = document.querySelector(".toast");
-let appVersion = document.querySelector('meta[name="edgemouse-version"]')?.content ?? "0.6.12";
+let appVersion = document.querySelector('meta[name="edgemouse-version"]')?.content ?? "0.6.13";
 let toastTimer;
 
 const sidebarToggle = document.querySelector(".sidebar-toggle");
@@ -760,6 +760,7 @@ window.EdgeMouseDesktopSettings = {
     return {
       autostart: toggleValue("autostart"),
       background: toggleValue("background"),
+      clipboardSync: toggleValue("clipboardSync"),
       notifications: toggleValue("notifications"),
       theme: activeTheme,
       language: languageSelect.value,

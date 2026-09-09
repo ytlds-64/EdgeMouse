@@ -1,6 +1,10 @@
 (() => {
   const zhToEn = {
     "网页预览：设置仅保存在此浏览器": "Web preview: settings are saved only in this browser",
+    "同步剪贴板": "Sync clipboard",
+    "连接时双向同步新复制的文字和图片；两端均需开启": "Sync newly copied text and images while connected; enable on both devices",
+    "从 Dock、菜单栏或系统托盘再次打开": "Reopen from the Dock, menu bar or system tray",
+    "文字与图片剪贴板": "Text and image clipboard",
     "设置已恢复默认值": "Settings restored to defaults",
     "修改后自动保存并同步到另一台电脑": "Changes are saved and synced to the other computer automatically",
     "调整完成后自动保存并同步到另一台电脑": "Automatically save and sync when the adjustment is complete",

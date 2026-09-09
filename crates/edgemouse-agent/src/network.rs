@@ -231,7 +231,10 @@ impl Network {
         local_screen: ScreenInfo,
         session_id: u64,
         stopping: Arc<AtomicBool>,
+        config_path: &std::path::Path,
     ) -> Result<Self, String> {
+        let local_node = config.identity.node_id();
+        let clipboard_preferences = config_path.with_file_name("edgemouse-desktop.toml");
         let (commands_sender, commands_receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (event_sender, event_receiver) = std_mpsc::channel();
         let (startup_sender, startup_receiver) = std_mpsc::sync_channel(1);
@@ -278,6 +281,15 @@ impl Network {
                         }
                     };
                     let peer_node = link.peer_node();
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    let _clipboard = link.clipboard().map(|clipboard| {
+                        crate::clipboard::ClipboardWorker::start(
+                            clipboard,
+                            local_node,
+                            peer_node,
+                            clipboard_preferences,
+                        )
+                    });
                     let peer_name = link.peer_name().to_owned();
                     let peer_screen = link.peer_screen().clone();
                     let settings_sync = link.supports_settings_sync();

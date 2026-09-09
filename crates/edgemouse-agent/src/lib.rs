@@ -4,6 +4,8 @@
 //! library so configuration parsing and local status reporting have a single
 //! implementation.
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub mod clipboard;
 pub mod config;
 pub mod control;
 pub mod discovery;

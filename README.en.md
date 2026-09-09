@@ -10,7 +10,16 @@ crossing back restores local control.
 This repository contains a functional mouse MVP, bidirectional keyboard
 forwarding, automatic desktop geometry exchange, an integrated cross-platform
 desktop application, signed installers, and in-app updates. It intentionally
-excludes clipboard sync, relay servers, and elevated Windows desktops.
+excludes relay servers and elevated Windows desktops. Version 0.6.13
+also includes optional text/image clipboard synchronization.
+
+## Version 0.6.13
+
+The embedded Mac service now uses a background activation policy, without its own Dock icon. Dock reopening and secondary launches focus the existing window; application quit cleans up the service, including macOS termination paths.
+
+Settings → General adds an automatically saved, default-on clipboard toggle. Both paired devices must support and enable it. Newly copied text/images sync while connected; pre-connection, disconnected and disabled-period contents are not replayed. Limits are 1 MiB UTF-8 text, 16 million image pixels (maximum side 8192), and 16 MiB encoded PNG. File lists and Mac concealed/transient content are skipped. Clipboard payloads are never logged or persisted and use a separate low-priority reliable stream over the existing authenticated QUIC connection. Old peers retain input interoperability without the clipboard extension.
+
+[Mac/Windows CI validation](https://github.com/ytlds-64/EdgeMouse/actions/runs/34332463000) passes, including native text/image clipboard roundtrips on both systems and Windows mouse injection regression. An isolated Mac app also passed close/reopen, minimize/restore, Cmd-Q service cleanup, and full exit with background running disabled. Clipboard synchronization has not yet been tested between the user’s two physical computers. Update both computers to 0.6.13 to use clipboard synchronization.
 
 ## Download
 
@@ -32,7 +41,7 @@ cannot trigger a receiver reclaim; outgoing Raw Input remains enabled. Pointer
 warps during handoffs also use marked injection. Reclaim logs include the
 triggering movement and receiver coordinates.
 
-The current stable release is 0.6.12. Future signed releases can also be checked
+The current stable release is 0.6.13. Future signed releases can also be checked
 and installed from the Settings page in the desktop application.
 
 macOS packages currently use ad-hoc signing, without Developer ID signing or

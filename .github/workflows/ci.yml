@@ -88,6 +88,11 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+      - name: Verify native text and image clipboard on disposable CI desktop
+        env:
+          EDGEMOUSE_CLIPBOARD_NATIVE_TEST: "1"
+        run: cargo test -p edgemouse-agent native_clipboard_text_and_image_roundtrip -- --ignored --nocapture --test-threads=1
+
       - name: Verify injected Windows cursor movement cannot reclaim control
         if: runner.os == 'Windows'
         run: cargo test -p edgemouse-platform-windows native_injected_moves_do_not_become_physical_input -- --ignored --nocapture --test-threads=1
