@@ -613,6 +613,25 @@ mod tests {
             .unwrap()
             .expect("file metadata must not hide image pixels");
         assert_eq!(decode_image(mixed.bytes()).unwrap().bytes.as_ref(), pixels);
+        #[cfg(target_os = "windows")]
+        {
+            // Screenshot/chat applications may provide a legacy bitmap and a
+            // file reference without registering a PNG representation.
+            write_native_legacy_bitmap();
+            append_native_file_metadata();
+            let bitmap = native
+                .read()
+                .unwrap()
+                .expect("bitmap with file metadata must be readable without PNG");
+            let bitmap = decode_image(bitmap.bytes()).unwrap();
+            assert_eq!((bitmap.width, bitmap.height), (2, 2));
+            assert_eq!(
+                bitmap.bytes.as_ref(),
+                [
+                    255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255
+                ]
+            );
+        }
         native
             .write(&ClipboardContent::Text("fixture-image.png".into()))
             .unwrap();
@@ -664,6 +683,23 @@ mod tests {
         }
         let _clipboard = clipboard_win::Clipboard::new_attempts(10).unwrap();
         clipboard_win::raw::set_without_clear(15, &dropfiles).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    fn write_native_legacy_bitmap() {
+        // A 40-byte BITMAPINFOHEADER plus two bottom-up 24-bit BGR rows,
+        // padded to DWORD boundaries. Windows synthesizes CF_DIBV5 from this.
+        let mut dib = vec![0u8; 40];
+        dib[0..4].copy_from_slice(&40u32.to_le_bytes());
+        dib[4..8].copy_from_slice(&2i32.to_le_bytes());
+        dib[8..12].copy_from_slice(&2i32.to_le_bytes());
+        dib[12..14].copy_from_slice(&1u16.to_le_bytes());
+        dib[14..16].copy_from_slice(&24u16.to_le_bytes());
+        dib[20..24].copy_from_slice(&16u32.to_le_bytes());
+        dib.extend_from_slice(&[255, 0, 0, 255, 255, 255, 0, 0]);
+        dib.extend_from_slice(&[0, 0, 255, 0, 255, 0, 0, 0]);
+        let _clipboard = clipboard_win::Clipboard::new_attempts(10).unwrap();
+        clipboard_win::raw::set(8, &dib).unwrap();
     }
 
     #[test]
