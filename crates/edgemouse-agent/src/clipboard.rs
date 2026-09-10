@@ -124,7 +124,7 @@ impl ClipboardBackend for NativeClipboard {
         native_revision()
     }
     fn read(&mut self) -> Result<Option<ClipboardContent>, &'static str> {
-        if excluded_content() {
+        if private_content() {
             return Ok(None);
         }
         #[cfg(target_os = "macos")]
@@ -142,6 +142,11 @@ impl ClipboardBackend for NativeClipboard {
             Ok(image) => return Ok(encode_image(image).ok()),
             Err(arboard::Error::ContentNotAvailable) => {}
             Err(_) => return Err("clipboard is temporarily unavailable"),
+        }
+        // Applications can advertise both an image and a file list for one
+        // copy. Use embedded pixels first, but never forward a file path as text.
+        if contains_files() {
+            return Ok(None);
         }
         match self.0.get_text() {
             Ok(text) if !text.is_empty() && text.len() <= MAX_TEXT_BYTES => {
@@ -174,20 +179,34 @@ fn native_revision() -> u64 {
     objc2_app_kit::NSPasteboard::generalPasteboard().changeCount() as u64
 }
 #[cfg(target_os = "macos")]
-fn excluded_content() -> bool {
+fn private_content() -> bool {
     objc2_app_kit::NSPasteboard::generalPasteboard()
         .types()
         .is_some_and(|types| {
             types.iter().any(|kind| {
                 matches!(
                     kind.to_string().as_str(),
-                    "public.file-url"
-                        | "NSFilenamesPboardType"
-                        | "org.nspasteboard.ConcealedType"
-                        | "org.nspasteboard.TransientType"
+                    "org.nspasteboard.ConcealedType" | "org.nspasteboard.TransientType"
                 )
             })
         })
+}
+#[cfg(target_os = "macos")]
+fn contains_files() -> bool {
+    objc2_app_kit::NSPasteboard::generalPasteboard()
+        .types()
+        .is_some_and(|types| {
+            types.iter().any(|kind| {
+                matches!(
+                    kind.to_string().as_str(),
+                    "public.file-url" | "NSFilenamesPboardType"
+                )
+            })
+        })
+}
+#[cfg(target_os = "windows")]
+fn private_content() -> bool {
+    false
 }
 #[cfg(target_os = "windows")]
 #[link(name = "user32")]
@@ -201,7 +220,7 @@ fn native_revision() -> u64 {
     u64::from(unsafe { GetClipboardSequenceNumber() })
 }
 #[cfg(target_os = "windows")]
-fn excluded_content() -> bool {
+fn contains_files() -> bool {
     // SAFETY: CF_HDROP is the predefined file-list format, queried without data access.
     unsafe { IsClipboardFormatAvailable(15) != 0 }
 }
@@ -586,7 +605,101 @@ mod tests {
         let roundtrip = decode_image(copied.bytes()).unwrap();
         assert_eq!((roundtrip.width, roundtrip.height), (2, 2));
         assert_eq!(roundtrip.bytes.as_ref(), pixels);
+        // Third-party image copies may also advertise file references.
+        append_native_file_metadata();
+        assert!(contains_files());
+        let mixed = native
+            .read()
+            .unwrap()
+            .expect("file metadata must not hide image pixels");
+        assert_eq!(decode_image(mixed.bytes()).unwrap().bytes.as_ref(), pixels);
+        #[cfg(target_os = "windows")]
+        {
+            // Screenshot/chat applications may provide a legacy bitmap and a
+            // file reference without registering a PNG representation.
+            write_native_legacy_bitmap();
+            append_native_file_metadata();
+            let bitmap = native
+                .read()
+                .unwrap()
+                .expect("bitmap with file metadata must be readable without PNG");
+            let bitmap = decode_image(bitmap.bytes()).unwrap();
+            assert_eq!((bitmap.width, bitmap.height), (2, 2));
+            assert_eq!(
+                bitmap.bytes.as_ref(),
+                [
+                    255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255
+                ]
+            );
+        }
+        native
+            .write(&ClipboardContent::Text("fixture-image.png".into()))
+            .unwrap();
+        append_native_file_metadata();
+        assert_eq!(
+            native.read().unwrap(),
+            None,
+            "file paths must not become synced text"
+        );
+        #[cfg(target_os = "macos")]
+        {
+            native.write(&content).unwrap();
+            assert!(
+                objc2_app_kit::NSPasteboard::generalPasteboard().setString_forType(
+                    &objc2_foundation::NSString::from_str(""),
+                    &objc2_foundation::NSString::from_str("org.nspasteboard.ConcealedType"),
+                )
+            );
+            assert_eq!(
+                native.read().unwrap(),
+                None,
+                "concealed images must remain private"
+            );
+        }
         native.0.clear().unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn append_native_file_metadata() {
+        use objc2_app_kit::NSPasteboard;
+        use objc2_foundation::NSString;
+        assert!(NSPasteboard::generalPasteboard().setString_forType(
+            &NSString::from_str("file:///nonexistent/edgemouse-fixture.png"),
+            &NSString::from_str("public.file-url"),
+        ));
+    }
+    #[cfg(target_os = "windows")]
+    fn append_native_file_metadata() {
+        // CF_HDROP contains a DROPFILES header and a double-NUL UTF-16 list.
+        // The reference is test metadata only; neither side opens this path.
+        let mut dropfiles = vec![0u8; 20];
+        dropfiles[0..4].copy_from_slice(&20u32.to_le_bytes());
+        dropfiles[16..20].copy_from_slice(&1u32.to_le_bytes());
+        for unit in r"C:\nonexistent\edgemouse-fixture.png"
+            .encode_utf16()
+            .chain([0, 0])
+        {
+            dropfiles.extend_from_slice(&unit.to_le_bytes());
+        }
+        let _clipboard = clipboard_win::Clipboard::new_attempts(10).unwrap();
+        clipboard_win::raw::set_without_clear(15, &dropfiles).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    fn write_native_legacy_bitmap() {
+        // A 40-byte BITMAPINFOHEADER plus two bottom-up 24-bit BGR rows,
+        // padded to DWORD boundaries. Windows synthesizes CF_DIBV5 from this.
+        let mut dib = vec![0u8; 40];
+        dib[0..4].copy_from_slice(&40u32.to_le_bytes());
+        dib[4..8].copy_from_slice(&2i32.to_le_bytes());
+        dib[8..12].copy_from_slice(&2i32.to_le_bytes());
+        dib[12..14].copy_from_slice(&1u16.to_le_bytes());
+        dib[14..16].copy_from_slice(&24u16.to_le_bytes());
+        dib[20..24].copy_from_slice(&16u32.to_le_bytes());
+        dib.extend_from_slice(&[255, 0, 0, 255, 255, 255, 0, 0]);
+        dib.extend_from_slice(&[0, 0, 255, 0, 255, 0, 0, 0]);
+        let _clipboard = clipboard_win::Clipboard::new_attempts(10).unwrap();
+        clipboard_win::raw::set(8, &dib).unwrap();
     }
 
     #[test]

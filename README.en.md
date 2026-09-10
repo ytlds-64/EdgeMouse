@@ -13,6 +13,12 @@ desktop application, signed installers, and in-app updates. It intentionally
 excludes relay servers and elevated Windows desktops. Version 0.6.13
 also includes optional text/image clipboard synchronization.
 
+## Version 0.6.14
+
+Fixes image copies from WeChat and other applications being skipped when the clipboard also contains file references. Embedded image pixels now take precedence over file metadata; file-only copies and Mac concealed/transient contents remain excluded. Referenced files are not opened and file paths are not sent as text.
+
+The failing macOS WeChat copy was confirmed to contain both image and file-reference formats. [Mac/Windows regression validation](https://github.com/ytlds-64/EdgeMouse/actions/runs/34447906300) reproduces the failure with released 0.6.13 code and passes with the fix, including Windows legacy bitmaps without a PNG representation. Update both computers to 0.6.14 and retest pasting in your applications.
+
 ## Version 0.6.13
 
 The embedded Mac service now uses a background activation policy, without its own Dock icon. Dock reopening and secondary launches focus the existing window; application quit cleans up the service, including macOS termination paths.
@@ -41,7 +47,7 @@ cannot trigger a receiver reclaim; outgoing Raw Input remains enabled. Pointer
 warps during handoffs also use marked injection. Reclaim logs include the
 triggering movement and receiver coordinates.
 
-The current stable release is 0.6.13. Future signed releases can also be checked
+The current stable release is 0.6.14. Future signed releases can also be checked
 and installed from the Settings page in the desktop application.
 
 macOS packages currently use ad-hoc signing, without Developer ID signing or

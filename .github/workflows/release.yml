@@ -49,16 +49,14 @@ jobs:
           tagName: v__VERSION__
           releaseName: EdgeMouse __VERSION__
           releaseBody: |
-            EdgeMouse 0.6.13
+            EdgeMouse 0.6.14
 
-            - 修复 macOS 后台跨屏服务重复占用 Dock 图标，服务继续在后台运行。
-            - 关闭窗口后可以再次打开并恢复原窗口；最小化和重复启动会唤起已有窗口。
-            - 完整退出应用时同时停止跨屏服务；关闭“关闭窗口后继续运行”后，关闭窗口即退出。
-            - 新增文字和图片剪贴板双向同步，在“设置 → 常规”中开启，修改自动保存。两台电脑均需更新至 0.6.13 并开启同步。
-            - 仅同步连接期间新复制的内容，不补发连接前、断线或停用期间的旧剪贴板；支持文字及保留透明度的图片，不同步文件。
-            - 内容通过现有配对加密连接的独立低优先级流传输；限制传输尺寸，避免剪贴板读写和图片处理阻塞鼠标控制。程序不记录或保存剪贴板正文。
+            - 修复微信等软件复制图片时同时附带文件标记，导致 Mac/Windows 图片同步被跳过的问题。
+            - 优先读取剪贴板中的真实图片；没有图片时仍忽略文件列表，不读取引用文件、不把文件路径作为文字发送。Mac 隐藏或临时内容仍会跳过。
+            - 补充双方原生图片与文件标记共存的回归测试，以及 Windows 没有 PNG 格式时的传统位图兼容测试。
+            - 请两台电脑均更新至 0.6.14，并在“设置 → 常规”保持“同步剪贴板”开启；连接后重新复制图片即可测试。
 
-            Fixes the extra macOS Dock icon and restores the existing window when the app is reopened or launched again. Quitting the app now cleans up its background service; closing a window exits fully when background running is disabled. Adds bidirectional text and image clipboard synchronization with an automatically saved switch in Settings → General. Update both computers to 0.6.13 and enable synchronization. Only newly copied content while connected is shared; previous, disconnected and disabled-period contents are not replayed. File copying is not supported. Clipboard data uses a separate low-priority stream over the existing authenticated connection, with size limits and no payload logging or persistence.
+            Fixes image copies from WeChat and other applications being skipped on Mac/Windows when file metadata accompanies image pixels. Embedded images now take precedence; file-only copies and Mac concealed/transient content remain excluded. Referenced files are not opened or sent as text. Adds native mixed-format regression coverage on both platforms and a Windows legacy bitmap case without PNG. Update both computers to 0.6.14, keep clipboard synchronization enabled in Settings → General, then copy the image again while connected.
 
             文字上限 1 MiB；图片最多 16,777,216 像素、单边不超过 8192、PNG 压缩后不超过 16 MiB。超过限制的内容不会同步。
 

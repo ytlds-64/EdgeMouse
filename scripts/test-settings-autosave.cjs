@@ -15,7 +15,7 @@ function installBackend(platform) {
   const initial = {
     preferences: { autostart: false, background: true, clipboardSync: true, notifications: false, theme: 'system', language: 'zh-CN', updateChannel: 'stable' },
     snapshot: {
-      desktopVersion: '0.6.13', agent: { running: false },
+      desktopVersion: '0.6.14', agent: { running: false },
       config: { valid: true, localName: platform === 'macos' ? 'Mac' : 'Windows', peerScreenName: 'Other computer', peerOn: platform === 'macos' ? 'left' : 'right',
         autoReconnect: true, entryHysteresis: 8, layoutSyncPending: false,
         sharedSettings: { pending: false, values: [1, 8, 1, 0, 0, 52, 1, 1, 1, 0, 0, 52, 1, 1, 1, 100, 100] } },
