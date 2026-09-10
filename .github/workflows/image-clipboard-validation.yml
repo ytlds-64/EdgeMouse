@@ -1,0 +1,53 @@
+name: Validate image clipboard compatibility
+on:
+  push:
+    branches: [codex/image-clipboard-compatibility]
+permissions:
+  contents: read
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Static analysis
+        run: cargo clippy -p edgemouse-agent --all-targets -- -D warnings
+      - name: Agent regression
+        run: cargo test -p edgemouse-agent
+      - name: Reproduce mixed-format failure in released 0.6.13
+        shell: python
+        env:
+          EDGEMOUSE_CLIPBOARD_NATIVE_TEST: "1"
+        run: |
+          from pathlib import Path
+          import subprocess
+          file = Path('crates/edgemouse-agent/src/clipboard.rs')
+          fixed = file.read_text(encoding='utf-8')
+          released = subprocess.check_output(['git', 'show', '6eef6f832638fac19cebf5c18319fe6efecbaa45:crates/edgemouse-agent/src/clipboard.rs']).decode('utf-8')
+          marker = '#[cfg(test)]\nmod tests {'
+          assert marker in fixed and marker in released
+          released_with_tests = released.split(marker)[0] + marker + fixed.split(marker, 1)[1].replace('contains_files()', 'excluded_content()')
+          try:
+              file.write_text(released_with_tests, encoding='utf-8')
+              result = subprocess.run(['cargo', 'test', '-p', 'edgemouse-agent', 'native_clipboard_text_and_image_roundtrip', '--', '--ignored', '--nocapture', '--test-threads=1'], capture_output=True)
+              output = (result.stdout + result.stderr).decode('utf-8', errors='replace')
+              print(output)
+              assert result.returncode != 0 and 'file metadata must not hide image pixels' in output, 'Expected image/file-metadata failure was not reproduced'
+              print('Confirmed: released 0.6.13 drops image pixels when file metadata is present.')
+          finally:
+              file.write_text(fixed, encoding='utf-8')
+      - name: Fixed native text image and file-metadata interoperability
+        env:
+          EDGEMOUSE_CLIPBOARD_NATIVE_TEST: "1"
+        run: cargo test -p edgemouse-agent native_clipboard_text_and_image_roundtrip -- --ignored --nocapture --test-threads=1

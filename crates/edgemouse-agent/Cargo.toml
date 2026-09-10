@@ -35,5 +35,8 @@ edgemouse-platform-windows = { path = "../edgemouse-platform-windows" }
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+clipboard-win = "5.4"
+
 [lints]
 workspace = true
