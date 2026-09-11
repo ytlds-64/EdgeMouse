@@ -98,6 +98,7 @@ pub struct Network {
     pub peer_screen: ScreenInfo,
     pub settings_sync: bool,
     pub pointer_speed: bool,
+    pub display_layout: Option<edgemouse_protocol::display_layout::DisplayLayoutState>,
 }
 
 #[derive(Default)]
@@ -234,6 +235,7 @@ impl Network {
         config_path: &std::path::Path,
     ) -> Result<Self, String> {
         let local_node = config.identity.node_id();
+        let layout_path = config_path.to_owned();
         let clipboard_preferences = config_path.with_file_name("edgemouse-desktop.toml");
         let (commands_sender, commands_receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (event_sender, event_receiver) = std_mpsc::channel();
@@ -267,7 +269,7 @@ impl Network {
                     }
                 };
                 runtime.block_on(async move {
-                    let link = tokio::select! {
+                    let mut link = tokio::select! {
                         result = PeerLink::connect(config, local_screen) => match result {
                             Ok(link) => link,
                             Err(error) => {
@@ -280,6 +282,16 @@ impl Network {
                             return;
                         }
                     };
+                    let display_layout = if link.supports_display_layout() {
+                        let exchange = tokio::select! {
+                            result = tokio::time::timeout(Duration::from_secs(5), crate::display_layout::exchange(&mut link, &layout_path)) => result.map_err(|_| "display layout handshake timed out".to_owned()).and_then(|r| r),
+                            () = wait_for_cancellation(&stopping) => Err("connection cancelled".to_owned()),
+                        };
+                        match exchange {
+                            Ok(layout) => Some(layout),
+                            Err(error) => { drop(startup_sender.send(Err(error))); return; }
+                        }
+                    } else { None };
                     let peer_node = link.peer_node();
                     #[cfg(any(target_os = "macos", target_os = "windows"))]
                     let _clipboard = link.clipboard().map(|clipboard| {
@@ -301,6 +313,7 @@ impl Network {
                             peer_screen,
                             settings_sync,
                             pointer_speed,
+                            display_layout,
                         )))
                         .is_err()
                     {
@@ -320,7 +333,14 @@ impl Network {
             .map_err(|error| format!("failed to start network thread: {error}"))?;
 
         match startup_receiver.recv() {
-            Ok(Ok((peer_node, peer_name, peer_screen, settings_sync, pointer_speed))) => Ok(Self {
+            Ok(Ok((
+                peer_node,
+                peer_name,
+                peer_screen,
+                settings_sync,
+                pointer_speed,
+                display_layout,
+            ))) => Ok(Self {
                 commands: commands_sender,
                 events: event_receiver,
                 pending_move,
@@ -331,6 +351,7 @@ impl Network {
                 peer_screen,
                 settings_sync,
                 pointer_speed,
+                display_layout,
             }),
             Ok(Err(error)) => {
                 drop(thread.join());

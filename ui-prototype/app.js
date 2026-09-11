@@ -845,7 +845,6 @@ window.addEventListener("keydown", (event) => {
 
 const layoutCanvas = document.querySelector(".layout-canvas");
 const layoutDirectionButtons = [...document.querySelectorAll(".layout-direction button")];
-const dragBeam = layoutCanvas.querySelector(".drag-beam");
 let layoutDirty = false;
 
 function syncOverviewLayout(edge) {
@@ -857,22 +856,9 @@ function syncOverviewLayout(edge) {
 
 function setLayoutEdge(edge, { dirty = false } = {}) {
   const changed = edge !== (layoutCanvas.dataset.edge ?? "right");
-  const win = layoutCanvas.querySelector(".screen-win");
-  const mac = layoutCanvas.querySelector(".screen-mac");
-  const beam = layoutCanvas.querySelector(".edge-glow");
-  const hint = layoutCanvas.querySelector(".canvas-hint");
-  const vertical = edge === "top" || edge === "bottom";
-  const macComesFirst = edge === "left" || edge === "top";
-
   layoutCanvas.dataset.edge = edge;
   syncOverviewLayout(edge);
-  layoutCanvas.style.flexDirection = vertical ? "column" : "row";
-  beam.style.width = vertical ? "160px" : "20px";
-  beam.style.height = vertical ? "20px" : "160px";
-  beam.querySelector("span").style.transform = vertical ? "none" : "rotate(-90deg)";
-
-  const order = macComesFirst ? [mac, beam, win] : [win, beam, mac];
-  order.forEach((element) => layoutCanvas.insertBefore(element, hint));
+  window.EdgeMouseDisplays?.setEdge(edge, dirty && changed);
   layoutDirectionButtons.forEach((button) => button.classList.toggle("is-selected", button.dataset.edge === edge));
   if (dirty && changed) markLayoutDirty();
 }
@@ -887,16 +873,21 @@ function markLayoutDirty() {
 window.EdgeMouseLayout = {
   getEdge: () => layoutCanvas.dataset.edge ?? "right",
   get() {
-    return { peerOn: this.getEdge(), edgeProtection: document.querySelector('[data-layout-setting="edgeProtection"]').classList.contains("is-on") };
+    return { peerOn: this.getEdge(), displayLayout: window.EdgeMouseDisplays?.get() ?? null, edgeProtection: document.querySelector('[data-layout-setting="edgeProtection"]').classList.contains("is-on") };
   },
   isDirty: () => layoutDirty,
-  applySnapshot(edge) {
-    if (!layoutDirty && !layoutCanvas.classList.contains("is-dragging")) setLayoutEdge(edge);
+  changed: markLayoutDirty,
+  setEdge: (edge) => setLayoutEdge(edge),
+  applySnapshot(edge, displayLayout = null) {
+    if (!layoutDirty && !layoutCanvas.classList.contains("is-dragging")) {
+      window.EdgeMouseDisplays?.apply(displayLayout);
+      setLayoutEdge(displayLayout?.macOn ?? edge);
+    }
   },
   clearDirty: () => { layoutDirty = false; },
   markSaved(message = "布局已自动保存", submitted = this.get()) {
     const current = this.get();
-    if (current.peerOn !== submitted.peerOn || current.edgeProtection !== submitted.edgeProtection) return;
+    if (current.peerOn !== submitted.peerOn || current.edgeProtection !== submitted.edgeProtection || JSON.stringify(current.displayLayout) !== JSON.stringify(submitted.displayLayout)) return;
     layoutDirty = false;
     const status = document.querySelector(".layout-save-status");
     if (status) status.textContent = message;
@@ -910,119 +901,9 @@ document.querySelector('[data-layout-setting="edgeProtection"]')?.addEventListen
   markLayoutDirty();
 });
 
-function edgeFromRects(macRect, winRect) {
-  const deltaX = macRect.left + macRect.width / 2 - (winRect.left + winRect.width / 2);
-  const deltaY = macRect.top + macRect.height / 2 - (winRect.top + winRect.height / 2);
-  if (Math.abs(deltaX) >= Math.abs(deltaY)) return deltaX < 0 ? "left" : "right";
-  return deltaY < 0 ? "top" : "bottom";
-}
 
-function setDropPreview(edge) {
-  layoutDirectionButtons.forEach((button) => button.classList.toggle("is-drop-preview", button.dataset.edge === edge));
-}
 
-function cardCenter(rect) {
-  return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-}
 
-function pointOnCardEdge(rect, deltaX, deltaY) {
-  const center = cardCenter(rect);
-  const horizontalScale = Math.abs(deltaX) < 0.001 ? Number.POSITIVE_INFINITY : rect.width / 2 / Math.abs(deltaX);
-  const verticalScale = Math.abs(deltaY) < 0.001 ? Number.POSITIVE_INFINITY : rect.height / 2 / Math.abs(deltaY);
-  const scale = Math.min(horizontalScale, verticalScale);
-  return { x: center.x + deltaX * scale, y: center.y + deltaY * scale };
-}
-
-function updateDragBeam() {
-  const canvasRect = layoutCanvas.getBoundingClientRect();
-  const winRect = layoutCanvas.querySelector(".screen-win").getBoundingClientRect();
-  const macRect = layoutCanvas.querySelector(".screen-mac").getBoundingClientRect();
-  const cardsOverlap = winRect.left < macRect.right && winRect.right > macRect.left && winRect.top < macRect.bottom && winRect.bottom > macRect.top;
-  if (cardsOverlap) {
-    dragBeam.classList.remove("is-visible");
-    return;
-  }
-  const winCenter = cardCenter(winRect);
-  const macCenter = cardCenter(macRect);
-  const deltaX = macCenter.x - winCenter.x;
-  const deltaY = macCenter.y - winCenter.y;
-  const start = pointOnCardEdge(winRect, deltaX, deltaY);
-  const end = pointOnCardEdge(macRect, -deltaX, -deltaY);
-  const lineX = end.x - start.x;
-  const lineY = end.y - start.y;
-  const angle = Math.atan2(lineY, lineX);
-
-  dragBeam.style.left = `${start.x - canvasRect.left}px`;
-  dragBeam.style.top = `${start.y - canvasRect.top - 11}px`;
-  dragBeam.style.width = `${Math.hypot(lineX, lineY)}px`;
-  dragBeam.style.transform = `rotate(${angle}rad)`;
-  dragBeam.querySelector("span").style.transform = `translate(-50%, -50%) rotate(${-angle}rad)`;
-  dragBeam.classList.add("is-visible");
-}
-
-function hideDragBeam() {
-  dragBeam.classList.remove("is-visible");
-  dragBeam.removeAttribute("style");
-  dragBeam.querySelector("span").removeAttribute("style");
-}
-
-document.querySelectorAll(".mini-screen").forEach((screen) => {
-  let drag;
-
-  screen.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0 || screen.getAttribute("aria-disabled") === "true") return;
-    event.preventDefault();
-    if (drag) {
-      finishDrag({ pointerId: drag.pointerId });
-      return;
-    }
-    drag = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, moved: false };
-    screen.classList.add("is-dragging");
-    layoutCanvas.classList.add("is-dragging");
-    updateDragBeam();
-  });
-
-  window.addEventListener("pointermove", (event) => {
-    if (!drag || event.pointerId !== drag.pointerId) return;
-    const deltaX = event.clientX - drag.startX;
-    const deltaY = event.clientY - drag.startY;
-    drag.moved ||= Math.hypot(deltaX, deltaY) > 8;
-    screen.style.transform = `translate3d(${deltaX}px, ${deltaY}px, 0) scale(1.02)`;
-    updateDragBeam();
-    const other = layoutCanvas.querySelector(screen.classList.contains("screen-mac") ? ".screen-win" : ".screen-mac");
-    const macRect = screen.classList.contains("screen-mac") ? screen.getBoundingClientRect() : other.getBoundingClientRect();
-    const winRect = screen.classList.contains("screen-win") ? screen.getBoundingClientRect() : other.getBoundingClientRect();
-    setDropPreview(edgeFromRects(macRect, winRect));
-  });
-
-  const finishDrag = (event) => {
-    if (!drag || event.pointerId !== drag.pointerId) return;
-    const other = layoutCanvas.querySelector(screen.classList.contains("screen-mac") ? ".screen-win" : ".screen-mac");
-    const macRect = screen.classList.contains("screen-mac") ? screen.getBoundingClientRect() : other.getBoundingClientRect();
-    const winRect = screen.classList.contains("screen-win") ? screen.getBoundingClientRect() : other.getBoundingClientRect();
-    const edge = edgeFromRects(macRect, winRect);
-    const moved = drag.moved;
-
-    screen.style.transform = "";
-    screen.classList.remove("is-dragging");
-    layoutCanvas.classList.remove("is-dragging");
-    hideDragBeam();
-    setDropPreview();
-    drag = undefined;
-    if (moved && event.type !== "pointercancel") {
-      setLayoutEdge(edge, { dirty: true });
-    }
-  };
-
-  window.addEventListener("pointerup", finishDrag, true);
-  window.addEventListener("pointercancel", finishDrag, true);
-  window.addEventListener("blur", () => {
-    if (drag) finishDrag({ pointerId: drag.pointerId, type: "pointercancel" });
-  });
-  window.addEventListener("mouseup", () => {
-    if (drag) finishDrag({ pointerId: drag.pointerId });
-  }, true);
-});
 
 document.querySelector(".detect-button")?.addEventListener("click", (event) => {
   if (window.__TAURI__?.core?.invoke) return;
@@ -1082,7 +963,7 @@ if (!window.__TAURI__?.core?.invoke) {
     for (const [name, settings] of Object.entries(saved.input ?? {})) window.EdgeMouseInputSettings.applyLocalProfile(name, settings);
     if (saved.desktop) window.EdgeMouseDesktopSettings.apply(saved.desktop);
     if (saved.layout && ["left", "right", "top", "bottom"].includes(saved.layout.peerOn)) {
-      setLayoutEdge(saved.layout.peerOn);
+      window.EdgeMouseLayout.applySnapshot(saved.layout.peerOn, saved.layout.displayLayout ?? null);
       setToggleState(document.querySelector('[data-layout-setting="edgeProtection"]'), saved.layout.edgeProtection);
     }
     if (typeof saved.autoReconnect === "boolean") setToggleState(document.querySelector(".auto-reconnect-toggle"), saved.autoReconnect);

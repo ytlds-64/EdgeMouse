@@ -12,14 +12,21 @@ fs.mkdirSync(outputs, { recursive: true });
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function installBackend(platform) {
+  const macDesktop = { originX: 0, originY: -1080, width: 1920, height: 2036, displays: [
+    { originX: 0, originY: -1080, width: 1920, height: 1080, pixelWidth: 1920, pixelHeight: 1080, primary: false },
+    { originX: 240, originY: 0, width: 1470, height: 956, pixelWidth: 2940, pixelHeight: 1912, primary: true },
+  ] };
+  const winDesktop = { originX: 0, originY: 0, width: 2160, height: 3840, displays: [
+    { originX: 0, originY: 0, width: 2160, height: 3840, pixelWidth: 2160, pixelHeight: 3840, primary: true },
+  ] };
   const initial = {
     preferences: { autostart: false, background: true, clipboardSync: true, notifications: false, theme: 'system', language: 'zh-CN', updateChannel: 'stable' },
     snapshot: {
-      desktopVersion: '0.6.14', agent: { running: false },
+      desktopVersion: '0.6.14', agent: { running: true, connection: { state: 'connected', peerDesktop: platform === 'macos' ? winDesktop : macDesktop } },
       config: { valid: true, localName: platform === 'macos' ? 'Mac' : 'Windows', peerScreenName: 'Other computer', peerOn: platform === 'macos' ? 'left' : 'right',
-        autoReconnect: true, entryHysteresis: 8, layoutSyncPending: false,
+        autoReconnect: true, entryHysteresis: 8, layoutSyncPending: false, displayLayout: { layout: null, pending: false },
         sharedSettings: { pending: false, values: [1, 8, 1, 0, 0, 52, 1, 1, 1, 0, 0, 52, 1, 1, 1, 100, 100] } },
-      platform: { operatingSystem: platform, permissionGranted: true, desktopWidth: 1920, desktopHeight: 1080, displayCount: 1 },
+      platform: { operatingSystem: platform, permissionGranted: true, desktop: platform === 'macos' ? macDesktop : winDesktop, desktopWidth: 1920, desktopHeight: 1080, displayCount: 1 },
     },
   };
   const state = JSON.parse(localStorage.getItem('autosave-test-backend') || 'null') || JSON.parse(JSON.stringify(initial));
@@ -62,11 +69,13 @@ function installBackend(platform) {
       if (command === 'save_layout') {
         state.snapshot.config.peerOn = platform === 'macos' ? ({ left: 'right', right: 'left', top: 'bottom', bottom: 'top' })[args.peerOn] : args.peerOn;
         state.snapshot.config.entryHysteresis = args.edgeProtection ? 8 : 0;
+        state.snapshot.config.displayLayout = { layout: clone(args.displayLayout), pending: false };
         return { appliedLive: false, warning: '布局已保存；下次连接后将自动同步到另一台电脑，无需再次保存' };
       }
       if (command === 'save_connection_settings') { state.snapshot.config.autoReconnect = args.autoReconnect; return {}; }
       if (command === 'reset_preferences') {
         state.preferences = clone(initial.preferences);
+        state.snapshot.config.displayLayout = { layout: null, pending: false };
         state.snapshot.config.sharedSettings.values = clone(initial.snapshot.config.sharedSettings.values);
         return { preferences: clone(state.preferences), message: '已恢复推荐设置' };
       }
@@ -180,33 +189,62 @@ async function main() {
       assert.equal(await page.locator('#language').inputValue(), 'en');
       assert.equal(await page.locator('[data-general-setting="notifications"]').getAttribute('aria-checked'), 'false');
 
-      // Layout clicks save once; pointer motion is only a preview, cancel is not a commit.
+      // System-style monitor dragging: exact overlap determines crossing regions.
       await navigate('layout');
       let layouts = await savedCount('save_layout');
-      await page.locator('.layout-direction [data-edge="right"]').click();
-      await delay(50);
-      assert.equal(await savedCount('save_layout'), layouts, 'unchanged direction must not save');
-      await page.locator('.layout-direction [data-edge="top"]').click();
-      await waitWrite('save_layout', layouts + 1);
+      await page.locator('.layout-direction [data-edge="left"]').click();
+      await waitWrite('save_layout', ++layouts);
       await page.waitForFunction(() => !EdgeMouseLayout.isDirty());
-      const mac = await page.locator('.layout-canvas .screen-mac').boundingBox();
-      const win = await page.locator('.layout-canvas .screen-win').boundingBox();
-      await page.mouse.move(mac.x + mac.width / 2, mac.y + mac.height / 2);
-      await page.mouse.down();
-      await page.mouse.move(win.x + win.width + 140, win.y + win.height / 2, { steps: 12 });
-      await delay(1150);
-      assert.equal(await savedCount('save_layout'), layouts + 1, 'dragging must not save or reconnect');
-      await page.mouse.up();
-      await waitWrite('save_layout', layouts + 2);
-      await page.waitForFunction(() => !EdgeMouseLayout.isDirty());
-      assert.equal(await page.evaluate(() => EdgeMouseLayout.getEdge()), 'right');
-      const screen = page.locator('.layout-canvas .screen-mac');
-      await screen.dispatchEvent('pointerdown', { button: 0, pointerId: 77, clientX: 100, clientY: 100 });
-      await page.evaluate(() => window.dispatchEvent(new PointerEvent('pointermove', { pointerId: 77, clientX: 200, clientY: 400 })));
-      await page.evaluate(() => window.dispatchEvent(new PointerEvent('pointercancel', { pointerId: 77 })));
-      assert.equal(await savedCount('save_layout'), layouts + 2, 'cancelled drag must not commit');
+      const winTile = page.locator('.monitor-space [data-display-side="windows"]');
+      const moveWindows = async (x, y, cancel = false) => {
+        const frame = await page.evaluate(() => EdgeMouseLayout.get().displayLayout.positions.windows[0]);
+        await winTile.hover(); // Wait for navigation animation and the next painted layout.
+        const box = await winTile.boundingBox(), scale = box.height / frame[3];
+        const cx = box.x + box.width / 2, cy = box.y + box.height / 2;
+        const count = await savedCount('save_layout');
+        await page.mouse.move(cx, cy); await page.mouse.down();
+        await page.mouse.move(cx + (x - frame[0]) * scale, cy + (y - frame[1]) * scale, { steps: 8 });
+        assert.equal(await savedCount('save_layout'), count, 'drag preview never saves');
+        if (cancel) await page.keyboard.press('Escape');
+        await page.mouse.up();
+      };
+      assert.equal((await page.evaluate(() => EdgeMouseDisplays.routes())).length, 2);
+      await moveWindows(0, -600);
+      await waitWrite('save_layout', ++layouts); await page.waitForFunction(() => !EdgeMouseLayout.isDirty());
+      let routes = await page.evaluate(() => EdgeMouseDisplays.routes());
+      assert.equal(routes.length, 1); assert.equal(routes[0].b.actual[1], -1080);
+      assert.ok(Math.abs(routes[0].from) < 0.001 && Math.abs(routes[0].to - 400) < 0.1, 'only touching part of the edge participates');
+      await page.screenshot({ path: path.join(outputs, `EdgeMouse-${platform}-upper-only.png`) });
+      await page.evaluate(() => { testBackend.holds.save_layout = true; });
+      await moveWindows(0, 600);
+      await page.waitForFunction(() => testBackend.waiters.save_layout);
+      routes = await page.evaluate(() => EdgeMouseDisplays.routes());
+      assert.equal(routes.length, 1); assert.equal(routes[0].b.actual[1], 0);
+      await page.screenshot({ path: path.join(outputs, `EdgeMouse-${platform}-lower-only.png`) });
+      await moveWindows(0, 0);
+      await page.evaluate(() => testBackend.release('save_layout'));
+      await waitWrite('save_layout', layouts += 2); await page.waitForFunction(() => !EdgeMouseLayout.isDirty());
+      assert.equal((await page.evaluate(() => EdgeMouseDisplays.routes())).length, 2);
+      await page.screenshot({ path: path.join(outputs, `EdgeMouse-${platform}-both-screens.png`) });
+      await moveWindows(200, 0);
+      await waitWrite('save_layout', ++layouts); await page.waitForFunction(() => !EdgeMouseLayout.isDirty());
+      assert.equal((await page.evaluate(() => EdgeMouseDisplays.routes())).length, 0, 'a gap disables crossing');
+      const beforeCancel = await page.evaluate(() => EdgeMouseLayout.get());
+      await moveWindows(200, 300, true);
+      assert.deepEqual(await page.evaluate(() => EdgeMouseLayout.get()), beforeCancel);
+      await moveWindows(-100, 0);
+      assert.deepEqual(await page.evaluate(() => EdgeMouseLayout.get()), beforeCancel, 'overlapping drop reverts');
+      assert.equal(await savedCount('save_layout'), layouts);
+      await page.locator('[data-display-all]').click();
+      await waitWrite('save_layout', ++layouts); await page.waitForFunction(() => !EdgeMouseLayout.isDirty());
+      await winTile.focus(); await page.keyboard.press('Shift+ArrowUp');
+      await waitWrite('save_layout', ++layouts); await page.waitForFunction(() => !EdgeMouseLayout.isDirty());
+      assert.equal((await page.evaluate(() => EdgeMouseLayout.get())).displayLayout.positions.windows[0][1], -100);
+      await page.locator('[data-display-all]').click();
+      await waitWrite('save_layout', ++layouts); await page.waitForFunction(() => !EdgeMouseLayout.isDirty());
+      const savedDisplayLayout = await page.evaluate(() => EdgeMouseLayout.get().displayLayout);
       await page.locator('[data-layout-setting="edgeProtection"]').click();
-      await waitWrite('save_layout', layouts + 3);
+      await waitWrite('save_layout', ++layouts);
 
       await navigate('connection');
       await page.locator('.auto-reconnect-toggle').click();
@@ -224,6 +262,7 @@ async function main() {
       assert.equal(await page.evaluate(() => EdgeMouseInputSettings.getProfile('mac-to-windows').speed), 175);
       assert.equal(await savedCount('save_desktop_preferences'), 0);
       assert.equal(await savedCount('save_layout'), 0);
+      assert.deepEqual((await page.evaluate(() => EdgeMouseLayout.get())).displayLayout, savedDisplayLayout);
       await page.locator('#language').selectOption('zh-CN');
       await page.waitForFunction(() => EdgeMouseDesktopSettings.getDirtyFields().length === 0);
       for (const name of ['settings', 'input', 'layout']) {
@@ -237,7 +276,7 @@ async function main() {
         await page.screenshot({ animations: 'disabled', path: path.join(outputs, `EdgeMouse-${platform}-${name}-compact.png`) });
         await page.setViewportSize({ width: 1470, height: 980 });
       }
-      console.log(`${platform}: autosave, rapid edits, profiles, slider commit, retry, stale snapshots, layout drag/cancel, restart hydration passed`);
+      console.log(`${platform}: autosave, rapid edits, profiles, slider commit, retry, stale snapshots, monitor drag, edge overlap, gap, cancel, collision, keyboard movement, restart hydration passed`);
       // Reset waits for an in-flight save, and locks edits until it completes.
       await navigate('settings');
       await page.evaluate(() => { testBackend.holds.save_desktop_preferences = true; });
@@ -267,6 +306,17 @@ async function main() {
     await previewPage.reload();
     assert.equal(await previewPage.evaluate(() => EdgeMouseDesktopSettings.get().theme), 'dark');
     assert.equal(await previewPage.evaluate(() => EdgeMouseLayout.getEdge()), 'bottom');
+    await previewPage.locator('[data-page="layout"]').click();
+    await previewPage.waitForFunction(() => document.querySelectorAll('.monitor-space .display-tile').length === 3);
+    assert.equal(await previewPage.locator('.mac-map').evaluate((el) => getComputedStyle(el).backgroundColor), 'rgba(0, 0, 0, 0)', 'dark mode keeps physical monitors separate');
+    await previewPage.waitForFunction(() => Number(getComputedStyle(document.querySelector('#page-layout')).opacity) > 0.99);
+    await previewPage.screenshot({ animations: 'disabled', path: path.join(outputs, 'EdgeMouse-preview-dark-layout.png') });
+    await previewPage.locator('.layout-direction [data-edge="left"]').click();
+    await previewPage.locator('.monitor-space [data-display-side="windows"]').focus();
+    await previewPage.keyboard.press('Shift+ArrowUp');
+    const previewLayout = await previewPage.evaluate(() => EdgeMouseLayout.get().displayLayout);
+    await previewPage.reload();
+    assert.deepEqual((await previewPage.evaluate(() => EdgeMouseLayout.get())).displayLayout, previewLayout, 'standalone preview restores screen positions');
     console.log('Standalone preview: automatic local persistence and reopening passed');
     await preview.close();
     assert.deepEqual(errors, []);

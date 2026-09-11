@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod clipboard;
+pub mod display_layout;
 
 use edgemouse_core::{
     ButtonState, DisplayGeometry, Edge, KeyCode, KeyState, KeyboardEvent, MouseButton, NodeId,
@@ -106,6 +107,13 @@ pub enum WireMessage {
     /// reconnect disabled, applying settings must preserve the active pairing.
     SettingsReconnect,
     SettingsReconnectAck,
+    DisplayLayoutUpdate {
+        request_id: u64,
+        state: display_layout::DisplayLayoutState,
+    },
+    DisplayLayoutAck {
+        request_id: u64,
+    },
     /// An unreliable absolute movement update. `after_sequence` identifies the
     /// newest reliable mouse event that must be applied before this position.
     MouseDatagram {
@@ -128,6 +136,7 @@ pub enum WireMessage {
 pub enum EncodeError {
     NameTooLong,
     TooManyDisplays,
+    InvalidDisplayLayout,
     NonFiniteNumber,
     FrameTooLarge,
 }
@@ -135,6 +144,7 @@ pub enum EncodeError {
 impl Display for EncodeError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidDisplayLayout => formatter.write_str("invalid selected display layout"),
             Self::NameTooLong => formatter.write_str("peer name exceeds the protocol limit"),
             Self::TooManyDisplays => formatter.write_str("screen contains too many displays"),
             Self::NonFiniteNumber => formatter.write_str("wire numbers must be finite"),
@@ -292,6 +302,11 @@ pub fn encode_frame(message: &WireMessage) -> Result<Vec<u8>, EncodeError> {
         }
         WireMessage::SettingsUpdateAck { request_id } => put_u64(&mut payload, *request_id),
         WireMessage::SettingsReconnect | WireMessage::SettingsReconnectAck => {}
+        WireMessage::DisplayLayoutUpdate { request_id, state } => {
+            put_u64(&mut payload, *request_id);
+            display_layout::encode(&mut payload, state)?;
+        }
+        WireMessage::DisplayLayoutAck { request_id } => put_u64(&mut payload, *request_id),
         WireMessage::MouseDatagram {
             session_id,
             after_sequence,
@@ -419,6 +434,13 @@ pub fn decode_frame(frame: &[u8]) -> Result<WireMessage, DecodeError> {
         },
         18 => WireMessage::SettingsReconnect,
         19 => WireMessage::SettingsReconnectAck,
+        20 => WireMessage::DisplayLayoutUpdate {
+            request_id: payload.u64()?,
+            state: display_layout::decode(&mut payload)?,
+        },
+        21 => WireMessage::DisplayLayoutAck {
+            request_id: payload.u64()?,
+        },
         other => return Err(DecodeError::InvalidTag(other)),
     };
     if !payload.is_empty() {
@@ -467,6 +489,8 @@ fn tag_for(message: &WireMessage) -> u8 {
         WireMessage::SettingsUpdateAck { .. } => 17,
         WireMessage::SettingsReconnect => 18,
         WireMessage::SettingsReconnectAck => 19,
+        WireMessage::DisplayLayoutUpdate { .. } => 20,
+        WireMessage::DisplayLayoutAck { .. } => 21,
         WireMessage::Heartbeat { .. } => 8,
         WireMessage::Goodbye { .. } => 9,
     }

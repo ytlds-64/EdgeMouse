@@ -685,3 +685,41 @@ html[data-theme="dark"] .update-progress-track { background: #2a3c41; }
   .device-card h2 { margin-top: 2px; }
   .stage-tip { bottom: 10px; }
 }
+
+/* Independent physical monitor cards and proportional crossing regions. */
+.layout-canvas.per-display { gap: 42px; padding: 55px 24px 80px; }
+.per-display .mini-screen { width: min(46%, 310px); padding: 0; border: 0; background: transparent; box-shadow: none; cursor: default; z-index: 1; }
+.per-display .desktop-map { height: 285px; overflow: visible; border: 0; background: transparent; box-shadow: none; }
+.per-display .screen-badge { top: -24px; left: 10px; }
+.per-display .screen-badge.connected { left: auto; right: 10px; }
+.per-display .display-tile { min-width: 18px; min-height: 18px; padding: 0; border-radius: 9px; border-width: 3px; cursor: pointer; transition: opacity .15s, box-shadow .15s; }
+.per-display .display-tile[aria-checked="true"] { border-color: #087f79; box-shadow: 0 0 0 3px #39c9bc55, 0 7px 20px #14372c22; }
+.per-display .display-tile[aria-checked="false"] { opacity: .45; filter: saturate(.25); }
+.per-display .display-tile:focus-visible { outline: 3px solid #397bc8; outline-offset: 5px; }
+.per-display .display-tile:disabled { cursor: default; }
+.display-check { position: absolute; right: 7px; top: 7px; display: grid; place-items: center; width: 21px; height: 21px; border: 2px solid white; border-radius: 6px; background: #087f79; color: white; font-size: 13px; font-weight: 800; }
+[aria-checked="false"] .display-check { color: transparent; background: #ffffff44; }
+.per-display .edge-glow, .per-display .drag-beam { display: none; }
+.display-connections { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 2; overflow: visible; pointer-events: none; }
+.per-display .canvas-hint { left: 20px; right: 20px; text-align: center; line-height: 1.6; }
+.display-selection { margin: 22px 0 12px; padding: 15px; border: 1px solid #0bafa333; border-radius: 12px; background: #0bafa308; }
+.display-selection strong { font-size: 13px; }
+.display-selection p { color: var(--muted); font-size: 12px; line-height: 1.7; margin: 8px 0; }
+.per-display[data-edge="top"], .per-display[data-edge="bottom"] { gap: 40px; }
+.per-display[data-edge="top"] .mini-screen, .per-display[data-edge="bottom"] .mini-screen { width: 85%; }
+.per-display[data-edge="top"] .desktop-map, .per-display[data-edge="bottom"] .desktop-map { height: 190px; }
+@media (max-width: 900px) { .layout-canvas.per-display { gap: 24px; padding-inline: 12px; } .per-display .desktop-map { height: 230px; } }
+
+.display-selection > small { display: block; margin-top: 8px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+
+html[data-theme="dark"] .per-display .mini-screen, html[data-theme="dark"] .per-display .desktop-map { border: 0; background: transparent; box-shadow: none; }
+
+.arranged-displays.layout-canvas { display: block; min-height: 570px; height: 620px; padding: 0; overflow: hidden; }
+.arranged-displays > .mini-screen, .arranged-displays > .edge-glow { display: none; }
+.monitor-space { position: absolute; inset: 0; }
+.arranged-displays .display-tile { cursor: grab; border-width: 4px; border-radius: 8px; touch-action: none; transition: none; min-width: 6px; min-height: 6px; box-shadow: 0 4px 16px #14372c22; }
+.arranged-displays .display-tile b { left: 8px; top: 8px; font-size: 11px; }
+.arranged-displays .display-tile small { font-size: 9px; bottom: 8px; right: 8px; }
+.arranged-displays .display-tile.is-moving { cursor: grabbing; z-index: 3; box-shadow: 0 0 0 3px #0bafa355, 0 10px 25px #14372c33; }
+.arranged-displays .display-tile.is-overlapping { border-color: #d75158; box-shadow: 0 0 0 3px #d7515855; }
+.arranged-displays .display-connections { z-index: 4; }

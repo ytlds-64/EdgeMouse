@@ -111,24 +111,25 @@
           </section>
 
           <section class="page" id="page-layout" data-title="屏幕布局">
-            <div class="page-heading"><div><h1>屏幕布局</h1><p>按实际摆放位置排列设备，边缘切换会自动匹配</p></div><button class="secondary-button detect-button" type="button">重新检测屏幕</button></div>
+            <div class="page-heading"><div><h1>屏幕布局</h1><p>像系统显示设置一样拖动屏幕，贴合的边缘自动成为穿越区域</p></div><button class="secondary-button detect-button" type="button">重新检测屏幕</button></div>
             <div class="layout-grid">
               <article class="panel layout-canvas dotted-surface">
-                <div class="mini-screen screen-win" role="button" tabindex="0" aria-label="拖动 Windows PC 调整屏幕位置"><span class="screen-badge">主设备</span><div class="desktop-map windows-map" data-display-map="windows" aria-label="Windows 显示器布局"><div class="display-tile windows-wallpaper is-primary" style="left:0;top:0;width:100%;height:100%"><b>1</b><small>3840 × 2160</small></div></div><strong>Windows PC</strong><small class="desktop-summary">1 个屏幕 · 3840 × 2160</small></div>
+                <div class="mini-screen screen-win" role="group" aria-label="Windows 屏幕"><span class="screen-badge">主设备</span><div class="desktop-map windows-map" data-display-map="windows" aria-label="Windows 显示器布局"><div class="display-tile windows-wallpaper is-primary" style="left:0;top:0;width:100%;height:100%"><b>1</b><small>3840 × 2160</small></div></div><strong>Windows PC</strong><small class="desktop-summary">1 个屏幕 · 3840 × 2160</small></div>
                 <div class="edge-glow"><span>穿越边缘</span></div>
-                <div class="mini-screen screen-mac" role="button" tabindex="0" aria-label="拖动 MacBook Air 调整屏幕位置"><span class="screen-badge connected">已连接</span><div class="desktop-map mac-map" data-display-map="macos" aria-label="macOS 显示器布局"><div class="display-tile mac-wallpaper is-primary" style="left:0;top:0;width:100%;height:100%"><b>1</b><small>2940 × 1912</small></div></div><strong>MacBook Air</strong><small class="desktop-summary">1 个屏幕 · 2940 × 1912</small></div>
+                <div class="mini-screen screen-mac" role="group" aria-label="Mac 屏幕"><span class="screen-badge connected">已连接</span><div class="desktop-map mac-map" data-display-map="macos" aria-label="macOS 显示器布局"><div class="display-tile mac-wallpaper is-primary" style="left:0;top:0;width:100%;height:100%"><b>1</b><small>2940 × 1912</small></div></div><strong>MacBook Air</strong><small class="desktop-summary">1 个屏幕 · 2940 × 1912</small></div>
                 <div class="drag-beam" aria-hidden="true"><span>穿越边缘</span></div>
-                <p class="canvas-hint">按住设备卡片，拖到另一台设备的左、右、上或下方</p>
+                <p class="canvas-hint">拖动屏幕贴合边缘，松手后自动保存 · 方向键也可微调</p>
               </article>
               <aside class="panel inspector">
                 <div class="panel-heading"><h2>布局设置</h2><span class="status-chip good">自动识别</span></div>
                 <div class="form-group"><label>Mac 位于 Windows 的</label><div class="segmented layout-direction" role="group"><button type="button" data-edge="left">左侧</button><button class="is-selected" type="button" data-edge="right">右侧</button><button type="button" data-edge="top">上方</button><button type="button" data-edge="bottom">下方</button></div></div>
+                <div class="display-selection"><strong>排列屏幕</strong><p class="display-selection-status" role="status">连接两台电脑后可拖动屏幕</p><button class="text-button" type="button" data-display-all>自动排列</button><small>两端均需支持独立屏幕连接</small></div>
                 <div class="setting-row"><div><strong>自动检测分辨率</strong><small>包含缩放、旋转和多显示器 · 已启用</small></div><button class="toggle is-on" data-layout-setting="automatic" type="button" role="switch" aria-checked="true" disabled><span></span></button></div>
                 <div class="setting-row"><div><strong>防止边缘误触</strong><small>越过边缘 8 px 后切换</small></div><button class="toggle is-on" data-layout-setting="edgeProtection" type="button" role="switch" aria-checked="true"><span></span></button></div>
                 <div class="screen-facts"><p><span>Windows 桌面</span><b data-screen-fact="windows">1 个屏幕 · 横向</b></p><p><span>macOS 桌面</span><b data-screen-fact="macos">等待设备数据</b></p><p><span>配置状态</span><b class="teal-text layout-config-status">两端一致</b></p></div>
               </aside>
             </div>
-            <div class="page-footer"><span class="layout-save-status" role="status" aria-live="polite">选择方向立即应用；拖动卡片松手后自动保存并同步</span><button class="text-button" type="button" data-retry-settings="layout" hidden>重试</button></div>
+            <div class="page-footer"><span class="layout-save-status" role="status" aria-live="polite">拖动结束后自动保存并同步到另一台电脑</span><button class="text-button" type="button" data-retry-settings="layout" hidden>重试</button></div>
           </section>
 
           <section class="page" id="page-input" data-title="输入">
@@ -313,7 +314,8 @@
     </aside>
     <div class="toast" role="status" aria-live="polite"><span aria-hidden="true">✓</span><b>操作已完成</b></div>
     <script src="./i18n.js"></script>
-    <script src="./app.js"></script>
+    <script src="./display-layout.js"></script>
+  <script src="./app.js"></script>
     <script src="./native.js"></script>
   </body>
 </html>

@@ -236,6 +236,10 @@ impl PeerLink {
         )
     }
 
+    pub fn supports_display_layout(&self) -> bool {
+        self.peer_capabilities & edgemouse_protocol::display_layout::CAPABILITY_DISPLAY_LAYOUT != 0
+    }
+
     pub fn supports_pointer_speed(&self) -> bool {
         self.peer_capabilities & edgemouse_protocol::CAPABILITY_POINTER_SPEED != 0
     }
@@ -293,6 +297,7 @@ impl PeerLink {
             capabilities: REQUIRED_CAPABILITIES
                 | edgemouse_protocol::CAPABILITY_SETTINGS_SYNC
                 | edgemouse_protocol::CAPABILITY_POINTER_SPEED
+                | edgemouse_protocol::display_layout::CAPABILITY_DISPLAY_LAYOUT
                 | edgemouse_protocol::clipboard::CAPABILITY_CLIPBOARD,
             screen: local_screen,
         })
@@ -737,6 +742,19 @@ mod tests {
         assert_eq!(first_link.peer_screen(), &test_screen(2));
         assert_eq!(second_link.peer_screen(), &test_screen(1));
         assert!(first_link.supports_settings_sync() && second_link.supports_settings_sync());
+        assert!(first_link.supports_display_layout() && second_link.supports_display_layout());
+        let current_capabilities = first_link.peer_capabilities;
+        first_link.peer_capabilities &=
+            !edgemouse_protocol::display_layout::CAPABILITY_DISPLAY_LAYOUT;
+        assert!(
+            !first_link.supports_display_layout(),
+            "older peers must not receive layout extensions"
+        );
+        assert!(
+            first_link.supports_settings_sync(),
+            "legacy settings remain available"
+        );
+        first_link.peer_capabilities = current_capabilities;
         // A blocked bulk stream must not prevent control traffic. With no
         // clipboard reader yet, this exceeds the stream flow-control window.
         use edgemouse_protocol::clipboard::{ClipboardContent, ClipboardPacket};

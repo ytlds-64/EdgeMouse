@@ -244,28 +244,9 @@ impl Session {
         // actual desktop edge may attempt a portal; a large delta or an old
         // routing position must never cause a crossing halfway down a portrait
         // screen. Remote motion continues to use unbounded relative deltas.
-        let at_edge = [
-            (
-                Edge::Left,
-                position.x <= bounds.left() + 1.0 && movement.dx < 0.0,
-            ),
-            (
-                Edge::Right,
-                position.x >= bounds.right() - 1.0 && movement.dx > 0.0,
-            ),
-            (
-                Edge::Top,
-                position.y <= bounds.top() + 1.0 && movement.dy < 0.0,
-            ),
-            (
-                Edge::Bottom,
-                position.y >= bounds.bottom() - 1.0 && movement.dy > 0.0,
-            ),
-        ]
-        .into_iter()
-        .any(|(edge, outward)| {
-            outward && self.topology.portal(self.current_screen, edge).is_some()
-        });
+        let at_edge = self
+            .topology
+            .can_cross_from(self.current_screen, position, movement);
         if at_edge {
             self.handle_motion(movement, now_ms)
         } else {
@@ -465,11 +446,11 @@ impl Session {
             self.entry_guard = None;
             return;
         }
-        let Some(screen) = self.topology.screen(screen_id) else {
-            self.entry_guard = None;
-            return;
-        };
-        if screen.bounds.distance_from_edge(self.pointer, edge) >= self.config.entry_hysteresis {
+        if self
+            .topology
+            .distance_from_portal(screen_id, self.pointer, edge)
+            >= self.config.entry_hysteresis
+        {
             self.entry_guard = None;
         }
     }

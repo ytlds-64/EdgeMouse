@@ -1,0 +1,42 @@
+name: Validate individual display connections
+on:
+  push:
+    branches: [codex/per-display-layout-validation]
+permissions:
+  contents: read
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Prepare test agent
+        run: cargo build -p edgemouse-agent
+      - name: Prepare macOS sidecar
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p crates/edgemouse-desktop/binaries
+          cp target/debug/edgemouse crates/edgemouse-desktop/binaries/edgemouse-$(rustc -vV | awk '/^host:/ { print $2 }')
+      - name: Prepare Windows sidecar
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force crates/edgemouse-desktop/binaries
+          Copy-Item target/debug/edgemouse.exe crates/edgemouse-desktop/binaries/edgemouse-x86_64-pc-windows-msvc.exe
+      - name: Static analysis
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Workspace regression including authenticated layout exchange
+        run: cargo test --workspace
+      - name: UI service regression
+        run: node scripts/test-native-service.cjs
+      - name: Compile desktop integration
+        run: cargo build -p edgemouse-desktop

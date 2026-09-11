@@ -356,6 +356,74 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
                     .collect(),
             )?;
         }
+        if let Some(state) = &network.display_layout {
+            let (from, to, edge) = if let Some(layout) = &state.layout {
+                if cfg!(target_os = "windows") {
+                    (layout.windows.clone(), layout.mac.clone(), layout.mac_on)
+                } else {
+                    (
+                        layout.mac.clone(),
+                        layout.windows.clone(),
+                        layout.mac_on.opposite(),
+                    )
+                }
+            } else {
+                // New peers automatically include exposed edges on every monitor.
+                // Legacy peers keep the original whole-desktop routing.
+                let from = detected
+                    .as_ref()
+                    .map(|desktop| {
+                        desktop
+                            .displays
+                            .iter()
+                            .map(|display| display.bounds)
+                            .collect()
+                    })
+                    .unwrap_or_else(|| vec![local.screen.bounds]);
+                let to = if network.peer_screen.displays.is_empty() {
+                    vec![network.peer_screen.bounds]
+                } else {
+                    network
+                        .peer_screen
+                        .displays
+                        .iter()
+                        .map(|display| display.bounds)
+                        .collect()
+                };
+                // Mirrored monitors share one physical input rectangle.
+                let distinct = |items: Vec<Rect>| {
+                    items.into_iter().fold(Vec::new(), |mut result, item| {
+                        if !result.contains(&item) {
+                            result.push(item);
+                        }
+                        result
+                    })
+                };
+                (distinct(from), distinct(to), config.peer_on)
+            };
+            let positions = state
+                .layout
+                .as_ref()
+                .and_then(|layout| layout.positions.as_ref());
+            let (from_frames, to_frames) = if let Some(positions) = positions {
+                if cfg!(target_os = "windows") {
+                    (positions.windows.clone(), positions.mac.clone())
+                } else {
+                    (positions.mac.clone(), positions.windows.clone())
+                }
+            } else {
+                (
+                    edgemouse_core::Topology::automatic_display_positions(&from, edge),
+                    edgemouse_core::Topology::automatic_display_positions(&to, edge.opposite()),
+                )
+            };
+            topology.connect_arranged_displays_bidirectional(
+                local.screen.id,
+                network.peer_screen.id,
+                &from.into_iter().zip(from_frames).collect::<Vec<_>>(),
+                &to.into_iter().zip(to_frames).collect::<Vec<_>>(),
+            )?;
+        }
         for display in &network.peer_screen.displays {
             println!(
                 "Peer physical display: {:.0}x{:.0} at ({:.0}, {:.0}), scale {:.2}, primary {}",
@@ -657,6 +725,12 @@ fn run_loop(
     active_preferences: crate::config::SessionPreferences,
 ) -> Result<ConnectionEnd, Box<dyn Error>> {
     let mut takeover = LocalTakeoverGesture::default();
+    let mut display_sent = network.display_layout.clone();
+    let mut display_pending: Option<(u64, edgemouse_protocol::display_layout::DisplayLayoutState)> =
+        None;
+    let mut display_request = 0_u64;
+    let mut display_poll = Instant::now() - Duration::from_secs(1);
+    let mut display_retry = Instant::now();
     let mut pending_layout_request = None;
     // Request zero is a v7-compatible initial snapshot. After acknowledgement,
     // do not repeat it on every reconnect: old clients rebuild even equal layouts.
@@ -682,6 +756,34 @@ fn run_loop(
         let now_ms = elapsed_ms(clock);
         if shared_reload.is_some_and(|started| started.elapsed() >= Duration::from_secs(1)) {
             return Ok(ConnectionEnd::LayoutChanged);
+        }
+        if let Some(active_layout) = &network.display_layout
+            && display_poll.elapsed() >= Duration::from_millis(250)
+        {
+            display_poll = Instant::now();
+            let current = crate::display_layout::snapshot(config_path)?.state;
+            if display_pending.is_some() && display_retry.elapsed() > Duration::from_secs(5) {
+                display_pending = None;
+                display_sent = None;
+            }
+            if display_pending.is_none() && display_sent.as_ref() != Some(&current) {
+                display_request = display_request.wrapping_add(1).max(1);
+                network.send(WireMessage::DisplayLayoutUpdate {
+                    request_id: display_request,
+                    state: current.clone(),
+                })?;
+                display_sent = Some(current.clone());
+                display_pending = Some((display_request, current));
+                display_retry = Instant::now();
+            } else if display_pending.is_none()
+                && shared_pending.is_none()
+                && current.layout != active_layout.layout
+                && shared_reload.is_none()
+                && shared_settle.elapsed() >= Duration::from_millis(300)
+            {
+                network.send(WireMessage::SettingsReconnect)?;
+                shared_reload = Some(Instant::now());
+            }
         }
         if !network.settings_sync && shared_poll.elapsed() >= Duration::from_millis(250) {
             shared_poll = Instant::now();
@@ -715,6 +817,7 @@ fn run_loop(
             {
                 let latest = LoadedConfig::load(config_path)?;
                 if shared_reload.is_none()
+                    && display_pending.is_none()
                     && (latest.peer_on != takeover_edge
                         || settings_sync::preferences(&latest) != active_preferences)
                 {
@@ -737,6 +840,30 @@ fn run_loop(
         }
         while let Some(event) = network.try_receive()? {
             match event {
+                NetworkEvent::Message(WireMessage::DisplayLayoutUpdate { request_id, state }) => {
+                    if network.display_layout.is_none() || !network.settings_sync {
+                        return Err("unnegotiated display layout".into());
+                    }
+                    let current = crate::display_layout::receive(config_path, &state)?;
+                    network.send(WireMessage::DisplayLayoutAck { request_id })?;
+                    if current == state {
+                        display_sent = Some(current);
+                        display_pending = None;
+                    }
+                    shared_settle = Instant::now();
+                }
+                NetworkEvent::Message(WireMessage::DisplayLayoutAck { request_id }) => {
+                    if network.display_layout.is_none() {
+                        return Err("unnegotiated display layout acknowledgement".into());
+                    }
+                    if let Some((pending_id, state)) = &display_pending
+                        && *pending_id == request_id
+                    {
+                        crate::display_layout::acknowledge(config_path, state)?;
+                        display_pending = None;
+                        shared_settle = Instant::now();
+                    }
+                }
                 NetworkEvent::Message(WireMessage::SettingsReconnect) => {
                     if !network.settings_sync {
                         return Err("unnegotiated settings reload".into());

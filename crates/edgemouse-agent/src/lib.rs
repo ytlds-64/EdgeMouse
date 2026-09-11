@@ -9,6 +9,7 @@ pub mod clipboard;
 pub mod config;
 pub mod control;
 pub mod discovery;
+pub mod display_layout;
 pub mod network;
 pub mod pairing;
 pub mod platform;
