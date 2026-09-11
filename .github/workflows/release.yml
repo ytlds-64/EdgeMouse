@@ -49,18 +49,15 @@ jobs:
           tagName: v__VERSION__
           releaseName: EdgeMouse __VERSION__
           releaseBody: |
-            EdgeMouse 0.6.14
+            EdgeMouse 0.6.15
 
-            - 修复微信等软件复制图片时同时附带文件标记，导致 Mac/Windows 图片同步被跳过的问题。
-            - 优先读取剪贴板中的真实图片；没有图片时仍忽略文件列表，不读取引用文件、不把文件路径作为文字发送。Mac 隐藏或临时内容仍会跳过。
-            - 补充双方原生图片与文件标记共存的回归测试，以及 Windows 没有 PNG 格式时的传统位图兼容测试。
-            - 请两台电脑均更新至 0.6.14，并在“设置 → 常规”保持“同步剪贴板”开启；连接后重新复制图片即可测试。
+            - 屏幕布局支持独立拖动每块显示器，像 Windows 显示设置一样排列；边缘自动吸附，穿越区域实时高亮。
+            - Windows 可连接 Mac 上屏、下屏或同时连接两块屏幕，自动按接触边缘及重叠区域分配穿越位置。
+            - 松手后自动保存并同步到另一台电脑；支持键盘微调、取消拖动、屏幕重叠保护与自动排列。
+            - 显示器断开或几何变化后提示重新排列；布局只控制电脑间跨屏，不修改系统显示设置。
+            - 请两台电脑均更新至 0.6.15。与旧版连接时仍保留原有整桌面边缘操作。
 
-            Fixes image copies from WeChat and other applications being skipped on Mac/Windows when file metadata accompanies image pixels. Embedded images now take precedence; file-only copies and Mac concealed/transient content remain excluded. Referenced files are not opened or sent as text. Adds native mixed-format regression coverage on both platforms and a Windows legacy bitmap case without PNG. Update both computers to 0.6.14, keep clipboard synchronization enabled in Settings → General, then copy the image again while connected.
-
-            文字上限 1 MiB；图片最多 16,777,216 像素、单边不超过 8192、PNG 压缩后不超过 16 MiB。超过限制的内容不会同步。
-
-            Limits: 1 MiB UTF-8 text; images up to 16,777,216 pixels, 8192 per side and 16 MiB encoded PNG. Oversized content is skipped.
+            Drag each display independently, with edge snapping and highlighted crossing segments. Connect Windows to the upper Mac display, the lower display, or both; touching edge overlap automatically determines where the pointer crosses. Releasing a drag saves and syncs the layout. Keyboard adjustments, drag cancellation, collision protection and automatic arrangement are included. Changed or disconnected displays require rearrangement. This virtual layout does not modify operating-system display settings. Update both computers to 0.6.15; older peers retain whole-desktop edge operation.
 
             注意：macOS 包继续使用临时签名，尚无 Developer ID 签名及 Apple 公证；更新后可能需要重新授予辅助功能权限。更新包签名验证与 macOS 应用身份签名是两回事。
 

@@ -89,7 +89,7 @@
     connection: [".connection-save-status"],
   };
   const desktopControls = '[data-general-setting], [data-theme], #language, #update-channel';
-  const configControls = '[data-input-setting], [data-overview-setting], #pointer-smoothing, #pointer-speed, .layout-direction button, [data-layout-setting="edgeProtection"], .auto-reconnect-toggle';
+  const configControls = '[data-input-setting], [data-overview-setting], #pointer-smoothing, #pointer-speed, .layout-direction button, [data-display-all], .display-tile[role="checkbox"], [data-layout-setting="edgeProtection"], .auto-reconnect-toggle';
 
   function updateSettingsReadiness() {
     for (const [selector, ready] of [[desktopControls, desktopReady], [configControls, configReady]]) {
@@ -98,6 +98,7 @@
     document.querySelectorAll(".mini-screen").forEach((screen) => {
       screen.setAttribute("aria-disabled", String(!configReady || resettingSettings));
     });
+    window.EdgeMouseDisplays?.refresh();
     const resetButton = document.querySelector(".reset-settings-button");
     if (resetButton) resetButton.disabled = !desktopReady || !configReady || resettingSettings;
     document.querySelectorAll("[data-retry-settings]").forEach((button) => { button.disabled = resettingSettings; });
@@ -365,44 +366,7 @@
     if (!card || !map) return;
     const displays = usableDisplays(desktop);
     card.querySelector(".desktop-summary").textContent = desktopSummary(desktop);
-    map.replaceChildren();
-    map.classList.toggle("is-empty", displays.length === 0);
-    if (!displays.length) {
-      const empty = document.createElement("span");
-      empty.className = "display-map-empty";
-      empty.textContent = "连接后显示真实屏幕排列";
-      map.append(empty);
-      return;
-    }
-
-    const originX = Number(desktop.originX);
-    const originY = Number(desktop.originY);
-    const desktopWidth = Number(desktop.width);
-    const desktopHeight = Number(desktop.height);
-    const availableWidth = Math.max(1, map.clientWidth - 20);
-    const availableHeight = Math.max(1, map.clientHeight - 20);
-    const scale = Math.min(availableWidth / desktopWidth, availableHeight / desktopHeight);
-    const drawnWidth = desktopWidth * scale;
-    const drawnHeight = desktopHeight * scale;
-    const offsetX = (map.clientWidth - drawnWidth) / 2;
-    const offsetY = (map.clientHeight - drawnHeight) / 2;
-
-    displays.forEach((display, index) => {
-      const tile = document.createElement("div");
-      tile.className = `display-tile ${platformName === "Windows" ? "windows-wallpaper" : "mac-wallpaper"}`;
-      tile.classList.toggle("is-primary", Boolean(display.primary));
-      tile.style.left = `${offsetX + (Number(display.originX) - originX) * scale}px`;
-      tile.style.top = `${offsetY + (Number(display.originY) - originY) * scale}px`;
-      tile.style.width = `${Math.max(34, Number(display.width) * scale)}px`;
-      tile.style.height = `${Math.max(34, Number(display.height) * scale)}px`;
-      const number = document.createElement("b");
-      number.textContent = display.primary ? "主屏" : String(index + 1);
-      const resolution = document.createElement("small");
-      resolution.textContent = `${Math.round(Number(display.pixelWidth))} × ${Math.round(Number(display.pixelHeight))}`;
-      tile.title = `${platformName} ${display.primary ? "主屏" : `屏幕 ${index + 1}`} · ${resolution.textContent} · 位置 (${Math.round(Number(display.originX))}, ${Math.round(Number(display.originY))})`;
-      tile.append(number, resolution);
-      map.append(tile);
-    });
+    window.EdgeMouseDisplays?.update(platformName === "Windows" ? "windows" : "mac", displays);
   }
 
   const numberOrNull = (value) => {
@@ -618,7 +582,7 @@
 
     if (snapshot.config.peerOn && window.EdgeMouseLayout) {
       const uiEdge = windowsLocal ? snapshot.config.peerOn : oppositeEdge[snapshot.config.peerOn];
-      if (uiEdge) window.EdgeMouseLayout.applySnapshot(uiEdge);
+      if (uiEdge) window.EdgeMouseLayout.applySnapshot(uiEdge, snapshot.config.displayLayout?.layout ?? null);
     }
   }
 
@@ -763,19 +727,20 @@
 
     const configStatus = document.querySelector(".layout-config-status");
     if (configStatus && !window.EdgeMouseLayout?.isDirty()) {
-      configStatus.textContent = snapshot.config.layoutSyncPending
+      configStatus.textContent = (snapshot.config.layoutSyncPending || snapshot.config.displayLayout?.pending)
           ? connected ? "正在同步布局" : "等待连接后自动同步"
         : configValid && connected
           ? "已连接 · 布局已保存"
           : configValid
             ? "等待连接同步"
             : "配置读取失败";
-      configStatus.title = snapshot.config.error ?? snapshot.config.path ?? "";
+      if (snapshot.config.displayLayout?.error) configStatus.textContent = "屏幕连接配置读取失败，请重试";
+      configStatus.title = snapshot.config.displayLayout?.error ?? snapshot.config.error ?? snapshot.config.path ?? "";
     }
 
     const layoutSaveStatus = document.querySelector(".layout-save-status");
     if (layoutSaveStatus && !window.EdgeMouseLayout?.isDirty() && connected) {
-      layoutSaveStatus.textContent = snapshot.config.layoutSyncPending
+      layoutSaveStatus.textContent = (snapshot.config.layoutSyncPending || snapshot.config.displayLayout?.pending)
         ? "布局已保存，正在等待另一端确认"
         : "布局已保存；修改后自动同步到另一台电脑";
     }

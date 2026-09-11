@@ -195,6 +195,7 @@ struct ConfigSnapshot {
     peer_screen_id: Option<u64>,
     peer_on: Option<String>,
     layout_sync_pending: bool,
+    display_layout: Option<DisplayLayoutSnapshot>,
     shared_settings: Option<SharedSettingsSnapshot>,
     entry_hysteresis: Option<f64>,
     peer_timeout_ms: Option<u64>,
@@ -206,6 +207,28 @@ struct ConfigSnapshot {
     reclaim_enabled: Option<bool>,
     block_switch_while_dragging: Option<bool>,
     auto_reconnect: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct DisplayLayoutSnapshot {
+    layout: Option<edgemouse_agent::display_layout::LayoutChoice>,
+    pending: bool,
+    error: Option<String>,
+}
+
+fn display_layout_snapshot(path: &Path) -> DisplayLayoutSnapshot {
+    match edgemouse_agent::display_layout::snapshot(path) {
+        Ok(snapshot) => DisplayLayoutSnapshot {
+            layout: snapshot.state.layout.as_ref().map(Into::into),
+            pending: snapshot.pending,
+            error: None,
+        },
+        Err(error) => DisplayLayoutSnapshot {
+            layout: None,
+            pending: true,
+            error: Some(error),
+        },
+    }
 }
 
 #[derive(Serialize)]
@@ -788,6 +811,8 @@ fn reset_preferences(
         }
         settings_sync::edit(path, cfg!(target_os = "windows"), &changes)
             .map_err(|error| format!("恢复输入与连接设置失败：{error}"))?;
+        edgemouse_agent::display_layout::edit(path, None)
+            .map_err(|error| format!("恢复屏幕连接失败：{error}"))?;
     }
     let _ = app.autolaunch().disable();
     let preferences = DesktopPreferences::default();
@@ -1162,6 +1187,7 @@ async fn save_layout(
     state: tauri::State<'_, AppState>,
     peer_on: String,
     edge_protection: bool,
+    display_layout: Option<edgemouse_agent::display_layout::LayoutChoice>,
 ) -> Result<SavedLayout, String> {
     let path = state
         .config_path
@@ -1169,6 +1195,13 @@ async fn save_layout(
         .ok_or_else(|| "未找到 edgemouse.toml；无法保存屏幕布局".to_owned())?;
     tauri::async_runtime::spawn_blocking(move || {
         let windows_to_mac = parse_layout_edge(&peer_on)?;
+        if let Some(choice) = &display_layout
+            && choice.decode()?.mac_on != windows_to_mac
+        {
+            return Err("屏幕连接方向与设备方向不一致".to_owned());
+        }
+        edgemouse_agent::display_layout::edit(&path, display_layout)
+            .map_err(|error| format!("保存屏幕连接失败：{error}"))?;
         let local_peer_on = local_layout_edge(windows_to_mac, cfg!(target_os = "macos"));
         save_layout_for_sync(&path, local_peer_on)?;
         settings_sync::edit(
@@ -1801,6 +1834,7 @@ fn config_snapshot(path: Option<&Path>) -> ConfigSnapshot {
             peer_screen_id: Some(config.peer_screen.0),
             peer_on: Some(format!("{:?}", config.peer_on).to_ascii_lowercase()),
             layout_sync_pending: pending_layout_sync(path).map_or(true, |edge| edge.is_some()),
+            display_layout: Some(display_layout_snapshot(path)),
             shared_settings: shared_settings_snapshot(path),
             entry_hysteresis: Some(config.session.entry_hysteresis),
             peer_timeout_ms: Some(config.session.peer_timeout_ms),
@@ -1834,6 +1868,7 @@ fn config_snapshot(path: Option<&Path>) -> ConfigSnapshot {
                     peer_screen_id: None,
                     peer_on: None,
                     layout_sync_pending: false,
+                    display_layout: None,
                     shared_settings: None,
                     entry_hysteresis: None,
                     peer_timeout_ms: None,
@@ -1870,6 +1905,7 @@ fn empty_config(path: Option<&Path>, error: &str) -> ConfigSnapshot {
         peer_screen_id: None,
         peer_on: None,
         layout_sync_pending: false,
+        display_layout: None,
         shared_settings: None,
         entry_hysteresis: None,
         peer_timeout_ms: None,

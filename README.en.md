@@ -13,6 +13,14 @@ desktop application, signed installers, and in-app updates. It intentionally
 excludes relay servers and elevated Windows desktops. Version 0.6.13
 also includes optional text/image clipboard synchronization.
 
+## Version 0.6.15
+
+Drag each monitor independently, as in Windows Display settings. Nearby edges snap into place, valid crossing segments are highlighted, and releasing the pointer saves and synchronizes the layout automatically. Windows can connect to the upper Mac display, the lower display, or both: touching edge overlap determines the crossing segments; gaps do not cross.
+
+Includes keyboard adjustments, drag cancellation, collision protection and automatic arrangement. Disconnected or changed displays require rearrangement instead of silently reusing an obsolete mapping. This virtual layout controls crossings between computers and does not modify operating-system display settings. Update both computers to 0.6.15; older peers retain whole-desktop edge operation.
+
+[Mac/Windows feature validation](https://github.com/ytlds-64/EdgeMouse/actions/runs/34551490878) and browser regression checks passed for upper/lower/both display connections, partial overlap, gaps, cancellation and restart persistence. Crossings between the user's two physical computers still need confirmation after updating.
+
 ## Version 0.6.14
 
 Fixes image copies from WeChat and other applications being skipped when the clipboard also contains file references. Embedded image pixels now take precedence over file metadata; file-only copies and Mac concealed/transient contents remain excluded. Referenced files are not opened and file paths are not sent as text.
@@ -47,7 +55,7 @@ cannot trigger a receiver reclaim; outgoing Raw Input remains enabled. Pointer
 warps during handoffs also use marked injection. Reclaim logs include the
 triggering movement and receiver coordinates.
 
-The current stable release is 0.6.14. Future signed releases can also be checked
+The current stable release is 0.6.15. Future signed releases can also be checked
 and installed from the Settings page in the desktop application.
 
 macOS packages currently use ad-hoc signing, without Developer ID signing or

@@ -1,4 +1,6 @@
+mod display_links;
 use crate::{Edge, Point, Rect, Vector};
+use display_links::DisplayLinks;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -68,6 +70,7 @@ pub struct Topology {
     displays: BTreeMap<ScreenId, Vec<Rect>>,
     portals: BTreeMap<(ScreenId, Edge), Portal>,
     edge_inset: f64,
+    display_links: Option<DisplayLinks>,
 }
 
 impl Default for Topology {
@@ -84,6 +87,7 @@ impl Topology {
             displays: BTreeMap::new(),
             portals: BTreeMap::new(),
             edge_inset: edge_inset.max(0.001),
+            display_links: None,
         }
     }
 
@@ -136,6 +140,159 @@ impl Topology {
             },
         );
         Ok(())
+    }
+
+    /// Pack monitors along a shared virtual boundary, preserving their aspect
+    /// ratios. Positions describe crossing geometry, not OS desktop coordinates.
+    pub fn automatic_display_positions(displays: &[Rect], edge: Edge) -> Vec<Rect> {
+        let vertical = edge.is_vertical();
+        let total: f64 = displays
+            .iter()
+            .map(|r| if vertical { r.height } else { r.width })
+            .sum();
+        let scale = 1000.0 / total.max(1.0);
+        let mut order: Vec<_> = displays.iter().enumerate().collect();
+        order.sort_by(|(_, a), (_, b)| {
+            if vertical {
+                a.top()
+                    .total_cmp(&b.top())
+                    .then(a.left().total_cmp(&b.left()))
+            } else {
+                a.left()
+                    .total_cmp(&b.left())
+                    .then(a.top().total_cmp(&b.top()))
+            }
+        });
+        let mut result = displays.to_vec();
+        let mut offset = 0.0;
+        for (index, display) in order {
+            let width = display.width * scale;
+            let height = display.height * scale;
+            let origin = match edge {
+                Edge::Left => Point::new(0.0, offset),
+                Edge::Right => Point::new(-width, offset),
+                Edge::Top => Point::new(offset, 0.0),
+                Edge::Bottom => Point::new(offset, -height),
+            };
+            result[index] = Rect {
+                origin,
+                width,
+                height,
+            };
+            offset += if vertical { height } else { width };
+        }
+        result
+    }
+
+    pub fn connect_arranged_displays_bidirectional(
+        &mut self,
+        from: ScreenId,
+        to: ScreenId,
+        from_positions: &[(Rect, Rect)],
+        to_positions: &[(Rect, Rect)],
+    ) -> Result<(), TopologyError> {
+        if from == to {
+            return Err(TopologyError::SelfConnection(from));
+        }
+        let all: Vec<_> = from_positions.iter().chain(to_positions).collect();
+        for (index, (actual, frame)) in all.iter().enumerate() {
+            if Rect::new(actual.origin, actual.width, actual.height).is_err()
+                || Rect::new(frame.origin, frame.width, frame.height).is_err()
+                || all[..index].iter().any(|(_, other)| {
+                    frame.left().max(other.left()) < frame.right().min(other.right()) - 0.000001
+                        && frame.top().max(other.top())
+                            < frame.bottom().min(other.bottom()) - 0.000001
+                })
+            {
+                return Err(TopologyError::InvalidDisplayGeometry);
+            }
+        }
+        let from_bounds = [self.require_bounds(from)?];
+        let to_bounds = [self.require_bounds(to)?];
+        self.display_links = Some(DisplayLinks::arranged(
+            from,
+            to,
+            self.displays.get(&from).map_or(&from_bounds, Vec::as_slice),
+            self.displays.get(&to).map_or(&to_bounds, Vec::as_slice),
+            from_positions,
+            to_positions,
+        ));
+        Ok(())
+    }
+
+    /// Select physical displays while retaining each OS desktop coordinate space.
+    /// Missing/unplugged selections create no portals instead of selecting a
+    /// different monitor. An empty selection deliberately disables crossing.
+    pub fn connect_displays_bidirectional(
+        &mut self,
+        from: ScreenId,
+        from_edge: Edge,
+        to: ScreenId,
+        from_selected: &[Rect],
+        to_selected: &[Rect],
+    ) -> Result<(), TopologyError> {
+        if from == to {
+            return Err(TopologyError::SelfConnection(from));
+        }
+        for rect in from_selected.iter().chain(to_selected) {
+            if Rect::new(rect.origin, rect.width, rect.height).is_err() {
+                return Err(TopologyError::InvalidDisplayGeometry);
+            }
+        }
+        let from_bounds = [self.require_bounds(from)?];
+        let to_bounds = [self.require_bounds(to)?];
+        self.display_links = Some(DisplayLinks::new(
+            Portal {
+                from,
+                from_edge,
+                to,
+                to_edge: from_edge.opposite(),
+            },
+            self.displays.get(&from).map_or(&from_bounds, Vec::as_slice),
+            self.displays.get(&to).map_or(&to_bounds, Vec::as_slice),
+            from_selected,
+            to_selected,
+        ));
+        Ok(())
+    }
+
+    pub(crate) fn can_cross_from(&self, screen: ScreenId, point: Point, movement: Vector) -> bool {
+        if let Some(links) = &self.display_links {
+            return links.at_exit(screen, point, movement);
+        }
+        let Some(screen_info) = self.screen(screen) else {
+            return false;
+        };
+        let bounds = screen_info.bounds;
+        [
+            (
+                Edge::Left,
+                point.x <= bounds.left() + 1.0 && movement.dx < 0.0,
+            ),
+            (
+                Edge::Right,
+                point.x >= bounds.right() - 1.0 && movement.dx > 0.0,
+            ),
+            (
+                Edge::Top,
+                point.y <= bounds.top() + 1.0 && movement.dy < 0.0,
+            ),
+            (
+                Edge::Bottom,
+                point.y >= bounds.bottom() - 1.0 && movement.dy > 0.0,
+            ),
+        ]
+        .into_iter()
+        .any(|(edge, outward)| outward && self.portal(screen, edge).is_some())
+    }
+
+    pub(crate) fn distance_from_portal(&self, screen: ScreenId, point: Point, edge: Edge) -> f64 {
+        if let Some(links) = &self.display_links {
+            return links.distance(screen, point, edge);
+        }
+        self.screen(screen).map_or(f64::INFINITY, |screen| {
+            screen.bounds.distance_from_edge(point, edge)
+        })
     }
 
     /// Real monitor regions, in the same coordinate space as the desktop.
@@ -264,6 +421,9 @@ impl Topology {
 
     #[must_use]
     pub fn portal(&self, screen: ScreenId, edge: Edge) -> Option<Portal> {
+        if let Some(links) = &self.display_links {
+            return links.portal(screen, edge);
+        }
         self.portals.get(&(screen, edge)).copied()
     }
 
@@ -283,6 +443,17 @@ impl Topology {
         }
 
         let requested = from + movement;
+        if let Some(links) = &self.display_links {
+            return Ok(
+                match links.advance(screen_id, from, movement, blocked_edge, self.edge_inset) {
+                    Some(transition) => Advance::Crossed(transition),
+                    None => Advance::Stayed {
+                        screen: screen_id,
+                        position: self.clamp_pointer(screen_id, requested)?,
+                    },
+                },
+            );
+        }
         let Some(exit) = screen.bounds.first_exit(from, requested) else {
             return Ok(Advance::Stayed {
                 screen: screen_id,
