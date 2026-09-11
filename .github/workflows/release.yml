@@ -49,15 +49,17 @@ jobs:
           tagName: v__VERSION__
           releaseName: EdgeMouse __VERSION__
           releaseBody: |
-            EdgeMouse 0.6.15
+            EdgeMouse 0.6.16
 
-            - 屏幕布局支持独立拖动每块显示器，像 Windows 显示设置一样排列；边缘自动吸附，穿越区域实时高亮。
-            - Windows 可连接 Mac 上屏、下屏或同时连接两块屏幕，自动按接触边缘及重叠区域分配穿越位置。
-            - 松手后自动保存并同步到另一台电脑；支持键盘微调、取消拖动、屏幕重叠保护与自动排列。
-            - 显示器断开或几何变化后提示重新排列；布局只控制电脑间跨屏，不修改系统显示设置。
-            - 请两台电脑均更新至 0.6.15。与旧版连接时仍保留原有整桌面边缘操作。
+            - 单机预览和新“自动排列”改为居中，Mac 较窄的下屏位于上屏正下方。
+            - 拖动靠近另一块屏幕的中心线时自动吸附，松手自动保存并同步。
+            - 已保存布局继续保留；如果仍显示旧的侧边对齐布局，连接后点击“自动排列”即可使用居中排列。
+            - 穿越仍按实际接触的高亮边缘计算；需要双屏同时接到 Windows 同一侧时，可手动将对应侧边对齐。
+            - 修正停止测试的异步等待时序，不改变应用停止行为。
 
-            Drag each display independently, with edge snapping and highlighted crossing segments. Connect Windows to the upper Mac display, the lower display, or both; touching edge overlap automatically determines where the pointer crosses. Releasing a drag saves and syncs the layout. Keyboard adjustments, drag cancellation, collision protection and automatic arrangement are included. Changed or disconnected displays require rearrangement. This virtual layout does not modify operating-system display settings. Update both computers to 0.6.15; older peers retain whole-desktop edge operation.
+            Local-only previews and new automatic arrangements center displays, placing the narrower lower Mac screen beneath the upper one. Dragging near a display midpoint snaps to the centerline and saves on release. Existing layouts remain intact; click Arrange automatically while connected to apply centered positions. Crossings still follow touching highlighted edges, and manually aligning side edges can connect both Mac screens to the same Windows edge. The stop regression test now waits for its asynchronous flag; application shutdown behavior is unchanged.
+
+            建议两台电脑均更新至 0.6.16。Update both computers to 0.6.16 for the same layout controls.
 
             注意：macOS 包继续使用临时签名，尚无 Developer ID 签名及 Apple 公证；更新后可能需要重新授予辅助功能权限。更新包签名验证与 macOS 应用身份签名是两回事。
 

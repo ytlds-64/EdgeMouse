@@ -13,6 +13,12 @@ desktop application, signed installers, and in-app updates. It intentionally
 excludes relay servers and elevated Windows desktops. Version 0.6.13
 also includes optional text/image clipboard synchronization.
 
+## Version 0.6.16
+
+Local-only previews and new automatic arrangements now center the displays, placing a narrower lower Mac screen directly beneath the upper one. Dragging near another display midpoint snaps to the centerline; releasing saves and synchronizes the actual positions.
+
+Existing layouts are preserved. Click Arrange automatically while connected to replace an older edge-aligned arrangement with centered positions. Crossings still follow touching highlighted edges: narrower centered displays are inset, and users can manually align the side edges to connect both Mac screens to the same Windows edge. An existing service-stop regression test now waits for its asynchronous flag, preventing a scheduling race without changing application shutdown behavior.
+
 ## Version 0.6.15
 
 Drag each monitor independently, as in Windows Display settings. Nearby edges snap into place, valid crossing segments are highlighted, and releasing the pointer saves and synchronizes the layout automatically. Windows can connect to the upper Mac display, the lower display, or both: touching edge overlap determines the crossing segments; gaps do not cross.
@@ -55,7 +61,7 @@ cannot trigger a receiver reclaim; outgoing Raw Input remains enabled. Pointer
 warps during handoffs also use marked injection. Reclaim logs include the
 triggering movement and receiver coordinates.
 
-The current stable release is 0.6.15. Future signed releases can also be checked
+The current stable release is 0.6.16. Future signed releases can also be checked
 and installed from the Settings page in the desktop application.
 
 macOS packages currently use ad-hoc signing, without Developer ID signing or

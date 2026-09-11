@@ -22,7 +22,7 @@ function installBackend(platform) {
   const initial = {
     preferences: { autostart: false, background: true, clipboardSync: true, notifications: false, theme: 'system', language: 'zh-CN', updateChannel: 'stable' },
     snapshot: {
-      desktopVersion: '0.6.15', agent: { running: true, connection: { state: 'connected', peerDesktop: platform === 'macos' ? winDesktop : macDesktop } },
+      desktopVersion: '0.6.16', agent: { running: true, connection: { state: 'connected', peerDesktop: platform === 'macos' ? winDesktop : macDesktop } },
       config: { valid: true, localName: platform === 'macos' ? 'Mac' : 'Windows', peerScreenName: 'Other computer', peerOn: platform === 'macos' ? 'left' : 'right',
         autoReconnect: true, entryHysteresis: 8, layoutSyncPending: false, displayLayout: { layout: null, pending: false },
         sharedSettings: { pending: false, values: [1, 8, 1, 0, 0, 52, 1, 1, 1, 0, 0, 52, 1, 1, 1, 100, 100] } },
@@ -196,10 +196,11 @@ async function main() {
       await waitWrite('save_layout', ++layouts);
       await page.waitForFunction(() => !EdgeMouseLayout.isDirty());
       const winTile = page.locator('.monitor-space [data-display-side="windows"]');
-      const moveWindows = async (x, y, cancel = false) => {
-        const frame = await page.evaluate(() => EdgeMouseLayout.get().displayLayout.positions.windows[0]);
-        await winTile.hover(); // Wait for navigation animation and the next painted layout.
-        const box = await winTile.boundingBox(), scale = box.height / frame[3];
+      const moveDisplay = async (side, index, x, y, cancel = false) => {
+        const frame = await page.evaluate(([side, index]) => EdgeMouseLayout.get().displayLayout.positions[side][index], [side, index]);
+        const tile = page.locator(`.monitor-space [data-display-side="${side}"]`).nth(index);
+        await tile.hover(); // Wait for navigation animation and the next painted layout.
+        const box = await tile.boundingBox(), scale = box.height / frame[3];
         const cx = box.x + box.width / 2, cy = box.y + box.height / 2;
         const count = await savedCount('save_layout');
         await page.mouse.move(cx, cy); await page.mouse.down();
@@ -208,6 +209,25 @@ async function main() {
         if (cancel) await page.keyboard.press('Escape');
         await page.mouse.up();
       };
+      const moveWindows = (x, y, cancel = false) => moveDisplay('windows', 0, x, y, cancel);
+      const assertMacCentered = async () => {
+        const boxes = await page.locator('.monitor-space [data-display-side="mac"]').evaluateAll((tiles) => tiles.map((tile) => { const r = tile.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y, bottom: r.bottom }; }));
+        assert.ok(Math.abs(boxes[0].x - boxes[1].x) < 1, 'upper and lower Mac displays must share a centerline');
+        assert.ok(Math.abs(boxes[0].bottom - boxes[1].y) < 1, 'centering must retain vertical edge contact');
+      };
+      await assertMacCentered();
+      assert.equal((await page.evaluate(() => EdgeMouseDisplays.routes())).length, 1, 'the inset lower edge must not show a crossing across a gap');
+      const centered = await page.evaluate(() => EdgeMouseLayout.get().displayLayout.positions.mac);
+      const lower = centered[1], alignedX = -lower[2];
+      await moveDisplay('mac', 1, alignedX, lower[1]);
+      await waitWrite('save_layout', ++layouts); await page.waitForFunction(() => !EdgeMouseLayout.isDirty());
+      assert.equal((await page.evaluate(() => EdgeMouseDisplays.routes())).length, 2, 'manual edge alignment still connects both Mac displays');
+      await moveDisplay('mac', 1, lower[0] + 8, lower[1]);
+      await waitWrite('save_layout', ++layouts); await page.waitForFunction(() => !EdgeMouseLayout.isDirty());
+      await assertMacCentered();
+      assert.deepEqual(await page.evaluate(() => testBackend.state.snapshot.config.displayLayout.layout.positions.mac), centered, 'center snapping must save the actual centered positions');
+      await moveDisplay('mac', 1, alignedX, lower[1]);
+      await waitWrite('save_layout', ++layouts); await page.waitForFunction(() => !EdgeMouseLayout.isDirty());
       assert.equal((await page.evaluate(() => EdgeMouseDisplays.routes())).length, 2);
       await moveWindows(0, -600);
       await waitWrite('save_layout', ++layouts); await page.waitForFunction(() => !EdgeMouseLayout.isDirty());
@@ -242,6 +262,7 @@ async function main() {
       assert.equal((await page.evaluate(() => EdgeMouseLayout.get())).displayLayout.positions.windows[0][1], -100);
       await page.locator('[data-display-all]').click();
       await waitWrite('save_layout', ++layouts); await page.waitForFunction(() => !EdgeMouseLayout.isDirty());
+      await assertMacCentered();
       const savedDisplayLayout = await page.evaluate(() => EdgeMouseLayout.get().displayLayout);
       await page.locator('[data-layout-setting="edgeProtection"]').click();
       await waitWrite('save_layout', ++layouts);
@@ -276,7 +297,7 @@ async function main() {
         await page.screenshot({ animations: 'disabled', path: path.join(outputs, `EdgeMouse-${platform}-${name}-compact.png`) });
         await page.setViewportSize({ width: 1470, height: 980 });
       }
-      console.log(`${platform}: autosave, rapid edits, profiles, slider commit, retry, stale snapshots, monitor drag, edge overlap, gap, cancel, collision, keyboard movement, restart hydration passed`);
+      console.log(`${platform}: autosave, rapid edits, profiles, slider commit, retry, stale snapshots, monitor drag, centered arrangement and snapping, edge overlap, gap, cancel, collision, keyboard movement, restart hydration passed`);
       // Reset waits for an in-flight save, and locks edits until it completes.
       await navigate('settings');
       await page.evaluate(() => { testBackend.holds.save_desktop_preferences = true; });
@@ -295,6 +316,29 @@ async function main() {
       console.log(`${platform}: guarded hydration and reset ordering passed`);
       await context.close();
     }
+    // With no peer geometry, the local Mac preview should still be symmetric,
+    // without writing a layout or enabling a disconnected drag operation.
+    const offline = await browser.newContext({ viewport: { width: 1470, height: 980 } });
+    await offline.addInitScript(installBackend, 'macos');
+    const offlinePage = await offline.newPage();
+    offlinePage.on('pageerror', (error) => errors.push(String(error)));
+    await offlinePage.goto(`http://127.0.0.1:${server.address().port}`);
+    await offlinePage.waitForFunction(() => testBackend.waiters.get_app_snapshot && testBackend.waiters.get_desktop_preferences);
+    await offlinePage.evaluate(() => {
+      testBackend.state.snapshot.agent = { running: false };
+      testBackend.release('get_app_snapshot'); testBackend.release('get_desktop_preferences');
+    });
+    await offlinePage.locator('[data-page="layout"]').click();
+    await offlinePage.waitForFunction(() => document.querySelectorAll('.monitor-space [data-display-side="windows"]').length === 0
+      && document.querySelectorAll('.monitor-space [data-display-side="mac"]').length === 2);
+    await offlinePage.waitForFunction(() => Number(getComputedStyle(document.querySelector('#page-layout')).opacity) > 0.99);
+    const offlineBoxes = await offlinePage.locator('.monitor-space [data-display-side="mac"]').evaluateAll((tiles) => tiles.map((tile) => { const r = tile.getBoundingClientRect(); return { center: r.x + r.width / 2, disabled: tile.disabled }; }));
+    assert.ok(Math.abs(offlineBoxes[0].center - offlineBoxes[1].center) < 1, 'offline Mac lower display must be centered');
+    assert.ok(offlineBoxes.every((box) => box.disabled));
+    assert.equal(await offlinePage.evaluate(() => testBackend.calls.filter((call) => call.command === 'save_layout').length), 0, 'centering a preview must not change saved settings');
+    await offlinePage.locator('.layout-canvas').screenshot({ animations: 'disabled', path: path.join(outputs, 'EdgeMouse-macos-centered-offline.png') });
+    await offline.close();
+    console.log('Offline Mac preview: centered lower screen, disabled drag and zero settings writes passed');
     const preview = await browser.newContext({ viewport: { width: 1470, height: 980 } });
     const previewPage = await preview.newPage();
     previewPage.on('pageerror', (error) => errors.push(String(error)));

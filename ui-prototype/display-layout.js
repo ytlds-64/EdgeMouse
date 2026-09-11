@@ -16,24 +16,28 @@
   const ready = () => geometry.windows.length && geometry.mac.length && canvas.querySelector('.mini-screen').getAttribute('aria-disabled') !== 'true';
   const overlap = (a, b) => Math.max(a[0], b[0]) < Math.min(a[0] + a[2], b[0] + b[2]) - 1e-6 && Math.max(a[1], b[1]) < Math.min(a[1] + a[3], b[1] + b[3]) - 1e-6;
 
-  function automatic(displays, facing) {
+  function automatic(displays, facing, centered = false) {
     const vertical = ['left', 'right'].includes(facing);
     const scale = 1000 / Math.max(1, displays.reduce((sum, d) => sum + d[vertical ? 3 : 2], 0));
     const order = displays.map((r, i) => ({ r, i })).sort((a, b) => vertical ? a.r[1] - b.r[1] || a.r[0] - b.r[0] : a.r[0] - b.r[0] || a.r[1] - b.r[1]);
+    const crossSize = Math.max(0, ...displays.map((r) => r[vertical ? 2 : 3] * scale));
     const frames = []; let offset = 0;
     for (const { r, i } of order) {
       const w = r[2] * scale, h = r[3] * scale;
       frames[i] = { left: [0, offset, w, h], right: [-w, offset, w, h], top: [offset, 0, w, h], bottom: [offset, -h, w, h] }[facing];
+      if (centered) frames[i][vertical ? 0 : 1] += (crossSize - (vertical ? w : h)) / 2 * (['right', 'bottom'].includes(facing) ? -1 : 1);
       offset += vertical ? h : w;
     }
     return frames;
   }
-  function defaultChoice(direction = edge()) {
+  function defaultChoice(direction = edge(), centered = false) {
     const windows = geometry.windows.map(rect), mac = geometry.mac.map(rect);
-    return { macOn: direction, windows, mac, positions: { windows: automatic(windows, direction), mac: automatic(mac, opposite[direction]) } };
+    return { macOn: direction, windows, mac, positions: { windows: automatic(windows, direction, centered), mac: automatic(mac, opposite[direction], centered) } };
   }
   function entries() {
-    const selected = drag?.draft ?? choice ?? defaultChoice();
+    // A connected implicit layout must still match existing service defaults.
+    // Local-only previews and newly saved arrangements can use centered frames.
+    const selected = drag?.draft ?? choice ?? defaultChoice(edge(), !geometry.windows.length || !geometry.mac.length);
     const fallback = defaultChoice(selected.macOn);
     return ['windows', 'mac'].flatMap((side) => geometry[side].map((display, index) => {
       const actual = rect(display), at = selected[side].findIndex((r) => same(r, actual));
@@ -82,7 +86,7 @@
     for (const axis of [0, 1]) {
       let best = threshold;
       for (const { frame: o } of others) {
-        for (const coordinate of [o[axis] - frame[axis + 2], o[axis] + o[axis + 2], o[axis], o[axis] + o[axis + 2] - frame[axis + 2]]) {
+        for (const coordinate of [o[axis] - frame[axis + 2], o[axis] + o[axis + 2], o[axis], o[axis] + o[axis + 2] - frame[axis + 2], o[axis] + (o[axis + 2] - frame[axis + 2]) / 2]) {
           const distance = Math.abs(frame[axis] - coordinate);
           if (distance < best) { best = distance; result[axis] = coordinate; }
         }
@@ -180,11 +184,11 @@
   function schedule() { if (!queued) { queued = true; requestAnimationFrame(() => { queued = false; render(); }); } }
   window.EdgeMouseDisplays = {
     get: () => clone(choice), apply(value) { choice = clone(value); render(); },
-    setEdge(value, arrange = false) { if (arrange && ready()) choice = defaultChoice(value); else if (choice) choice.macOn = value; render(); },
+    setEdge(value, arrange = false) { if (arrange && ready()) choice = defaultChoice(value, true); else if (choice) choice.macOn = value; render(); },
     update(side, displays) { geometry[side] = displays.filter((d, i) => !displays.slice(0, i).some((other) => same(rect(other), rect(d)))); schedule(); },
     refresh: schedule, routes,
   };
-  document.querySelector('[data-display-all]').addEventListener('click', () => { if (ready()) { choice = defaultChoice(); window.EdgeMouseLayout.changed(); render(); } });
+  document.querySelector('[data-display-all]').addEventListener('click', () => { if (ready()) { choice = defaultChoice(edge(), true); window.EdgeMouseLayout.changed(); render(); } });
   if (!window.__TAURI__) {
     geometry.windows = [{ originX: 0, originY: 0, width: 2160, height: 3840, pixelWidth: 2160, pixelHeight: 3840, primary: true }];
     geometry.mac = [{ originX: 0, originY: -1080, width: 1920, height: 1080, pixelWidth: 1920, pixelHeight: 1080, primary: false }, { originX: 240, originY: 0, width: 1470, height: 956, pixelWidth: 2940, pixelHeight: 1912, primary: true }];

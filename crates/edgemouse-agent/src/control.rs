@@ -1182,6 +1182,11 @@ mod tests {
             assert_eq!(status.connection.rtt_ms, None);
             assert!(!stopping.load(Ordering::Acquire));
             request(&address, Command::Stop).unwrap().unwrap();
+            // The response is sent before the server sets the asynchronous stop flag.
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while !stopping.load(Ordering::Acquire) && Instant::now() < deadline {
+                thread::yield_now();
+            }
             assert!(stopping.load(Ordering::Acquire));
             drop(server);
         }
