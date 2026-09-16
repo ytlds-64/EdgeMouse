@@ -2,6 +2,7 @@ use crate::config::{
     LoadedConfig, PeerAddress, ResolvedScreen, complete_layout_sync, pending_layout_sync,
     persist_peer_on,
 };
+use crate::connection_diagnostics::LoopProgress;
 use crate::control::{ControlServer, LinkMetrics, RuntimeTelemetry};
 use crate::discovery::{
     DISCOVERY_PORT, DiscoveryRequest, discover_trusted_peer, respond_to_trusted_peer,
@@ -575,6 +576,16 @@ fn run_connected(
         config.session.peer_timeout_ms,
     );
     let clock = Instant::now();
+    let mut input_progress = LoopProgress::default();
+    println!(
+        "Connection active: unix_ms={} session={session_id:016x} heartbeat_interval_ms={} timeout_ms={}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+        crate::network::HEARTBEAT_INTERVAL.as_millis(),
+        config.session.peer_timeout_ms,
+    );
 
     // Only advertise a usable connection once both native capture backends are
     // ready. A completed TLS handshake alone cannot control the other computer.
@@ -602,7 +613,28 @@ fn run_connected(
         config.reclaim_enabled,
         initial_layout_synced,
         settings_sync::preferences(config),
+        &mut input_progress,
     );
+
+    // Snapshot before cleanup closes a still-live transport. Otherwise the
+    // locally induced shutdown would hide the state that caused recovery.
+    if !matches!(
+        &result,
+        Ok(ConnectionEnd::Stopped | ConnectionEnd::LayoutChanged)
+    ) {
+        let now = Instant::now();
+        eprintln!(
+            "Connection diagnostics: unix_ms={} session={session_id:016x} uptime_ms={} timeout_ms={} {} {}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            now.saturating_duration_since(clock).as_millis(),
+            config.session.peer_timeout_ms,
+            input_progress.summary("input", now),
+            network.diagnostic_summary(now),
+        );
+    }
 
     let effects = session.disconnect_peer(config.peer_node);
     drop(apply_effects(
@@ -723,6 +755,7 @@ fn run_loop(
     reclaim_enabled: bool,
     initial_layout_synced: &mut bool,
     active_preferences: crate::config::SessionPreferences,
+    input_progress: &mut LoopProgress,
 ) -> Result<ConnectionEnd, Box<dyn Error>> {
     let mut takeover = LocalTakeoverGesture::default();
     let mut display_sent = network.display_layout.clone();
@@ -753,6 +786,7 @@ fn run_loop(
         })?;
     }
     while !stopping.load(Ordering::Acquire) {
+        input_progress.poll(Instant::now());
         let now_ms = elapsed_ms(clock);
         if shared_reload.is_some_and(|started| started.elapsed() >= Duration::from_secs(1)) {
             return Ok(ConnectionEnd::LayoutChanged);
@@ -915,6 +949,7 @@ fn run_loop(
                     ..
                 }) => {
                     session.note_peer_activity(network.peer_node, now_ms);
+                    input_progress.heartbeat(Instant::now());
                     remote.note_heartbeat(remote_session, now_ms);
                 }
                 NetworkEvent::Message(WireMessage::Mouse {

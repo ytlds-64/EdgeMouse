@@ -1,3 +1,4 @@
+use crate::connection_diagnostics::NetworkProgress;
 use edgemouse_core::{NodeId, RemoteMouseEvent, RoutedEvent};
 use edgemouse_protocol::{ScreenInfo, WireMessage};
 use edgemouse_transport::{PeerConfig, PeerLink};
@@ -11,7 +12,7 @@ use tokio::sync::mpsc;
 
 const COMMAND_CAPACITY: usize = 1_024;
 const CONNECT_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
+pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
 const MOUSE_FLUSH_INTERVAL_FAST: Duration = Duration::from_millis(4);
 const METRICS_INTERVAL: Duration = Duration::from_secs(5);
 const ACTIVE_MOVEMENT_GAP_MAX: Duration = Duration::from_millis(100);
@@ -88,6 +89,8 @@ enum NetworkCommand {
 }
 
 pub struct Network {
+    progress: Arc<Mutex<NetworkProgress>>,
+    transport_diagnostics: edgemouse_transport::PeerDiagnostics,
     commands: mpsc::Sender<NetworkCommand>,
     events: std_mpsc::Receiver<NetworkEvent>,
     pending_move: Arc<Mutex<MoveCoalescer>>,
@@ -237,6 +240,8 @@ impl Network {
         let local_node = config.identity.node_id();
         let layout_path = config_path.to_owned();
         let clipboard_preferences = config_path.with_file_name("edgemouse-desktop.toml");
+        let progress = Arc::new(Mutex::new(NetworkProgress::default()));
+        let thread_progress = Arc::clone(&progress);
         let (commands_sender, commands_receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (event_sender, event_receiver) = std_mpsc::channel();
         let (startup_sender, startup_receiver) = std_mpsc::sync_channel(1);
@@ -306,6 +311,7 @@ impl Network {
                     let peer_screen = link.peer_screen().clone();
                     let settings_sync = link.supports_settings_sync();
                     let pointer_speed = link.supports_pointer_speed();
+                    let transport_diagnostics = link.diagnostics();
                     if startup_sender
                         .send(Ok((
                             peer_node,
@@ -314,6 +320,7 @@ impl Network {
                             settings_sync,
                             pointer_speed,
                             display_layout,
+                            transport_diagnostics,
                         )))
                         .is_err()
                     {
@@ -326,6 +333,7 @@ impl Network {
                         network_pending_move,
                         network_incoming_move,
                         session_id,
+                        thread_progress,
                     )
                     .await;
                 });
@@ -340,7 +348,10 @@ impl Network {
                 settings_sync,
                 pointer_speed,
                 display_layout,
+                transport_diagnostics,
             ))) => Ok(Self {
+                progress,
+                transport_diagnostics,
                 commands: commands_sender,
                 events: event_receiver,
                 pending_move,
@@ -382,6 +393,15 @@ impl Network {
             self.send_immediate(pending)?;
         }
         self.send_immediate(message)
+    }
+
+    pub(crate) fn diagnostic_summary(&self, now: Instant) -> String {
+        let progress = self
+            .progress
+            .lock()
+            .map(|progress| progress.summary(now))
+            .unwrap_or_else(|_| "network_trace=unavailable".to_owned());
+        format!("{progress} {}", self.transport_diagnostics.summary())
     }
 
     fn send_immediate(&self, message: WireMessage) -> Result<(), String> {
@@ -454,7 +474,9 @@ async fn run_network(
     pending_move: Arc<Mutex<MoveCoalescer>>,
     incoming_move: Arc<Mutex<IncomingMoveCoalescer>>,
     session_id: u64,
+    progress: Arc<Mutex<NetworkProgress>>,
 ) {
+    let transport_diagnostics = link.diagnostics();
     let (mut sender, mut receiver, datagrams) = link.split();
     let started = tokio::time::Instant::now();
     let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
@@ -473,9 +495,11 @@ async fn run_network(
     let mut rtt_jitter_ms = 0.0;
 
     loop {
+        record_progress(&progress, |progress, now| progress.receive.poll(now));
         tokio::select! {
             biased;
             _ = heartbeat.tick() => {
+                record_progress(&progress, |progress, now| progress.begin_send("heartbeat", now));
                 let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 if let Err(error) = sender.send(&WireMessage::Heartbeat {
                     session_id,
@@ -484,14 +508,17 @@ async fn run_network(
                     drop(events.send(NetworkEvent::Disconnected(error.to_string())));
                     break;
                 }
+                record_progress(&progress, NetworkProgress::finish_send);
             }
             command = commands.recv() => match command {
                 Some(NetworkCommand::Message(message)) => {
+                    record_progress(&progress, |progress, now| progress.begin_send("control", now));
                     let is_move = is_coalescible_move(&message);
                     if let Err(error) = sender.send(&message).await {
                         drop(events.send(NetworkEvent::Disconnected(error.to_string())));
                         break;
                     }
+                    record_progress(&progress, NetworkProgress::finish_send);
                     if let Some(sequence) = reliable_mouse_sequence(&message) {
                         last_reliable_sequence = sequence;
                     }
@@ -595,6 +622,17 @@ async fn run_network(
                     break;
                 }
                 Ok(message) => {
+                    let heartbeat_ms = match &message {
+                        WireMessage::Heartbeat { monotonic_ms, .. } => Some(*monotonic_ms),
+                        _ => None,
+                    };
+                    let received_counts = heartbeat_ms.map(|_| transport_diagnostics.received_counts());
+                    record_progress(&progress, |progress, now| {
+                        progress.message(heartbeat_ms, now);
+                        if let Some(counts) = received_counts {
+                            progress.transport_at_heartbeat = Some(counts);
+                        }
+                    });
                     if events.send(NetworkEvent::Message(message)).is_err() {
                         break;
                     }
@@ -606,6 +644,7 @@ async fn run_network(
             },
             message = datagrams.receive() => match message {
                 Ok(message @ WireMessage::MouseDatagram { .. }) => {
+                    record_progress(&progress, NetworkProgress::movement);
                     match incoming_move.lock() {
                         Ok(mut pending) => pending.push(message),
                         Err(_) => {
@@ -628,6 +667,15 @@ async fn run_network(
                 }
             }
         }
+    }
+}
+
+fn record_progress(
+    progress: &Mutex<NetworkProgress>,
+    update: impl FnOnce(&mut NetworkProgress, Instant),
+) {
+    if let Ok(mut progress) = progress.lock() {
+        update(&mut progress, Instant::now());
     }
 }
 

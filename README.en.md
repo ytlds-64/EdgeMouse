@@ -13,6 +13,13 @@ desktop application, signed installers, and in-app updates. It intentionally
 excludes relay servers and elevated Windows desktops. Version 0.6.13
 also includes optional text/image clipboard synchronization.
 
+## Version 0.6.17
+
+- Adds timestamped connection diagnostics for disconnections during active use.
+- Separates heartbeat receipt, input-loop processing and pending writes, with transport counters and complete underlying QUIC error causes.
+- Records timing and counter metadata only, without keyboard, clipboard or screen contents.
+- Heartbeat deadlines and local-input recovery behavior are unchanged. The intermittent disconnection is not yet confirmed fixed. Update both computers to 0.6.17 and export diagnostics from both shortly after the next occurrence.
+
 ## Version 0.6.16
 
 Local-only previews and new automatic arrangements now center the displays, placing a narrower lower Mac screen directly beneath the upper one. Dragging near another display midpoint snaps to the centerline; releasing saves and synchronizes the actual positions.
@@ -61,7 +68,7 @@ cannot trigger a receiver reclaim; outgoing Raw Input remains enabled. Pointer
 warps during handoffs also use marked injection. Reclaim logs include the
 triggering movement and receiver coordinates.
 
-The current stable release is 0.6.16. Future signed releases can also be checked
+The current stable release is 0.6.17. Future signed releases can also be checked
 and installed from the Settings page in the desktop application.
 
 macOS packages currently use ad-hoc signing, without Developer ID signing or

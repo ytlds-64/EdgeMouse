@@ -49,17 +49,15 @@ jobs:
           tagName: v__VERSION__
           releaseName: EdgeMouse __VERSION__
           releaseBody: |
-            EdgeMouse 0.6.16
+            EdgeMouse 0.6.17
 
-            - 单机预览和新“自动排列”改为居中，Mac 较窄的下屏位于上屏正下方。
-            - 拖动靠近另一块屏幕的中心线时自动吸附，松手自动保存并同步。
-            - 已保存布局继续保留；如果仍显示旧的侧边对齐布局，连接后点击“自动排列”即可使用居中排列。
-            - 穿越仍按实际接触的高亮边缘计算；需要双屏同时接到 Windows 同一侧时，可手动将对应侧边对齐。
-            - 修正停止测试的异步等待时序，不改变应用停止行为。
+            - 增强操作过程中突然断线的诊断，记录连接建立及异常结束的精确时间。
+            - 分别记录心跳接收、输入处理、发送等待与底层连接计数，保留完整 QUIC 错误原因。
+            - 只记录诊断元数据，不记录键盘输入、剪贴板或屏幕内容。
+            - 本次保持现有心跳超时与本机输入恢复行为；间歇断连尚未确认修复。
+            - 请 Mac 与 Windows 均更新至 0.6.17；再次中断后，尽快导出两端诊断包。
 
-            Local-only previews and new automatic arrangements center displays, placing the narrower lower Mac screen beneath the upper one. Dragging near a display midpoint snaps to the centerline and saves on release. Existing layouts remain intact; click Arrange automatically while connected to apply centered positions. Crossings still follow touching highlighted edges, and manually aligning side edges can connect both Mac screens to the same Windows edge. The stop regression test now waits for its asynchronous flag; application shutdown behavior is unchanged.
-
-            建议两台电脑均更新至 0.6.16。Update both computers to 0.6.16 for the same layout controls.
+            Adds timestamped diagnostics for disconnections during active use, including heartbeat receipt, input-loop processing, pending writes, connection counters and underlying QUIC error causes. Only timing, counter and error metadata are recorded. Heartbeat deadlines and input recovery behavior remain unchanged; the intermittent disconnection is not yet confirmed fixed. Update both computers to 0.6.17, then export diagnostics from both shortly after the next occurrence.
 
             注意：macOS 包继续使用临时签名，尚无 Developer ID 签名及 Apple 公证；更新后可能需要重新授予辅助功能权限。更新包签名验证与 macOS 应用身份签名是两回事。
 

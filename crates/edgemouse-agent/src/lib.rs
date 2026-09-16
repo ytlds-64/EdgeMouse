@@ -7,6 +7,7 @@
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub mod clipboard;
 pub mod config;
+mod connection_diagnostics;
 pub mod control;
 pub mod discovery;
 pub mod display_layout;

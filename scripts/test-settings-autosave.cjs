@@ -22,7 +22,7 @@ function installBackend(platform) {
   const initial = {
     preferences: { autostart: false, background: true, clipboardSync: true, notifications: false, theme: 'system', language: 'zh-CN', updateChannel: 'stable' },
     snapshot: {
-      desktopVersion: '0.6.16', agent: { running: true, connection: { state: 'connected', peerDesktop: platform === 'macos' ? winDesktop : macDesktop } },
+      desktopVersion: '0.6.17', agent: { running: true, connection: { state: 'connected', peerDesktop: platform === 'macos' ? winDesktop : macDesktop } },
       config: { valid: true, localName: platform === 'macos' ? 'Mac' : 'Windows', peerScreenName: 'Other computer', peerOn: platform === 'macos' ? 'left' : 'right',
         autoReconnect: true, entryHysteresis: 8, layoutSyncPending: false, displayLayout: { layout: null, pending: false },
         sharedSettings: { pending: false, values: [1, 8, 1, 0, 0, 52, 1, 1, 1, 0, 0, 52, 1, 1, 1, 100, 100] } },

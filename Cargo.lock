@@ -1099,7 +1099,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "edgemouse-agent"
-version = "0.6.16"
+version = "0.6.17"
 dependencies = [
  "arboard",
  "clipboard-win",
@@ -1122,11 +1122,11 @@ dependencies = [
 
 [[package]]
 name = "edgemouse-core"
-version = "0.6.16"
+version = "0.6.17"
 
 [[package]]
 name = "edgemouse-desktop"
-version = "0.6.16"
+version = "0.6.17"
 dependencies = [
  "edgemouse-agent",
  "edgemouse-core",
@@ -1146,28 +1146,28 @@ dependencies = [
 
 [[package]]
 name = "edgemouse-platform-macos"
-version = "0.6.16"
+version = "0.6.17"
 dependencies = [
  "edgemouse-core",
 ]
 
 [[package]]
 name = "edgemouse-platform-windows"
-version = "0.6.16"
+version = "0.6.17"
 dependencies = [
  "edgemouse-core",
 ]
 
 [[package]]
 name = "edgemouse-protocol"
-version = "0.6.16"
+version = "0.6.17"
 dependencies = [
  "edgemouse-core",
 ]
 
 [[package]]
 name = "edgemouse-transport"
-version = "0.6.16"
+version = "0.6.17"
 dependencies = [
  "edgemouse-core",
  "edgemouse-protocol",

@@ -240,6 +240,14 @@ impl PeerLink {
         self.peer_capabilities & edgemouse_protocol::display_layout::CAPABILITY_DISPLAY_LAYOUT != 0
     }
 
+    /// Read-only connection counters; these must never be used as proof that
+    /// the peer's input loop is responsive.
+    pub fn diagnostics(&self) -> PeerDiagnostics {
+        PeerDiagnostics {
+            connection: self.guard.connection.clone(),
+        }
+    }
+
     pub fn supports_pointer_speed(&self) -> bool {
         self.peer_capabilities & edgemouse_protocol::CAPABILITY_POINTER_SPEED != 0
     }
@@ -436,6 +444,33 @@ pub struct PeerReceiver {
     guard: Arc<LinkGuard>,
     receiver: RecvStream,
     read_state: FrameReadState,
+}
+
+pub struct PeerDiagnostics {
+    connection: Connection,
+}
+
+impl PeerDiagnostics {
+    pub fn received_counts(&self) -> (u64, u64) {
+        let stats = self.connection.stats();
+        (stats.udp_rx.datagrams, stats.frame_rx.acks)
+    }
+
+    pub fn summary(&self) -> String {
+        let stats = self.connection.stats();
+        format!(
+            "quic_rtt_ms={:.1} udp_tx={} udp_rx={} ack_rx={} lost_packets={} congestion_events={} quic_close={:?}",
+            stats.path.rtt.as_secs_f64() * 1_000.0,
+            stats.udp_tx.datagrams,
+            stats.udp_rx.datagrams,
+            stats.frame_rx.acks,
+            stats.path.lost_packets,
+            stats.path.congestion_events,
+            self.connection
+                .close_reason()
+                .map(|reason| reason.to_string()),
+        )
+    }
 }
 
 pub struct PeerDatagrams {
@@ -659,8 +694,10 @@ impl TransportError {
 impl Display for TransportError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.message)?;
-        if let Some(source) = &self.source {
-            write!(formatter, ": {source}")?;
+        let mut source = self.source();
+        while let Some(cause) = source {
+            write!(formatter, ": {cause}")?;
+            source = cause.source();
         }
         Ok(())
     }
@@ -678,6 +715,18 @@ impl Error for TransportError {
 mod tests {
     use super::*;
     use std::net::UdpSocket;
+
+    #[test]
+    fn connection_lost_errors_preserve_the_underlying_quic_reason() {
+        let error = TransportError::with_source(
+            "failed to read QUIC frame",
+            quinn::ReadError::ConnectionLost(quinn::ConnectionError::TimedOut),
+        );
+        assert_eq!(
+            error.to_string(),
+            "failed to read QUIC frame: connection lost: timed out"
+        );
+    }
 
     #[test]
     fn generated_identity_round_trips_and_has_stable_node_id() {
@@ -824,6 +873,9 @@ mod tests {
         first_link.send(&heartbeat).await.unwrap();
         assert_eq!(second_link.receive().await.unwrap(), heartbeat);
 
+        let first_diagnostics = first_link.diagnostics();
+        assert!(first_diagnostics.connection.stats().udp_rx.datagrams > 0);
+        assert!(first_diagnostics.summary().contains("quic_close=None"));
         let (first_sender, _, first_datagrams) = first_link.split();
         let (second_sender, _, second_datagrams) = second_link.split();
         let movement = WireMessage::MouseDatagram {
@@ -855,6 +907,7 @@ mod tests {
         assert!(skipped > 0);
 
         first_sender.close(b"test complete");
+        assert!(first_diagnostics.summary().contains("quic_close=Some("));
         second_sender.close(b"test complete");
     }
 
