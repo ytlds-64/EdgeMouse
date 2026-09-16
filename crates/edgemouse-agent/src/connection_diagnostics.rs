@@ -70,14 +70,18 @@ impl NetworkProgress {
     pub(crate) fn message(&mut self, heartbeat_ms: Option<u64>, now: Instant) {
         self.last_message = Some(now);
         if let Some(monotonic_ms) = heartbeat_ms {
-            if let Some(previous) = self.receive.last_heartbeat {
-                self.heartbeat_max_gap_ms = self
-                    .heartbeat_max_gap_ms
-                    .max(now.saturating_duration_since(previous).as_millis());
-            }
-            self.peer_monotonic_ms = Some(monotonic_ms);
-            self.receive.heartbeat(now);
+            self.heartbeat(monotonic_ms, now);
         }
+    }
+
+    pub(crate) fn heartbeat(&mut self, monotonic_ms: u64, now: Instant) {
+        if let Some(previous) = self.receive.last_heartbeat {
+            self.heartbeat_max_gap_ms = self
+                .heartbeat_max_gap_ms
+                .max(now.saturating_duration_since(previous).as_millis());
+        }
+        self.peer_monotonic_ms = Some(monotonic_ms);
+        self.receive.heartbeat(now);
     }
 
     pub(crate) fn movement(&mut self, now: Instant) {
@@ -106,6 +110,18 @@ impl NetworkProgress {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn datagram_heartbeat_does_not_hide_a_stalled_reliable_stream() {
+        let start = Instant::now();
+        let mut network = NetworkProgress::default();
+        network.message(None, start);
+        let now = start + Duration::from_millis(1600);
+        network.heartbeat(1750, now);
+        let summary = network.summary(now);
+        assert!(summary.contains("network_heartbeat_age_ms=0"));
+        assert!(summary.contains("reliable_rx_age_ms=1600"));
+    }
 
     #[test]
     fn fresh_movements_do_not_hide_a_stale_heartbeat_or_a_blocked_write() {

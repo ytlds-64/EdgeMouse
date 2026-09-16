@@ -13,6 +13,13 @@ desktop application, signed installers, and in-app updates. It intentionally
 excludes relay servers and elevated Windows desktops. Version 0.6.13
 also includes optional text/image clipboard synchronization.
 
+## Version 0.6.18
+
+- Fixes disconnects during active use when reliable-stream retransmission delays heartbeats despite continuing mouse traffic.
+- Updated peers exchange independent heartbeat datagrams every 250 ms, including when the movement queue is full; duplicate or late probes do not extend liveness.
+- Preserves the default 1.5 s recovery deadline and input release. Older peers retain the existing reliable heartbeat.
+- Update both Mac and Windows to 0.6.18 to enable the fix. A real network outage still triggers recovery; validation on the original physical computers and network remains pending.
+
 ## Version 0.6.17
 
 - Adds timestamped connection diagnostics for disconnections during active use.
@@ -68,7 +75,7 @@ cannot trigger a receiver reclaim; outgoing Raw Input remains enabled. Pointer
 warps during handoffs also use marked injection. Reclaim logs include the
 triggering movement and receiver coordinates.
 
-The current stable release is 0.6.17. Future signed releases can also be checked
+The current stable release is 0.6.18. Future signed releases can also be checked
 and installed from the Settings page in the desktop application.
 
 macOS packages currently use ad-hoc signing, without Developer ID signing or
@@ -140,7 +147,8 @@ across future updates.
 - Latest-position QUIC datagrams for movement, with reliable ordered delivery
   retained for clicks, scrolling, edge transitions, and final positions.
 - Versioned, bounded binary frames with strict untrusted-input validation.
-- 500 ms heartbeats, 1.5 s default timeout, local-pointer recovery, and forced
+- 250 ms independent heartbeats between updated peers (500 ms reliable heartbeats
+  for older peers), 1.5 s default timeout, local-pointer recovery, and forced
   synthetic-button release on disconnect.
 - Automatic reconnection after an established link is interrupted, with local
   mouse control kept available while the peer or network is offline.

@@ -12,7 +12,6 @@ use tokio::sync::mpsc;
 
 const COMMAND_CAPACITY: usize = 1_024;
 const CONNECT_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(50);
-pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
 const MOUSE_FLUSH_INTERVAL_FAST: Duration = Duration::from_millis(4);
 const METRICS_INTERVAL: Duration = Duration::from_secs(5);
 const ACTIVE_MOVEMENT_GAP_MAX: Duration = Duration::from_millis(100);
@@ -25,6 +24,51 @@ const INCOMING_MOVE_CAPACITY: usize = 1;
 #[cfg(target_os = "windows")]
 const WINDOWS_TIMER_PERIOD_MS: u32 = 1;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HeartbeatMode {
+    Reliable,
+    Datagram,
+}
+
+impl HeartbeatMode {
+    fn for_peer(link: &PeerLink) -> Self {
+        if link.supports_heartbeat_datagrams() {
+            Self::Datagram
+        } else {
+            Self::Reliable
+        }
+    }
+
+    pub(crate) fn interval(self) -> Duration {
+        // Six independent probes fit the existing 1.5 s recovery window. A lost
+        // probe does not block newer ones while reliable control is retransmitted.
+        Duration::from_millis(if self == Self::Datagram { 250 } else { 500 })
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Reliable => "reliable",
+            Self::Datagram => "datagram",
+        }
+    }
+}
+
+#[derive(Default)]
+struct HeartbeatTracker {
+    latest: Option<(u64, u64)>,
+}
+
+impl HeartbeatTracker {
+    fn accept(&mut self, session: u64, monotonic_ms: u64) -> bool {
+        if self.latest.is_some_and(|(previous_session, previous_ms)| {
+            session != previous_session || monotonic_ms <= previous_ms
+        }) {
+            return false;
+        }
+        self.latest = Some((session, monotonic_ms));
+        true
+    }
+}
 #[cfg(target_os = "windows")]
 #[link(name = "Winmm")]
 unsafe extern "system" {
@@ -96,6 +140,7 @@ pub struct Network {
     pending_move: Arc<Mutex<MoveCoalescer>>,
     incoming_move: Arc<Mutex<IncomingMoveCoalescer>>,
     thread: Option<JoinHandle<()>>,
+    pub(crate) heartbeat_mode: HeartbeatMode,
     pub peer_node: NodeId,
     pub peer_name: String,
     pub peer_screen: ScreenInfo,
@@ -312,6 +357,7 @@ impl Network {
                     let settings_sync = link.supports_settings_sync();
                     let pointer_speed = link.supports_pointer_speed();
                     let transport_diagnostics = link.diagnostics();
+                    let heartbeat_mode = HeartbeatMode::for_peer(&link);
                     if startup_sender
                         .send(Ok((
                             peer_node,
@@ -321,6 +367,7 @@ impl Network {
                             pointer_speed,
                             display_layout,
                             transport_diagnostics,
+                            heartbeat_mode,
                         )))
                         .is_err()
                     {
@@ -349,9 +396,11 @@ impl Network {
                 pointer_speed,
                 display_layout,
                 transport_diagnostics,
+                heartbeat_mode,
             ))) => Ok(Self {
                 progress,
                 transport_diagnostics,
+                heartbeat_mode,
                 commands: commands_sender,
                 events: event_receiver,
                 pending_move,
@@ -401,7 +450,11 @@ impl Network {
             .lock()
             .map(|progress| progress.summary(now))
             .unwrap_or_else(|_| "network_trace=unavailable".to_owned());
-        format!("{progress} {}", self.transport_diagnostics.summary())
+        format!(
+            "heartbeat_transport={} {progress} {}",
+            self.heartbeat_mode.name(),
+            self.transport_diagnostics.summary()
+        )
     }
 
     fn send_immediate(&self, message: WireMessage) -> Result<(), String> {
@@ -477,9 +530,11 @@ async fn run_network(
     progress: Arc<Mutex<NetworkProgress>>,
 ) {
     let transport_diagnostics = link.diagnostics();
+    let heartbeat_mode = HeartbeatMode::for_peer(&link);
+    let mut peer_heartbeats = HeartbeatTracker::default();
     let (mut sender, mut receiver, datagrams) = link.split();
     let started = tokio::time::Instant::now();
-    let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+    let mut heartbeat = tokio::time::interval(heartbeat_mode.interval());
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mouse_flush = tokio::time::sleep(MOUSE_FLUSH_INTERVAL_FAST);
     tokio::pin!(mouse_flush);
@@ -501,10 +556,14 @@ async fn run_network(
             _ = heartbeat.tick() => {
                 record_progress(&progress, |progress, now| progress.begin_send("heartbeat", now));
                 let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                if let Err(error) = sender.send(&WireMessage::Heartbeat {
-                    session_id,
-                    monotonic_ms: elapsed,
-                }).await {
+                let sent = match heartbeat_mode {
+                    HeartbeatMode::Datagram => datagrams.send_heartbeat(session_id, elapsed),
+                    HeartbeatMode::Reliable => sender.send(&WireMessage::Heartbeat {
+                        session_id,
+                        monotonic_ms: elapsed,
+                    }).await,
+                };
+                if let Err(error) = sent {
                     drop(events.send(NetworkEvent::Disconnected(error.to_string())));
                     break;
                 }
@@ -622,17 +681,17 @@ async fn run_network(
                     break;
                 }
                 Ok(message) => {
-                    let heartbeat_ms = match &message {
-                        WireMessage::Heartbeat { monotonic_ms, .. } => Some(*monotonic_ms),
-                        _ => None,
-                    };
-                    let received_counts = heartbeat_ms.map(|_| transport_diagnostics.received_counts());
-                    record_progress(&progress, |progress, now| {
-                        progress.message(heartbeat_ms, now);
-                        if let Some(counts) = received_counts {
-                            progress.transport_at_heartbeat = Some(counts);
+                    record_progress(&progress, |progress, now| progress.message(None, now));
+                    if let WireMessage::Heartbeat { session_id, monotonic_ms } = &message {
+                        if !peer_heartbeats.accept(*session_id, *monotonic_ms) {
+                            continue;
                         }
-                    });
+                        let counts = transport_diagnostics.received_counts();
+                        record_progress(&progress, |progress, now| {
+                            progress.heartbeat(*monotonic_ms, now);
+                            progress.transport_at_heartbeat = Some(counts);
+                        });
+                    }
                     if events.send(NetworkEvent::Message(message)).is_err() {
                         break;
                     }
@@ -643,6 +702,20 @@ async fn run_network(
                 }
             },
             message = datagrams.receive() => match message {
+                Ok(message @ WireMessage::Heartbeat { session_id, monotonic_ms })
+                    if heartbeat_mode == HeartbeatMode::Datagram => {
+                    if !peer_heartbeats.accept(session_id, monotonic_ms) {
+                        continue;
+                    }
+                    let counts = transport_diagnostics.received_counts();
+                    record_progress(&progress, |progress, now| {
+                        progress.heartbeat(monotonic_ms, now);
+                        progress.transport_at_heartbeat = Some(counts);
+                    });
+                    if events.send(NetworkEvent::Message(message)).is_err() {
+                        break;
+                    }
+                }
                 Ok(message @ WireMessage::MouseDatagram { .. }) => {
                     record_progress(&progress, NetworkProgress::movement);
                     match incoming_move.lock() {
@@ -657,7 +730,7 @@ async fn run_network(
                 }
                 Ok(_) => {
                     drop(events.send(NetworkEvent::Disconnected(
-                        "peer sent a non-movement QUIC datagram".to_owned(),
+                        "peer sent an unsupported QUIC datagram".to_owned(),
                     )));
                     break;
                 }
@@ -750,6 +823,136 @@ fn is_coalescible_move(message: &WireMessage) -> bool {
 mod tests {
     use super::*;
     use edgemouse_core::{Point, RoutedEvent, ScreenId};
+
+    #[test]
+    fn delayed_duplicate_or_foreign_heartbeats_cannot_refresh_liveness() {
+        let mut tracker = HeartbeatTracker::default();
+        assert!(tracker.accept(7, 0));
+        assert!(tracker.accept(7, 750)); // Intermediate probes may be lost.
+        assert!(!tracker.accept(7, 500)); // Reordered datagram / delayed stream.
+        assert!(!tracker.accept(7, 750));
+        assert!(!tracker.accept(8, 1000));
+        assert!(tracker.accept(7, 1000));
+    }
+
+    #[tokio::test]
+    async fn network_delivers_negotiated_heartbeat_datagrams_to_input_loop() {
+        use edgemouse_transport::{Identity, TrustedPeer};
+        let first = Identity::generate().unwrap();
+        let second = Identity::generate().unwrap();
+        // Reserve distinct addresses before releasing them for Quinn.
+        let first_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let second_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let first_address = first_socket.local_addr().unwrap();
+        let second_address = second_socket.local_addr().unwrap();
+        drop((first_socket, second_socket));
+        let first_config = PeerConfig {
+            bind_address: first_address,
+            peer_address: second_address,
+            local_name: "first".into(),
+            identity: Identity::from_der(first.certificate.clone(), first.private_key).unwrap(),
+            peer: TrustedPeer::from_der(second.certificate.clone()).unwrap(),
+            connect_timeout: Duration::from_secs(5),
+        };
+        let second_config = PeerConfig {
+            bind_address: second_address,
+            peer_address: first_address,
+            local_name: "second".into(),
+            identity: Identity::from_der(second.certificate, second.private_key).unwrap(),
+            peer: TrustedPeer::from_der(first.certificate).unwrap(),
+            connect_timeout: Duration::from_secs(5),
+        };
+        let screen = ScreenInfo {
+            id: ScreenId(1),
+            name: "test".into(),
+            bounds: edgemouse_core::Rect::new(Point::new(0.0, 0.0), 1920.0, 1080.0).unwrap(),
+            scale_factor: 1.0,
+            displays: Vec::new(),
+        };
+        let (first, second) = tokio::join!(
+            PeerLink::connect(first_config, screen.clone()),
+            PeerLink::connect(second_config, screen)
+        );
+        let first = first.unwrap();
+        assert_eq!(HeartbeatMode::for_peer(&first), HeartbeatMode::Datagram);
+        let (mut sender, mut receiver, datagrams) = second.unwrap().split();
+        let (commands, command_rx) = mpsc::channel(8);
+        let (events, event_rx) = std_mpsc::channel();
+        let progress = Arc::new(Mutex::new(NetworkProgress::default()));
+        let task = tokio::spawn(run_network(
+            first,
+            command_rx,
+            events,
+            Arc::new(Mutex::new(MoveCoalescer::default())),
+            Arc::new(Mutex::new(IncomingMoveCoalescer::default())),
+            7,
+            Arc::clone(&progress),
+        ));
+        let sent = tokio::time::timeout(Duration::from_secs(2), datagrams.receive())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(sent, WireMessage::Heartbeat { session_id: 7, .. }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), receiver.receive())
+                .await
+                .is_err()
+        );
+
+        datagrams.send_heartbeat(8, 750).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(NetworkEvent::Message(message)) = event_rx.try_recv() {
+                    assert_eq!(
+                        message,
+                        WireMessage::Heartbeat {
+                            session_id: 8,
+                            monotonic_ms: 750
+                        }
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // A late heartbeat in the ordered stream must not count as fresh.
+        sender
+            .send(&WireMessage::Heartbeat {
+                session_id: 8,
+                monotonic_ms: 500,
+            })
+            .await
+            .unwrap();
+        sender
+            .send(&WireMessage::SettingsUpdateAck { request_id: 11 })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(NetworkEvent::Message(message)) = event_rx.try_recv() {
+                    assert_eq!(message, WireMessage::SettingsUpdateAck { request_id: 11 });
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            progress
+                .lock()
+                .unwrap()
+                .summary(Instant::now())
+                .contains("network_heartbeats=1 ")
+        );
+        commands.send(NetworkCommand::Shutdown).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     fn movement(sequence: u64, x: f64) -> WireMessage {
         WireMessage::Mouse {

@@ -104,16 +104,27 @@ ALPN `edgemouse/6`. After TLS, both sides exchange and validate a protocol
 `Hello`, including the sender's current screen ID, desktop bounds, orientation,
 and scale. Each side builds the two-node topology from its freshly detected local
 desktop and the authenticated peer announcement rather than duplicating remote
-geometry in TOML. Enter/leave, buttons, wheels, final positions, releases, and heartbeats
+geometry in TOML. Enter/leave, buttons, wheels, final positions, and releases
 use one reliable bidirectional stream. Ordinary absolute movement uses QUIC
 Datagram frames, which are encrypted and authenticated but intentionally
 unreliable and unordered. Each movement carries a reliable-event watermark, so
 the receiver cannot apply movement after a click until that click has been
 processed. Sequence numbers reject late datagrams, and latest-value receive
-coalescing prevents application-level backlog. A heartbeat is sent every 500 ms.
+coalescing prevents application-level backlog.
 The receive slot compares event sequence numbers rather than packet arrival
 order, so a delayed older datagram cannot overwrite a newer position when the
 pointer reverses direction.
+
+Peers advertising `CAPABILITY_HEARTBEAT_DATAGRAM` (bit 6 of the protocol v7
+capabilities) send authenticated heartbeat datagrams every 250 ms. Missing bytes
+in the reliable control stream cannot hold up newer heartbeats. A fresh heartbeat
+can replace an older unsent movement datagram when the send buffer is full;
+ordinary movement still skips a full buffer. Only increasing heartbeat timestamps
+within the same connection session refresh liveness, so reordered or duplicate
+probes cannot extend the deadline. The default 1.5-second recovery deadline is
+unchanged. Connections to peers without this capability retain the 500 ms reliable
+heartbeat. Transport ACKs alone never refresh application liveness. Diagnostics
+identify the negotiated mode and keep reliable-message and heartbeat ages separate.
 
 While incoming remote control is active, the receiver still observes its own
 physical mouse for a deliberate push toward the configured peer edge. That

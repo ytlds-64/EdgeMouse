@@ -22,6 +22,8 @@ pub const MAX_FRAME_LEN: usize = 64 * 1024;
 pub const MAX_DISPLAY_COUNT: usize = 32;
 pub const CAPABILITY_SETTINGS_SYNC: u32 = 1 << 2;
 pub const CAPABILITY_POINTER_SPEED: u32 = 1 << 3;
+/// Heartbeats may use QUIC datagrams only after both peers advertise this bit.
+pub const CAPABILITY_HEARTBEAT_DATAGRAM: u32 = 1 << 6;
 pub const LEGACY_SETTINGS_COUNT: usize = 15;
 pub const SETTINGS_COUNT: usize = 17;
 pub const MOUSE_DATAGRAM_FRAME_LEN: usize = HEADER_LEN + 6 * std::mem::size_of::<u64>();

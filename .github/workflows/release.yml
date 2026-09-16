@@ -49,15 +49,14 @@ jobs:
           tagName: v__VERSION__
           releaseName: EdgeMouse __VERSION__
           releaseBody: |
-            EdgeMouse 0.6.17
+            EdgeMouse 0.6.18
 
-            - 增强操作过程中突然断线的诊断，记录连接建立及异常结束的精确时间。
-            - 分别记录心跳接收、输入处理、发送等待与底层连接计数，保留完整 QUIC 错误原因。
-            - 只记录诊断元数据，不记录键盘输入、剪贴板或屏幕内容。
-            - 本次保持现有心跳超时与本机输入恢复行为；间歇断连尚未确认修复。
-            - 请 Mac 与 Windows 均更新至 0.6.17；再次中断后，尽快导出两端诊断包。
+            - 修复网络丢包后，可靠控制通道等待重传拖延心跳，导致操作中被主动断开的问题。
+            - 两端均为新版时，每 250 ms 独立发送心跳；移动队列满时仍可发送，重复或迟到的心跳不会延长失联判断。
+            - 保留默认 1.5 秒失联保护、按键释放与旧版连接兼容。
+            - 请 Mac 与 Windows 均更新至 0.6.18。真实网络中断仍会触发保护，原网络中的双机效果需更新后验证。
 
-            Adds timestamped diagnostics for disconnections during active use, including heartbeat receipt, input-loop processing, pending writes, connection counters and underlying QUIC error causes. Only timing, counter and error metadata are recorded. Heartbeat deadlines and input recovery behavior remain unchanged; the intermittent disconnection is not yet confirmed fixed. Update both computers to 0.6.17, then export diagnostics from both shortly after the next occurrence.
+            Fixes active-use disconnects caused by reliable-stream retransmission delaying heartbeats. Updated peers exchange independent heartbeat datagrams every 250 ms, even when the movement queue is full, and ignore duplicate or late probes. The default 1.5 s recovery deadline, input release and legacy connections are preserved. Update both Mac and Windows to 0.6.18 to enable the fix. Real network outages still trigger recovery; verification on the original physical computers and network remains pending.
 
             注意：macOS 包继续使用临时签名，尚无 Developer ID 签名及 Apple 公证；更新后可能需要重新授予辅助功能权限。更新包签名验证与 macOS 应用身份签名是两回事。
 

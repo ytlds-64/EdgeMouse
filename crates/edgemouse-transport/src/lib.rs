@@ -248,6 +248,10 @@ impl PeerLink {
         }
     }
 
+    pub fn supports_heartbeat_datagrams(&self) -> bool {
+        self.peer_capabilities & edgemouse_protocol::CAPABILITY_HEARTBEAT_DATAGRAM != 0
+    }
+
     pub fn supports_pointer_speed(&self) -> bool {
         self.peer_capabilities & edgemouse_protocol::CAPABILITY_POINTER_SPEED != 0
     }
@@ -305,6 +309,7 @@ impl PeerLink {
             capabilities: REQUIRED_CAPABILITIES
                 | edgemouse_protocol::CAPABILITY_SETTINGS_SYNC
                 | edgemouse_protocol::CAPABILITY_POINTER_SPEED
+                | edgemouse_protocol::CAPABILITY_HEARTBEAT_DATAGRAM
                 | edgemouse_protocol::display_layout::CAPABILITY_DISPLAY_LAYOUT
                 | edgemouse_protocol::clipboard::CAPABILITY_CLIPBOARD,
             screen: local_screen,
@@ -478,6 +483,23 @@ pub struct PeerDatagrams {
 }
 
 impl PeerDatagrams {
+    /// A fresh liveness probe must not wait behind an ordered stream or a full
+    /// movement queue. Quinn may evict an older, unsent datagram to make room.
+    /// Call only when the peer advertised CAPABILITY_HEARTBEAT_DATAGRAM.
+    pub fn send_heartbeat(&self, session_id: u64, monotonic_ms: u64) -> Result<(), TransportError> {
+        let frame = encode_frame(&WireMessage::Heartbeat {
+            session_id,
+            monotonic_ms,
+        })
+        .map_err(|error| TransportError::with_source("failed to encode heartbeat", error))?;
+        self.guard
+            .connection
+            .send_datagram(frame.into())
+            .map_err(|error| {
+                TransportError::with_source("failed to send heartbeat datagram", error)
+            })
+    }
+
     /// Queues the newest movement only when Quinn has room without evicting an older datagram.
     ///
     /// `Ok(false)` means the caller should discard this stale position and try again with the
@@ -804,6 +826,11 @@ mod tests {
             "legacy settings remain available"
         );
         first_link.peer_capabilities = current_capabilities;
+        assert!(first_link.supports_heartbeat_datagrams());
+        assert!(second_link.supports_heartbeat_datagrams());
+        first_link.peer_capabilities &= !edgemouse_protocol::CAPABILITY_HEARTBEAT_DATAGRAM;
+        assert!(!first_link.supports_heartbeat_datagrams());
+        first_link.peer_capabilities = current_capabilities;
         // A blocked bulk stream must not prevent control traffic. With no
         // clipboard reader yet, this exceeds the stream flow-control window.
         use edgemouse_protocol::clipboard::{ClipboardContent, ClipboardPacket};
@@ -906,6 +933,24 @@ mod tests {
         }
         assert!(skipped > 0);
 
+        // Heartbeats still enter a full movement queue. This also exercises the
+        // drop-oldest path in the pinned Quinn version.
+        first_datagrams.send_heartbeat(42, 999).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if second_datagrams.receive().await.unwrap()
+                    == (WireMessage::Heartbeat {
+                        session_id: 42,
+                        monotonic_ms: 999,
+                    })
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("full movement queue starved the heartbeat");
+
         first_sender.close(b"test complete");
         assert!(first_diagnostics.summary().contains("quic_close=Some("));
         second_sender.close(b"test complete");
@@ -947,6 +992,33 @@ mod tests {
         let frame = encode_frame(&heartbeat).unwrap();
 
         first_link.sender.write_all(&frame[..5]).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), second_link.receive())
+                .await
+                .is_err()
+        );
+        // Hold the reliable frame incomplete, as happens while missing stream
+        // bytes await retransmission. Fresh liveness must bypass that gap.
+        let first_datagrams = PeerDatagrams {
+            guard: Arc::clone(&first_link.guard),
+        };
+        let second_datagrams = PeerDatagrams {
+            guard: Arc::clone(&second_link.guard),
+        };
+        for monotonic_ms in [250, 500, 750] {
+            first_datagrams.send_heartbeat(42, monotonic_ms).unwrap();
+            let received = tokio::time::timeout(Duration::from_secs(1), second_datagrams.receive())
+                .await
+                .expect("heartbeat waited for missing reliable bytes")
+                .unwrap();
+            assert_eq!(
+                received,
+                WireMessage::Heartbeat {
+                    session_id: 42,
+                    monotonic_ms
+                }
+            );
+        }
         assert!(
             tokio::time::timeout(Duration::from_millis(20), second_link.receive())
                 .await

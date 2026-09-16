@@ -578,12 +578,13 @@ fn run_connected(
     let clock = Instant::now();
     let mut input_progress = LoopProgress::default();
     println!(
-        "Connection active: unix_ms={} session={session_id:016x} heartbeat_interval_ms={} timeout_ms={}",
+        "Connection active: unix_ms={} session={session_id:016x} heartbeat_transport={} heartbeat_interval_ms={} timeout_ms={}",
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis(),
-        crate::network::HEARTBEAT_INTERVAL.as_millis(),
+        network.heartbeat_mode.name(),
+        network.heartbeat_mode.interval().as_millis(),
         config.session.peer_timeout_ms,
     );
 
